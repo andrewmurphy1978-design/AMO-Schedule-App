@@ -2,6 +2,9 @@
   "name": "amo-schedule-app",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // Custom domain: wrangler creates the DNS record and certificate on deploy,
+  // because andrewmurphy.online is a zone in this Cloudflare account.
+  "routes": [{ "pattern": "mikes.andrewmurphy.online", "custom_domain": true }],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

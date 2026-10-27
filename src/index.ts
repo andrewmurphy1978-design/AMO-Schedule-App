@@ -1,8 +1,20 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { fetchAccessKeys, verifyAccessJwt } from "./access.ts";
 import { findOverlaps, SHIFT_TIME_RE } from "./conflicts.ts";
 import { weekBounds } from "./week.ts";
 
-type Env = { DB: D1Database; ASSETS: Fetcher; DEV_USER_EMAIL?: string };
+type Env = {
+  DB: D1Database;
+  ASSETS: Fetcher;
+  // Production: Cloudflare Access team domain (e.g. "myteam.cloudflareaccess.com") and application AUD tag.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  // Email of the first admin; created automatically on first login if no such staff row exists.
+  ADMIN_EMAIL?: string;
+  // Local development ONLY (set in .dev.vars, never in production).
+  DEV_MODE?: string;
+  DEV_USER_EMAIL?: string;
+};
 
 interface Me {
   id: number;
@@ -16,16 +28,34 @@ type Vars = { me: Me };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 // ---------- Auth ----------
-// In production the app sits behind Cloudflare Access, which sets this header
-// after login. DEV_USER_EMAIL (local .dev.vars only) lets us test without it.
+// Production identity comes from the signed Cloudflare Access JWT. If Access is not configured
+// the API refuses every request (fail closed) rather than trusting a forgeable header.
+async function identify(c: Context<any>): Promise<string | null> {
+  if (c.env.DEV_MODE === "true") {
+    return (c.req.header("X-Dev-User") ?? c.env.DEV_USER_EMAIL ?? "").toLowerCase() || null;
+  }
+  const { ACCESS_TEAM_DOMAIN: team, ACCESS_AUD: aud } = c.env;
+  const token = c.req.header("Cf-Access-Jwt-Assertion");
+  if (!team || !aud || !token) return null;
+  try {
+    return await verifyAccessJwt(token, { keys: await fetchAccessKeys(team), aud, issuer: `https://${team}` });
+  } catch {
+    return null;
+  }
+}
+
 app.use("/api/*", async (c, next) => {
-  const email = (
-    c.req.header("Cf-Access-Authenticated-User-Email") ?? c.env.DEV_USER_EMAIL ?? ""
-  ).toLowerCase();
+  const email = await identify(c);
   if (!email) return c.json({ error: "unauthenticated" }, 401);
-  const row = await c.env.DB.prepare("SELECT id, name, email, is_admin FROM staff WHERE lower(email) = ?")
+  let row = await c.env.DB.prepare("SELECT id, name, email, is_admin FROM staff WHERE lower(email) = ?")
     .bind(email)
     .first<{ id: number; name: string; email: string; is_admin: number }>();
+  if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
+    const r = await c.env.DB.prepare("INSERT INTO staff (name, email, is_admin) VALUES (?, ?, 1)")
+      .bind(email.split("@")[0], email)
+      .run();
+    row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1 };
+  }
   if (!row) return c.json({ error: "unknown_user" }, 403);
   c.set("me", { ...row, is_admin: row.is_admin === 1 });
   await next();
