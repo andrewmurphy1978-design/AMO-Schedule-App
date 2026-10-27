@@ -200,6 +200,17 @@ function weekTimeOffPanel(data) {
 const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])].map((r) => ({ ...r, sex: s.sex }));
 const shiftRoleLabel = (s) => shiftRoles(s).map((r) => roleName(r)).join(" + ");
 const shiftRoleIcons = (s) => shiftRoles(s).map(roleIcon).join("");
+// Overlapping shifts of the same person (here or at another restaurant/department) are shown in red.
+function conflictSets(data) {
+  const byPerson = new Map();
+  const add = (kind, key, x) => { if (x.status && x.status !== "ok") return; const l = byPerson.get(x.staff_id) ?? []; l.push({ kind, key, a: x.start_at, b: x.end_at }); byPerson.set(x.staff_id, l); };
+  for (const x of data.shifts) add("shift", x.id, x);
+  (data.elsewhere ?? []).forEach((x, i) => add("else", i, x));
+  const shifts = new Set(), elsewhere = new Set();
+  for (const list of byPerson.values())
+    for (const x of list) if (list.some((y) => y !== x && x.a < y.b && y.a < x.b)) (x.kind === "shift" ? shifts : elsewhere).add(x.key);
+  return { shifts, elsewhere };
+}
 const nowLocal = () => { const d = new Date(); return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 // Open replacement requests (managers/admins): who was asked, assign by hand, cancel.
@@ -304,6 +315,7 @@ async function renderSchedule() {
     api(`/target-sets?restaurant=${sel.restaurant}`),
     payrollReq,
   ]);
+  data.conflicts = conflictSets(data);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i));
   if (state.zoomDay && !days.includes(state.zoomDay)) state.zoomDay = null;
   if (!days.includes(sel.day)) sel.day = days.includes(ymd(new Date())) ? ymd(new Date()) : days[0];
@@ -361,7 +373,7 @@ async function renderSchedule() {
             h("span", { class: "meta" }, [`${shiftRoleIcons(s)} ${shiftRoleLabel(s)}`, s.notes].filter(Boolean).join(" · ")),
             sickDay ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
             s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
-          const cls = `card ${sickDay ? "sick" : ""}`;
+          const cls = `card ${sickDay ? "sick" : ""} ${data.conflicts.shifts.has(s.id) ? "conflict" : ""}`;
           return data.editable ? h("button", { class: cls, type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: cls }, card);
         }))
       : h("div", { class: "empty" }, t("noShifts")),
@@ -443,11 +455,11 @@ async function renderSchedule() {
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
-            const cls = `shift-chip ${sick ? "sick" : ""}`;
+            const cls = `shift-chip ${sick ? "sick" : ""} ${data.conflicts.shifts.has(s.id) ? "conflict" : ""}`;
             return data.editable ? h("button", { class: cls, type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: cls, style }, body);
           }),
           // Working somewhere else the same day: shown in grey so you don't double-book by mistake.
-          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: `${t("elsewhere")}: ${hhmm(e.start_at)}–${hhmm(e.end_at)} ${place(e)}` },
+          (data.elsewhere ?? []).map((e, i) => [e, i]).filter(([e]) => e.staff_id === id && dayOf(e.start_at) === d).map(([e, i]) => h("div", { class: `elsewhere ${data.conflicts.elsewhere.has(i) ? "conflict" : ""}`, title: `${data.conflicts.elsewhere.has(i) ? `⚠ ${t("conflictWord")} · ` : ""}${t("elsewhere")}: ${hhmm(e.start_at)}–${hhmm(e.end_at)} ${place(e)}` },
             // on screen: times and place; on paper: just the short restaurant name and the role icon ("St-Sauveur 🚗")
             h("span", { class: "screen-only" }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`),
             h("span", { class: "print-only" }, `${e.restaurant_id === sel.restaurant ? t(`dept.${e.department_id}`) : shortResto(e.restaurant)} ${roleIcon(e)}`))),
@@ -569,7 +581,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const color = staffColor(x.s.staff_id, x.s.staff_color);
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
-        class: `vtl-bar ${wide ? "" : "vertical"} ${x.s.status === "sick_open" ? "sick" : ""}`,
+        class: `vtl-bar ${wide ? "" : "vertical"} ${x.s.status === "sick_open" ? "sick" : ""} ${data.conflicts?.shifts.has(x.s.id) ? "conflict" : ""}`,
         title: `${shiftRoleIcons(x.s)} ${x.s.staff_name} · ${range} · ${shiftRoleLabel(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };

@@ -482,3 +482,10 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
   .grid .th-zoom { text-decoration: none !important; border: 0; }
 }
 @media print { .print-date { font-weight: 700; color: #1f1f23; display: inline !important; } }
+
+/* overlapping shifts of the same person: red */
+.shift-chip.conflict, .card.conflict { background: #fde2e0 !important; border-color: #d92d20 !important; border-left-color: #d92d20 !important; color: #8a1009; box-shadow: 0 0 0 2px #d92d20 inset; }
+.elsewhere.conflict { background: #fde2e0 !important; border: 2px solid #d92d20 !important; color: #8a1009 !important; }
+.shift-chip.conflict::before, .elsewhere.conflict::before { content: "⚠ "; }
+.vtl-bar.conflict { outline: 3px solid #d92d20; outline-offset: -3px; background: repeating-linear-gradient(135deg, #d92d20 0 8px, #8a1009 8px 16px) !important; color: #fff !important; }
+@media print { .shift-chip.conflict, .elsewhere.conflict { background: #fde2e0 !important; border: 2px solid #d92d20 !important; } }
