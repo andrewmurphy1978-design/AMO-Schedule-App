@@ -15,11 +15,22 @@ export const contrast = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) 
 
 
 /**
- * Automatic colour: golden-angle hues keep consecutive ids far apart on the colour wheel, and the lightness
- * is lowered until white text on it has a contrast of at least 4.6 (so every automatic colour is readable).
+ * Automatic colours come first from a hand-picked palette that mixes hue AND lightness (dark, vivid and light
+ * colours) and is ordered so that consecutive ids are far apart on the colour wheel. Beyond the palette,
+ * golden-angle hues are used, lightness alternating, always readable with white or dark text.
  */
+export const PALETTE = [
+  "#c92a2a", "#1971c2", "#237a35", "#9c36b5", "#e8590c", "#0b7285", "#c2255c", "#5f3dc4",
+  "#ffd43b", "#364fc7", "#69db7c", "#7f4f24", "#66d9e8", "#a61e4d", "#527f0b", "#da77f2",
+  "#087f5b", "#ffa8a8", "#862e9c", "#74c0fc", "#8f6a00", "#495057",
+];
 export function defaultColor(id) {
-  const hue = (id * 137.508) % 360;
+  if (id >= 1 && id <= PALETTE.length) return PALETTE[id - 1];
+  const n = id - PALETTE.length;
+  const hue = (n * 137.508 + 20) % 360;
+  if (n % 2 === 0) { // light variant (dark text)
+    return hslToHex(hue, 70, 72);
+  }
   for (let l = 42; l >= 20; l--) {
     const hex = hslToHex(hue, 62, l);
     if (contrast(hex, "#ffffff") >= 4.6) return hex;
@@ -32,4 +43,4 @@ export const staffColor = (id, color) => color || defaultColor(id);
 export const textOn = (hex) => (contrast(hex, "#ffffff") >= contrast(hex, "#1f1f23") ? "#ffffff" : "#1f1f23");
 
 /** Swatches offered in Administration. */
-export const SWATCHES = ["#c8102e", "#d9480f", "#e67700", "#b58900", "#5c940d", "#2b8a3e", "#0b7285", "#1971c2", "#3b5bdb", "#6741d9", "#9c36b5", "#c2255c", "#495057", "#6d4c41"];
+export const SWATCHES = [...PALETTE, "#c8102e", "#c2410c", "#e67700", "#b58900", "#527f0b", "#237a35", "#0b7285", "#1971c2", "#3b5bdb", "#6741d9", "#9c36b5", "#c2255c", "#495057", "#6d4c41"].filter((c, i, all) => all.indexOf(c) === i);
