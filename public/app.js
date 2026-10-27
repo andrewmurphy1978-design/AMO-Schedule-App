@@ -714,6 +714,44 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 
 // ---------- my shifts ----------
 // ---------- time off ----------
+// Time off of one employee, inside the employee dialog: list with approve / decline / withdraw, and a quick "add leave".
+function staffTimeOff(person) {
+  const box = h("div", {});
+  async function load() {
+    const rows = await api(`/time-off/staff/${person.id}`);
+    const today = ymd(new Date());
+    const from = h("input", { type: "date", value: today }), to = h("input", { type: "date", value: today });
+    const allDay = h("input", { type: "checkbox", checked: true });
+    const ts = timeField("14:00"), te = timeField("21:00");
+    const timeBox = h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), ts), h("label", { class: "field" }, h("span", {}, t("end")), te));
+    allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
+    const label = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
+    const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short", year: "numeric" })}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
+    const act = async (fn) => { try { await fn(); load(); } catch (e) { toast(errorText(e)); } };
+    box.replaceChildren(
+      rows.length ? rows.map((r) => h("div", { class: "cov-row" },
+        h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
+        h("div", { class: "meta" }, `${label[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`),
+        h("div", { class: "actions" },
+          r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, t("approve")) : null,
+          r.status !== "denied" ? h("button", { class: "btn", type: "button", onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, t("deny")) : null,
+          h("button", { class: "btn danger", type: "button", onClick: () => { if (confirm(t("confirmCancelOff"))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, t("delete")))))
+        : h("p", { class: "meta" }, t("noTimeOff")),
+      h("h4", {}, t("addLeaveFor")),
+      h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
+        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to)),
+        h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))), timeBox,
+        h("button", { class: "btn primary", type: "button", onClick: () => act(async () => {
+          const body = { staff_id: person.id, start_date: from.value, end_date: to.value || from.value };
+          if (!allDay.checked) { body.start_time = ts.value; body.end_time = te.value; }
+          try { await api("/time-off", { method: "POST", body }); toast(t("saved")); }
+          catch (e) { toast(e.body?.error === "already_requested" ? t("alreadyRequested") : errorText(e)); throw e; }
+        }) }, t("add"))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // Weekly fixed day(s) off and recurring unavailable times (school, other job…), for one employee.
 function availabilityEditor(staffId) {
   const box = h("div", { class: "availability" });
@@ -1642,12 +1680,30 @@ function staffCard(s, ov) {
   const open = () => {
     let dlg = document.getElementById("staff-modal");
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
+    // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
+    const tabs = [["details", t("details")], ["roles", t("rolesTab")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")]];
+    let tab = "details";
+    const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
+    const tabBar = h("div", { class: "dlg-tabs", role: "tablist" });
+    const content = h("div", { class: "dlg-content" });
+    const panes = {
+      details: () => [details],
+      roles: () => [blocks],
+      availability: () => [availabilityEditor(s.id)],
+      timeoff: () => [staffTimeOff(s)],
+    };
+    const draw = () => {
+      saveBtn.hidden = tab !== "details";
+      tabBar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label)));
+      content.replaceChildren(...panes[tab]());
+    };
     dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
-      // Sticky header: Save submits the details form below (form= attribute), Close just closes.
-      h("div", { class: "dlg-head" }, h("h2", {}, s.name),
-        h("div", { class: "dlg-actions" }, h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save")), h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))),
-      h("h3", {}, t("details")), details, h("h3", {}, t("assignments")), blocks,
-      h("h3", {}, t("availability")), availabilityEditor(s.id)));
+      // Sticky header: Save submits the details form (form= attribute), Close just closes.
+      h("div", { class: "dlg-top" },
+        h("div", { class: "dlg-head" }, h("h2", {}, s.name), h("div", { class: "dlg-actions" }, saveBtn, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))),
+        tabBar),
+      content));
+    draw();
     dlg.addEventListener("close", () => { nameEl.textContent = name.value || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };

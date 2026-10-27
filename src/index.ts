@@ -766,6 +766,25 @@ app.post("/api/time-off/:id/cancel", async (c) => {
 });
 
 // Requests the caller may decide on: still waiting, plus the recently decided ones (so a decision can be changed).
+// Everything requested by one employee (for the employee dialog): admin, or a manager of that employee.
+app.get("/api/time-off/staff/:id", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await canDecideFor(c.env.DB, c.get("me"), id))) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare("SELECT id, start_date, end_date, start_time, end_time, note, status, decision_note FROM time_off_requests WHERE staff_id = ? AND status != 'cancelled' AND end_date >= date('now','-30 day') ORDER BY start_date DESC LIMIT 100").bind(id).all();
+  return c.json(r.results);
+});
+
+// A manager or admin can withdraw a leave they or the employee entered.
+app.post("/api/time-off/:id/withdraw", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const row = id ? await c.env.DB.prepare("SELECT staff_id FROM time_off_requests WHERE id = ?").bind(id).first<{ staff_id: number }>() : null;
+  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!(await canDecideFor(c.env.DB, c.get("me"), row.staff_id))) return c.json({ error: "forbidden" }, 403);
+  await c.env.DB.prepare("UPDATE time_off_requests SET status = 'cancelled' WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
 app.get("/api/time-off/review", async (c) => {
   const me = c.get("me");
   const rows = (await c.env.DB.prepare(

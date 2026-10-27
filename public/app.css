@@ -381,7 +381,11 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .staff-icons{flex:1;text-align:right;letter-spacing:2px}
 dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .staff-dialog{display:grid;gap:.8rem;padding:0 1rem 1rem;overflow:auto;max-height:90vh;align-content:start}
-.dlg-head{display:flex;justify-content:space-between;align-items:center;gap:.6rem;position:sticky;top:0;z-index:5;background:var(--card);padding:.8rem 0;border-bottom:1px solid var(--line,#e3dfd9)}
+.dlg-top{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line,#e3dfd9)}
+.dlg-head{display:flex;justify-content:space-between;align-items:center;gap:.6rem;padding:.8rem 0 .4rem}
+.dlg-tabs{display:flex;gap:.2rem;overflow-x:auto}.dlg-tabs button{border:0;background:none;font:inherit;font-weight:600;padding:.6rem .8rem;border-bottom:3px solid transparent;color:var(--muted,#666);cursor:pointer;white-space:nowrap}
+.dlg-tabs button[aria-selected=true]{color:var(--brand,#da291c);border-bottom-color:var(--brand,#da291c)}
+.dlg-content{display:grid;gap:.8rem;padding-top:.6rem}
 .dlg-head h2{margin:0;font-size:1.1rem}.dlg-actions{display:flex;gap:.5rem;flex:none}
 .vtl-bar.vertical .role-icon{font-size:.85rem;line-height:1;margin:0}
 
