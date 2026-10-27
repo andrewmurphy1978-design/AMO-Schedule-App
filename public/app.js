@@ -18,6 +18,28 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+
+// 24-hour time picker. <input type="time"> follows the device language (AM/PM on English systems),
+// so we use two selects. It behaves like an input: .value ("HH:MM"), .disabled, and bubbling "input" events.
+function timeField(value = "00:00") {
+  const p2 = (n) => String(n).padStart(2, "0");
+  const hh = h("select", { "aria-label": "HH" }, Array.from({ length: 24 }, (_, i) => h("option", { value: p2(i) }, p2(i))));
+  const mm = h("select", { "aria-label": "MM" });
+  const fillMinutes = (current) => {
+    const mins = new Set(Array.from({ length: 12 }, (_, i) => i * 5));
+    mins.add(Number(current));
+    mm.replaceChildren(...[...mins].sort((a, b) => a - b).map((m) => h("option", { value: p2(m) }, p2(m))));
+  };
+  const el = h("div", { class: "time24" }, hh, h("span", {}, ":"), mm);
+  Object.defineProperty(el, "value", {
+    get: () => `${hh.value}:${mm.value}`,
+    set: (v) => { const [a, b] = String(v || "00:00").split(":"); fillMinutes(b); hh.value = p2(Number(a)); mm.value = p2(Number(b)); },
+  });
+  Object.defineProperty(el, "disabled", { get: () => hh.disabled, set: (d) => { hh.disabled = d; mm.disabled = d; } });
+  el.value = value;
+  return el;
+}
+
 class ApiError extends Error {
   constructor(status, body) { super(body?.error ?? String(status)); this.status = status; this.body = body ?? {}; }
 }
@@ -332,8 +354,8 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   staffSel.addEventListener("change", fillRoles);
   fillRoles();
   const date = h("input", { type: "date", value: initial.date, required: true });
-  const start = h("input", { type: "time", value: initial.start, required: true });
-  const end = h("input", { type: "time", value: initial.end, required: true });
+  const start = timeField(initial.start);
+  const end = timeField(initial.end);
   const notes = h("textarea", { value: initial.notes, maxLength: 200 });
   const untilClose = h("input", { type: "checkbox", checked: initial.until_close });
   const alertBox = h("div");
@@ -550,8 +572,8 @@ function targetsPanel(ov) {
     const fallback = { ...resolveTargets(rows.filter((r) => r.set_id === 0), st.dow) };
     if (st.setId !== 0 && st.dow !== -1) Object.assign(fallback, resolveTargets(rows.filter((r) => r.set_id === st.setId), -1));
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
-    const closeInput = h("input", { type: "time", value: resto.close_time, required: true });
-    const openInputs = Array.from({ length: 7 }, (_, i) => h("input", { type: "time", value: resto.open_by_dow?.[i] ?? resto.open_time, required: true }));
+    const closeInput = timeField(resto.close_time);
+    const openInputs = Array.from({ length: 7 }, (_, i) => timeField(resto.open_by_dow?.[i] ?? resto.open_time));
     const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
     const reload = () => load();
 

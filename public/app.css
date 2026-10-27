@@ -224,3 +224,6 @@ button.vtl-bar { cursor: pointer; }
 .swatches { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
 .swatch { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--card); box-shadow: 0 0 0 1px var(--line); padding: 0; }
 .shift-chip { border-left: 4px solid var(--brand); }
+
+.time24 { display: flex; align-items: center; gap: .3rem; }
+.time24 select { min-width: 0; flex: 1 1 0; padding-left: .4rem; padding-right: .2rem; text-align: center; font-variant-numeric: tabular-nums; }
