@@ -387,7 +387,7 @@ app.get("/api/staff", async (c) => {
        JOIN staff_roles sr ON sr.staff_id = s.id
        WHERE sr.restaurant_id IN (SELECT restaurant_id FROM managers WHERE staff_id = ?) ORDER BY s.name`;
   const stmt = db.prepare(sql);
-  return c.json((await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results);
+  return c.json(sortByName(((await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results) as { name: string }[]));
 });
 
 app.post("/api/staff", requireAdmin, async (c) => {
@@ -746,7 +746,7 @@ app.post("/api/time-off", async (c) => {
 // People a manager/admin may enter time off for.
 app.get("/api/time-off/people", async (c) => {
   const me = c.get("me");
-  const rows = (await c.env.DB.prepare("SELECT id, name FROM staff ORDER BY name").all<{ id: number; name: string }>()).results;
+  const rows = sortByName((await c.env.DB.prepare("SELECT id, name FROM staff").all<{ id: number; name: string }>()).results);
   if (me.is_admin) return c.json(rows);
   const out = [];
   for (const r of rows) if (r.id !== me.id && (await approversOf(c.env.DB, r.id)).includes(me.id)) out.push(r);
@@ -1236,6 +1236,10 @@ app.get("/api/my-shifts", async (c) => {
   return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
 });
 
+// SQL sorts "Édouard" after "Zack" (byte order). Names are sorted here instead, accents ignored, French rules.
+const collator = new Intl.Collator("fr", { sensitivity: "base", numeric: true });
+const sortByName = <T extends { name: string }>(rows: T[]): T[] => [...rows].sort((a, b) => collator.compare(a.name, b.name));
+
 // ---------- Roster & admin overview ----------
 // Staff who can be scheduled on a given restaurant+department (managers/admin only).
 app.get("/api/roster", async (c) => {
@@ -1256,7 +1260,7 @@ app.get("/api/roster", async (c) => {
     e.role_ids.push(r.role_id);
     byStaff.set(r.staff_id, e);
   }
-  return c.json([...byStaff.values()]);
+  return c.json(sortByName([...byStaff.values()]));
 });
 
 app.get("/api/admin/overview", requireAdmin, async (c) => {
@@ -1271,7 +1275,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   return c.json({
     restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
     default_rates: await defaultRates(db),
-    staff: (staff.results as any[]).map((s) => ({
+    staff: sortByName(staff.results as any[]).map((s) => ({
       ...s,
       is_admin: s.is_admin === 1,
       roles: roles.results.filter((r) => r.staff_id === s.id),
