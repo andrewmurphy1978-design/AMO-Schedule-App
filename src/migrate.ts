@@ -16,6 +16,7 @@ import m0013 from "../migrations/0013_prep_dept_role_wages.sql";
 import m0014 from "../migrations/0014_payslips_sin.sql";
 import m0015 from "../migrations/0015_time_off.sql";
 import m0016 from "../migrations/0016_incidents.sql";
+import m0017 from "../migrations/0017_pre_open.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -34,6 +35,7 @@ const MIGRATIONS: [string, string][] = [
   ["0014_payslips_sin", m0014],
   ["0015_time_off", m0015],
   ["0016_incidents", m0016],
+  ["0017_pre_open", m0017],
 ];
 
 const statements = (sql: string) =>

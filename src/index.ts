@@ -174,6 +174,32 @@ app.get("/api/roles", async (c) =>
   c.json((await c.env.DB.prepare("SELECT * FROM roles").all()).results),
 );
 
+// Minutes before opening that this role should arrive (default start time of its shifts).
+app.put("/api/roles/:id/pre-open", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { minutes } = await c.req.json<{ minutes?: number }>();
+  if (!id || !Number.isInteger(minutes) || (minutes as number) < 0 || (minutes as number) > 180) return c.json({ error: "invalid_minutes" }, 400);
+  const r = await c.env.DB.prepare("UPDATE roles SET pre_open_minutes = ? WHERE id = ?").bind(minutes, id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// Make someone an administrator (or remove it). The last administrator and yourself cannot be removed.
+app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { is_admin } = await c.req.json<{ is_admin?: boolean }>();
+  if (!id || typeof is_admin !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const person = await c.env.DB.prepare("SELECT email FROM staff WHERE id = ?").bind(id).first<{ email: string | null }>();
+  if (!person) return c.json({ error: "not_found" }, 404);
+  if (is_admin && !person.email) return c.json({ error: "email_required" }, 422); // they sign in with their email
+  if (!is_admin) {
+    if (id === c.get("me").id) return c.json({ error: "cannot_remove_self" }, 409);
+    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND id != ?").bind(id).first<{ n: number }>();
+    if (!n?.n) return c.json({ error: "last_admin" }, 409);
+  }
+  await c.env.DB.prepare("UPDATE staff SET is_admin = ? WHERE id = ?").bind(is_admin ? 1 : 0, id).run();
+  return c.json({ ok: true, is_admin });
+});
+
 // ---------- Restaurants (admin) ----------
 app.get("/api/restaurants", async (c) => {
   const me = c.get("me");

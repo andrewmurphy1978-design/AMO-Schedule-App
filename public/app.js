@@ -496,7 +496,9 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`), icon];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
-    const shade = (from, to) => (to > from ? h("div", { class: "vtl-closed", title: t("beforeOpen"), style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
+    // Roles that arrive before opening (cook, waiter…): the closed hatching stops earlier and a lighter "setup" band marks that time.
+    const lead = Math.max(0, ...state.roles.filter((r) => sel.departments.includes(r.department_id)).map((r) => r.pre_open_minutes || 0));
+    const shade = (from, to, cls = "vtl-closed", title = t("beforeOpen")) => (to > from ? h("div", { class: cls, title, style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
     const hourly = payroll && state.showHourlyCost && d.cost;
     const costCol = hourly
       ? h("div", { class: "vtl-costcol" }, Array.from({ length: hours }, (_, i) => {
@@ -504,7 +506,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
           return h("div", { class: "vtl-costcell", style: `top:${i * ph}px;height:${ph}px`, title: `${(startMin / 60 + i) % 24}h` }, c > 0 ? money(c) : "");
         }))
       : null;
-    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin), shade(d.closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
+    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin - lead), shade(d.openMin - lead, d.openMin, "vtl-setup", t("setupTime")), shade(d.closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
   });
 
   const heads = perDay.map((d) => {
@@ -589,13 +591,26 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     roleSel.replaceChildren(...deptRoles.filter((r) => ids.includes(r.id)).map((r) =>
       h("option", { value: r.id, selected: r.id === keep }, roleName(r))));
   };
-  staffSel.addEventListener("change", fillRoles);
+  staffSel.addEventListener("change", () => { fillRoles(); applyPreOpen(); });
   fillRoles();
   const date = h("input", { type: "date", value: initial.date, required: true });
   const start = timeField(initial.start);
   const end = timeField(initial.end);
   const notes = h("textarea", { value: initial.notes, maxLength: 200 });
   const untilClose = h("input", { type: "checkbox", checked: initial.until_close });
+  // New shifts start before opening for roles that must arrive early (cook, waiter: 30 min), unless the start was edited by hand.
+  let startTouched = !!shift;
+  start.addEventListener("change", () => { startTouched = true; });
+  function applyPreOpen() {
+    if (startTouched || !date.value) return;
+    const role = state.roles.find((r) => r.id === Number(roleSel.value));
+    if (!role?.pre_open_minutes) return;
+    const dow = (parseYmd(date.value).getDay() + 6) % 7;
+    const m = toMin(openOf(sel.restaurant, dow)) - role.pre_open_minutes;
+    if (m >= 0) start.value = fromMin(m);
+  }
+  roleSel.addEventListener("change", applyPreOpen); date.addEventListener("change", applyPreOpen);
+  applyPreOpen();
   const alertBox = h("div");
   const nextDay = h("span", { class: "meta" });
   const syncNext = () => {
@@ -973,7 +988,7 @@ async function renderAdmin() {
   const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), preOpenPanel()],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffList],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -1254,6 +1269,23 @@ function fromField() {
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
 }
 
+// Minutes before opening that each role should arrive (default start of new shifts).
+function preOpenPanel() {
+  const box = h("section", { class: "panel" });
+  api("/roles").then((roles) => {
+    const inputs = roles.map((r) => ({ r, input: h("input", { type: "number", min: 0, max: 180, step: 5, inputMode: "numeric", value: r.pre_open_minutes ?? 0 }) }));
+    box.replaceChildren(h("h2", {}, t("preOpenTitle")), h("p", { class: "meta" }, t("preOpenHelp")),
+      h("div", { class: "hours-table" }, inputs.map(({ r, input }) => h("div", { class: "hours-row" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), h("label", { class: "mini" }, h("span", {}, t("minutes")), input)))),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
+        try {
+          for (const { r, input } of inputs) { const m = Number(input.value) || 0; if (m !== (r.pre_open_minutes ?? 0)) { await api(`/roles/${r.id}/pre-open`, { method: "PUT", body: { minutes: m } }); r.pre_open_minutes = m; } }
+          state.roles = await api("/roles"); toast(t("saved"));
+        } catch (e) { toast(errorText(e)); }
+      } }, t("save"))));
+  }).catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // Opening and closing time for every weekday of one restaurant.
 function hoursPanel(ov) {
   const st = { restaurant: ov.restaurants[0]?.id };
@@ -1415,6 +1447,11 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.is_admin, onChange: async (e) => {
+      const want = e.target.checked;
+      try { await api(`/staff/${s.id}/admin`, { method: "PUT", body: { is_admin: want } }); s.is_admin = want; toast(t("saved")); }
+      catch (err) { e.target.checked = !want; toast({ email_required: t("adminNeedsEmail"), cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err)); }
+    } }), h("span", {}, t("isAdminLabel"))),
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
