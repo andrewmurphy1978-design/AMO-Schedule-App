@@ -1,5 +1,5 @@
 import { t, getLang, setLang, locale, roleName } from "./i18n.js";
-import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages } from "./coverage.js";
+import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, SPECIAL_PRESETS, SEASON_PRESETS } from "./rules.js";
 import { staffColor, textOn, SWATCHES } from "./colors.js";
 
@@ -302,12 +302,14 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const laneArea = colWidth - 46 - (payroll && state.showHourlyCost ? 42 : 0);
 
   const gapLines = [];
+  const extraLines = [];
   let anyTargets = false;
   const dayCols = perDay.map((d) => {
     if (d.wins.length) anyTargets = true;
     const buckets = coverage(d.items.map((x) => x.s), d.day, startMin, endMin);
-    for (const g of shortages(buckets, d.wins))
-      gapLines.push(`${shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : ""}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
+    const dayLabel = shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : "";
+    for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
+    for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
 
     const cells = buckets.map((b) => {
       const tg = targetAt(d.wins, b.t);
@@ -359,7 +361,11 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     ? h("div", { class: "empty" }, t("noTargetsYet"))
     : gapLines.length
       ? h("div", { class: "alert", role: "status" }, h("strong", {}, t("shortagesTitle")), h("ul", {}, gapLines.map((l) => h("li", {}, l))))
-      : h("div", { class: "okmsg" }, t("noShortages"));
+      : h("div", { class: "okmsg" }, shown.length > 1 ? t("noShortagesWeek") : t("noShortages"));
+  // Shown in addition to the shortage message: people above the target (labour cost with no need).
+  const extraBox = anyTargets && extraLines.length
+    ? h("div", { class: "info", role: "status" }, h("strong", {}, t("surplusTitle")), h("ul", {}, extraLines.map((l) => h("li", {}, l))))
+    : null;
 
   const dayTabs = h("div", { class: "daytabs tl-days", role: "group" }, days.map((d) =>
     h("button", { type: "button", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
@@ -380,7 +386,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })}`),
     dayTabs,
     payrollBox,
-    h("div", { class: "gaps" }, gapBox),
+    h("div", { class: "gaps" }, gapBox, extraBox),
     h("div", { class: "vtl-scroll" },
       h("div", { class: "vtl", style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),

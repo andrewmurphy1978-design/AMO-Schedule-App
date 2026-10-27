@@ -48,17 +48,23 @@ export function coverage(shifts, day, from, to, step = 30) {
   return out;
 }
 
-/** Contiguous runs where headcount < target: [{from, to, missing}] (missing = worst gap in the run). */
-export function shortages(buckets, wins, step = 30) {
-  const runs = [];
+/** Contiguous runs where headcount differs from the target in one direction: [{from, to, missing}]. */
+function runs(buckets, wins, step, gapOf) {
+  const out = [];
   for (const b of buckets) {
     const target = targetAt(wins, b.t);
-    const gap = target === undefined ? 0 : target - b.count;
+    const gap = target === undefined ? 0 : gapOf(target, b.count);
     if (gap > 0) {
-      const last = runs[runs.length - 1];
+      const last = out[out.length - 1];
       if (last && last.to === b.t) { last.to = b.t + step; last.missing = Math.max(last.missing, gap); }
-      else runs.push({ from: b.t, to: b.t + step, missing: gap });
+      else out.push({ from: b.t, to: b.t + step, missing: gap });
     }
   }
-  return runs;
+  return out;
 }
+
+/** Runs where headcount < target (missing = worst shortfall in the run). */
+export const shortages = (buckets, wins, step = 30) => runs(buckets, wins, step, (target, count) => target - count);
+
+/** Runs where headcount > target (missing = worst excess in the run). */
+export const surpluses = (buckets, wins, step = 30) => runs(buckets, wins, step, (target, count) => count - target);

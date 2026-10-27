@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-ignore plain JS module shared with the browser
-import { resolveTargets, targetWindows, targetAt, coverage, shortages, shiftSpan, toMin } from "../public/coverage.js";
+import { resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses, shiftSpan, toMin } from "../public/coverage.js";
 
 const sh = (a: string, b: string) => ({ start_at: a, end_at: b });
 const DAY = "2026-10-27";
@@ -60,4 +60,20 @@ test("shifts on other days never count toward this day", () => {
   assert.equal(coverage([friday], wed, toMin("06:00"), toMin("22:00")).reduce((n: number, b: any) => n + b.count, 0), 0);
   const prev = sh("2026-10-27T08:00", "2026-10-27T14:00");
   assert.ok(shiftSpan(prev, wed).e <= 0, "ended before the day started");
+});
+
+test("surpluses are reported like shortages, with the worst excess", () => {
+  const wins = targetWindows({ "11:00": 1, "14:00": 2 }, toMin("22:00"));
+  const shifts = [sh(`${DAY}T11:00`, `${DAY}T15:00`), sh(`${DAY}T12:00`, `${DAY}T13:00`), sh(`${DAY}T12:00`, `${DAY}T13:30`), sh(`${DAY}T14:00`, `${DAY}T15:00`)];
+  const buckets = coverage(shifts, DAY, toMin("11:00"), toMin("16:00"));
+  // 12:00-13:00 has 3 people for a target of 1 (+2); 13:00-13:30 has 2 for 1 (+1): one run, worst excess 2
+  assert.deepEqual(surpluses(buckets, wins), [{ from: toMin("12:00"), to: toMin("13:30"), missing: 2 }]);
+  // 14:00-15:00 has 2 for a target of 2 (met) and 15:00-16:00 has 0 (short by 2)
+  assert.deepEqual(shortages(buckets, wins), [{ from: toMin("15:00"), to: toMin("16:00"), missing: 2 }]);
+});
+
+test("no target means neither a shortage nor a surplus", () => {
+  const buckets = coverage([sh(`${DAY}T11:00`, `${DAY}T15:00`)], DAY, toMin("11:00"), toMin("15:00"));
+  assert.deepEqual(surpluses(buckets, []), []);
+  assert.deepEqual(shortages(buckets, []), []);
 });

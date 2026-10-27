@@ -259,3 +259,7 @@ button.vtl-bar { cursor: pointer; }
 .grid td.name .avatar { margin-right: 10px; }
 .card .who { gap: 10px; font-size: 1.05rem; }
 .card .who .avatar { margin: 0; }
+
+.info { padding: .7rem .9rem; border-radius: 10px; background: #eff6ff; border: 1px solid #93c5fd; color: #1d4ed8; margin-bottom: .4rem; }
+.info ul { margin: .3rem 0 0; padding-left: 1.2rem; }
+@media (prefers-color-scheme: dark) { .info { background: #172554; color: #93c5fd; border-color: #1d4ed8; } }
