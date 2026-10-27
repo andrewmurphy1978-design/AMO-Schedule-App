@@ -263,3 +263,36 @@ button.vtl-bar { cursor: pointer; }
 .info { padding: .7rem .9rem; border-radius: 10px; background: #eff6ff; border: 1px solid #93c5fd; color: #1d4ed8; margin-bottom: .4rem; }
 .info ul { margin: .3rem 0 0; padding-left: 1.2rem; }
 @media (prefers-color-scheme: dark) { .info { background: #172554; color: #93c5fd; border-color: #1d4ed8; } }
+
+/* ---------- Administration: side menu (desktop) / top menu (phone) ---------- */
+.admin-layout { display: grid; gap: 1rem; }
+.admin-nav { display: flex; gap: .4rem; overflow-x: auto; position: sticky; top: 48px; z-index: 4; background: var(--bg); margin: 0 -16px; padding: .5rem 16px; border-bottom: 1px solid var(--line); }
+.admin-nav button { flex: 0 0 auto; min-height: var(--tap); padding: 0 1rem; border-radius: 999px; border: 1px solid var(--line); background: var(--card); font-weight: 600; white-space: nowrap; }
+.admin-nav button[aria-current="page"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+.admin-content { min-width: 0; }
+@media (min-width: 900px) {
+  .admin-layout { grid-template-columns: 230px minmax(0, 1fr); align-items: start; gap: 1.5rem; }
+  .admin-nav { flex-direction: column; overflow: visible; position: sticky; top: 64px; margin: 0; padding: .6rem; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); gap: .3rem; }
+  .admin-nav button { text-align: left; border-radius: 10px; border-color: transparent; background: transparent; }
+  .admin-nav button:hover { background: var(--bg); }
+  .admin-nav button[aria-current="page"] { background: var(--brand); color: #fff; }
+}
+
+/* ---------- Opening hours table ---------- */
+.hours-table { display: grid; gap: .5rem; margin: .8rem 0; }
+.hours-head, .hours-row { display: grid; grid-template-columns: minmax(84px, 1fr) minmax(0, 1.4fr) minmax(0, 1.4fr); gap: .5rem; align-items: center; }
+.hours-head { font-size: .8rem; color: var(--muted); font-weight: 600; }
+.hours-row .time24 select { min-width: 58px; }
+.time24 { max-width: 220px; }
+.time24 select { padding-left: .5rem; padding-right: .5rem; }
+@media (max-width: 420px) { .hours-head, .hours-row { grid-template-columns: 74px 1fr 1fr; } .time24 select { min-width: 50px; font-size: .95rem; } }
+
+.hours-row .mini { display: block; }
+.hours-row .mini > span { display: none; font-size: .75rem; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+@media (max-width: 560px) {
+  .hours-head { display: none; }
+  .hours-row { grid-template-columns: 1fr 1fr; padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
+  .hours-row strong { grid-column: 1 / -1; text-transform: capitalize; }
+  .hours-row .mini > span { display: block; }
+  .hours-row .time24 { max-width: none; }
+}

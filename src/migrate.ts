@@ -10,6 +10,7 @@ import m0007 from "../migrations/0007_open_hours_by_day.sql";
 import m0008 from "../migrations/0008_staff_color.sql";
 import m0009 from "../migrations/0009_staff_photos.sql";
 import m0010 from "../migrations/0010_staff_wages.sql";
+import m0011 from "../migrations/0011_close_by_day.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -22,6 +23,7 @@ const MIGRATIONS: [string, string][] = [
   ["0008_staff_color", m0008],
   ["0009_staff_photos", m0009],
   ["0010_staff_wages", m0010],
+  ["0011_close_by_day", m0011],
 ];
 
 const statements = (sql: string) =>

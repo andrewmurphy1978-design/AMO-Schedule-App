@@ -82,7 +82,9 @@ const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.get
 const hhmm = (iso) => iso.slice(11, 16);
 // Until-close shifts show "F" instead of an end time. end_at is a provisional closing time
 // until per-restaurant closing hours exist.
-const closeOf = (restaurantId) => state.restaurants.find((r) => r.id === restaurantId)?.close_time ?? "22:00";
+// Closing time for a weekday (0 = Monday ... 6 = Sunday).
+const closeOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.close_by_dow?.[dow] ?? r?.close_time ?? "22:00"; };
+const dowOf = (ymdStr) => (parseYmd(ymdStr).getDay() + 6) % 7;
 // Opening time for a weekday (0 = Monday ... 6 = Sunday).
 const openOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.open_by_dow?.[dow] ?? r?.open_time ?? "07:00"; };
 const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
@@ -277,22 +279,22 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const sel = state.sel;
   const desktop = mqDesktop.matches;
   const shown = desktop ? days : [sel.day];
-  const closeMin = toMin(closeOf(sel.restaurant));
 
   const perDay = shown.map((day) => {
     const { targets: dayTargets, labels } = resolveForDate(targets, sets, day);
     const openMin = toMin(openOf(sel.restaurant, (parseYmd(day).getDay() + 6) % 7));
+    const closeMin = toMin(closeOf(sel.restaurant, dowOf(day)));
     const wins = targetWindows(dayTargets, closeMin);
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
       .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
     const cost = payroll?.department.days.find((x) => x.date === day) ?? null;
-    return { day, wins, items, labels, openMin, cost };
+    return { day, wins, items, labels, openMin, closeMin, cost };
   });
 
   const starts = perDay.flatMap((d) => [...d.items.map((x) => Math.max(0, x.span.s)), ...d.wins.map((w) => w.from)]);
   const ends = perDay.flatMap((d) => [...d.items.map((x) => Math.min(1560, x.span.e)), ...d.wins.map((w) => w.to)]);
   const startMin = Math.floor(Math.min(...perDay.map((d) => d.openMin), ...starts) / 60) * 60;
-  const endMin = Math.ceil(Math.max(closeMin, ...ends) / 60) * 60;
+  const endMin = Math.ceil(Math.max(...perDay.map((d) => d.closeMin), ...ends) / 60) * 60;
   const hours = (endMin - startMin) / 60;
   const ph = desktop ? 44 : 56; // pixels per hour
   const y = (m) => ((m - startMin) / 60) * ph;
@@ -347,7 +349,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
           return h("div", { class: "vtl-costcell", style: `top:${i * ph}px;height:${ph}px`, title: `${(startMin / 60 + i) % 24}h` }, c > 0 ? money(c) : "");
         }))
       : null;
-    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin), shade(closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
+    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin), shade(d.closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
   });
 
   const heads = perDay.map((d) => h("div", { class: `vtl-head ${d.day === today ? "today" : ""}` },
@@ -430,7 +432,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   start.addEventListener("input", syncNext); end.addEventListener("input", syncNext); untilClose.addEventListener("change", syncNext); syncNext();
 
   const payload = (force) => {
-    const endTime = untilClose.checked ? closeOf(sel.restaurant) : end.value;
+    const endTime = untilClose.checked ? closeOf(sel.restaurant, dowOf(date.value)) : end.value;
     const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
@@ -491,9 +493,13 @@ async function renderMine() {
 }
 
 // ---------- admin ----------
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"]];
+state.adminSection = "restaurants";
+
 async function renderAdmin() {
   const ov = await api("/admin/overview");
-  const rest = h("section", { class: "panel" }, h("h2", {}, t("restaurants")),
+
+  const restaurantsPanel = h("section", { class: "panel" }, h("h2", {}, t("restaurants")),
     h("p", {}, ov.restaurants.map((r) => h("span", { class: "badge", style: "margin-right:.4rem" }, r.name))),
     (() => {
       const name = h("input", { required: true, maxLength: 80 });
@@ -513,11 +519,17 @@ async function renderAdmin() {
     h("button", { class: "btn primary", type: "submit" }, t("add")));
   })();
   const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
-
   const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
-  $app.replaceChildren(rest, targetsPanel(ov), staffPanel, ...staffList);
-}
 
+  const sections = {
+    restaurants: () => [restaurantsPanel, hoursPanel(ov)],
+    targets: () => [targetsPanel(ov)],
+    staff: () => [staffPanel, ...staffList],
+  };
+  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, ADMIN_SECTIONS.map(([id, label]) =>
+    h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
+  $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[state.adminSection]())));
+}
 
 // ---- seasons / special days ----
 const monthName = (m) => new Intl.DateTimeFormat(locale(), { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2026, m - 1, 1)));
@@ -635,8 +647,6 @@ function targetsPanel(ov) {
     const fallback = { ...resolveTargets(rows.filter((r) => r.set_id === 0), st.dow) };
     if (st.setId !== 0 && st.dow !== -1) Object.assign(fallback, resolveTargets(rows.filter((r) => r.set_id === st.setId), -1));
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
-    const closeInput = timeField(resto.close_time);
-    const openInputs = Array.from({ length: 7 }, (_, i) => timeField(resto.open_by_dow?.[i] ?? resto.open_time));
     const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
     const reload = () => load();
 
@@ -684,16 +694,6 @@ function targetsPanel(ov) {
           for (const slot of SLOTS) if (inputs[slot].value !== "") slots[slot] = Number(inputs[slot].value);
           saveTargets(slots);
         } }, t("save"))),
-      h("h2", { style: "margin-top:1.2rem" }, `${t("hoursTitle")} — ${resto.name}`),
-      h("p", { class: "meta" }, t("openTimes")),
-      h("div", { class: "slot-grid" }, openInputs.map((input, i) => h("label", { class: "field" }, h("span", {}, weekdayName(i)), input))),
-      h("label", { class: "field" }, h("span", {}, t("closeTime")), closeInput),
-      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
-        try {
-          await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: openInputs.map((x) => x.value), close_time: closeInput.value } });
-          state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); reload();
-        } catch (e) { toast(errorText(e)); }
-      } }, t("save"))),
     ].filter(Boolean));
   }
   load();
@@ -705,6 +705,42 @@ const thisMonday = () => mondayOf(new Date());
 function fromField() {
   const input = h("input", { type: "date", value: thisMonday() });
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
+}
+
+// Opening and closing time for every weekday of one restaurant.
+function hoursPanel(ov) {
+  const st = { restaurant: ov.restaurants[0]?.id };
+  const box = h("section", { class: "panel" });
+  function draw() {
+    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
+    if (!resto) { box.replaceChildren(h("h2", {}, t("hoursTitle")), h("div", { class: "empty" }, t("noSchedules"))); return; }
+    const rows = Array.from({ length: 7 }, (_, i) => ({
+      open: timeField(resto.open_by_dow?.[i] ?? resto.open_time),
+      close: timeField(resto.close_by_dow?.[i] ?? resto.close_time),
+    }));
+    const copyMonday = () => rows.slice(1).forEach((r) => { r.open.value = rows[0].open.value; r.close.value = rows[0].close.value; });
+    box.replaceChildren(
+      h("h2", {}, t("hoursTitle")),
+      h("p", { class: "meta" }, t("hoursHelp")),
+      h("label", { class: "field" }, h("span", {}, t("restaurant")),
+        h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } },
+          ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+      h("div", { class: "hours-table" },
+        h("div", { class: "hours-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime"))),
+        rows.map((r, i) => h("div", { class: "hours-row" }, h("strong", {}, weekdayName(i)),
+          h("label", { class: "mini" }, h("span", {}, t("openTime")), r.open),
+          h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.close)))),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try {
+            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: rows.map((r) => r.open.value), close_times: rows.map((r) => r.close.value) } });
+            state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
+          } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
+        } }, t("save"))));
+  }
+  draw();
+  return box;
 }
 
 // Untick a role: if shifts still use it, ask whether to move them to another role or delete them.
