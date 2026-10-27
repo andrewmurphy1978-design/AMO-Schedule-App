@@ -404,7 +404,7 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .staff-row{flex-wrap:wrap}
 
 .print-head{display:none}
-@page { size: landscape; margin: 10mm; }
+@page { size: portrait; margin: 8mm; }
 @media print {
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { background: #fff; }
@@ -459,3 +459,26 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 .vtl-scroll, .grid-wrap { scroll-margin-top: 56px; }
 .vtl-scroll { max-height: calc(100vh - 60px); max-height: calc(100dvh - 60px); }
 @media (min-width: 900px) { .grid-wrap { max-height: calc(100vh - 60px); max-height: calc(100dvh - 60px); } }
+
+.screen-only{display:inline}
+@media print {
+  .screen-only { display: none !important; }
+  .grid { table-layout: fixed; font-size: 9px; }
+  .grid th, .grid td { min-width: 0 !important; padding: 2px !important; }
+  .grid td.name { width: 17%; }
+  .grid td.name .avatar { display: none; }
+  .grid td.name .name2 { max-width: none; }
+  .shift-chip { font-size: 9px !important; padding: 1px 3px !important; }
+  .shift-chip .role-label { display: none; }
+  .shift-chip b { font-size: 9px; }
+  .elsewhere { font-size: 9px !important; padding: 1px 3px !important; }
+  .print-head h1 { font-size: 16px; }
+}
+@media print { .grid thead { display: table-header-group; } .grid tfoot { display: table-footer-group; } }
+
+@media print {
+  .strip, #lang-toggle, .status-line { display: none !important; }
+  .grid thead th, .grid thead th.today { background: #f1ede8 !important; color: #1f1f23 !important; }
+  .grid .th-zoom { text-decoration: none !important; border: 0; }
+}
+@media print { .print-date { font-weight: 700; color: #1f1f23; display: inline !important; } }

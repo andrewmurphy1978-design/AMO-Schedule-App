@@ -336,7 +336,7 @@ async function renderSchedule() {
     h("img", { src: "logo.png", alt: "Mikes", height: 48, onerror: (e) => e.target.remove() }),
     h("div", {}, h("h1", {}, `${options.find((r) => r.id === sel.restaurant)?.name ?? ""} — ${sel.departments.map((d) => t(`dept.${d}`)).join(" · ")}`), h("p", {}, weekLabel(sel.week))));
 
-  const status = h("p", {}, h("span", { class: `badge ${data.editable ? "edit" : ""}` }, data.editable ? t("canEdit") : t("viewOnly")));
+  const status = h("p", { class: "status-line" }, h("span", { class: `badge ${data.editable ? "edit" : ""}` }, data.editable ? t("canEdit") : t("viewOnly")));
   const byDay = (d) => data.shifts.filter((s) => dayOf(s.start_at) === d);
   const openEditor = (shift, prefill) => openShiftModal({ shift, prefill, roster, data });
 
@@ -390,6 +390,8 @@ async function renderSchedule() {
   const offAt = (id, d) => (data.time_off ?? []).find((o) => o.staff_id === id && o.start_date <= d && o.end_date >= d);
   const offChip = (o) => h("div", { class: `off-chip ${o.status}`, title: o.status === "approved" ? t("offApproved") : t("offRequested") }, `${o.status === "approved" ? "C/A" : "C/D"}${o.start_time ? ` ${o.start_time.replace(/^0/, "").replace(":00", "")}–${o.end_time.replace(/^0/, "").replace(":00", "")}` : ""}`);
   const elsewhereAt = (id, d) => (data.elsewhere ?? []).filter((e) => e.staff_id === id && dayOf(e.start_at) === d);
+  // "Saint-Sauveur" -> "St-Sauveur", "Ste-Agathe-des-Monts" -> "Ste-Agathe"
+  const shortResto = (n) => n.replace(/^Saint-/, "St-").split(/-des-|\sdes\s/)[0];
   const place = (e) => (e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant);
   const totalCell = (id) => {
     const hh = data.hours?.[id];
@@ -407,8 +409,10 @@ async function renderSchedule() {
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
       h("th", { class: d === today ? "today" : "" },
         // Clicking a day here zooms the coverage view below on that day and scrolls to it.
-        h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
-          fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
+        h("button", { type: "button", class: "th-zoom screen-only", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
+          fmt(d, { weekday: "short", day: "numeric", month: "short" })),
+        // paper: plain text, because buttons are not drawn in the header repeated on the next page
+        h("span", { class: "print-only print-date" }, fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", { class: data.shifts.some((s) => s.staff_id === id) || (data.elsewhere ?? []).some((e) => e.staff_id === id) ? "" : "noshift" }, h("td", { class: "name", title: name }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36),
         h("span", { class: "name2" }, h("span", { class: "n1" }, parts.get(id)?.first ?? name), parts.get(id)?.last ? h("span", { class: "n2" }, parts.get(id).last) : null)), days.map((d) =>
@@ -417,7 +421,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${shiftRoleIcons(s)} ${shiftRoleLabel(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${shiftRoleIcons(s)} `, h("span", { class: "role-label" }, shiftRoleLabel(s)), sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -425,7 +429,10 @@ async function renderSchedule() {
             return data.editable ? h("button", { class: cls, type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: cls, style }, body);
           }),
           // Working somewhere else the same day: shown in grey so you don't double-book by mistake.
-          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: t("elsewhere") }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`, h("span", { class: "print-only" }, ` (${t("shiftElsewhere")})`))),
+          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: `${t("elsewhere")}: ${hhmm(e.start_at)}–${hhmm(e.end_at)} ${place(e)}` },
+            // on screen: times and place; on paper: just the short restaurant name and the role icon ("St-Sauveur 🚗")
+            h("span", { class: "screen-only" }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`),
+            h("span", { class: "print-only" }, `${e.restaurant_id === sel.restaurant ? t(`dept.${e.department_id}`) : shortResto(e.restaurant)} ${roleIcon(e)}`))),
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null)),
         data.hours ? totalCell(id) : null))
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));

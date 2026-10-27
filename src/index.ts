@@ -1300,7 +1300,7 @@ app.get("/api/schedule", async (c) => {
     for (const r of h.results) hours[r.staff_id] = { here: Math.round(r.h_here * 100) / 100, all: Math.round(r.h_all * 100) / 100 };
     if (editable) {
       elsewhere = (await c.env.DB.prepare(
-        `SELECT sh.staff_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, sh.start_at, sh.end_at
+        `SELECT sh.staff_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_en, ro.name_fr, sh.start_at, sh.end_at
          FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
          WHERE sh.status = 'ok' AND sh.staff_id IN (${marks}) AND sh.start_at >= ? AND sh.start_at < ?
            AND NOT (sh.restaurant_id = ? AND (ro.department_id = ? OR EXISTS (SELECT 1 FROM shift_roles x JOIN roles r2 ON r2.id = x.role_id WHERE x.shift_id = sh.id AND r2.department_id = ?)))
