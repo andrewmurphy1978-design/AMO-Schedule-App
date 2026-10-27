@@ -248,3 +248,14 @@ button.vtl-bar { cursor: pointer; }
 .vtl-costcol { position: absolute; left: 40px; top: 0; bottom: 0; width: 40px; }
 .vtl-costcell { position: absolute; left: 0; right: 0; padding: 2px 3px 0 0; text-align: right; font-size: .68rem; color: var(--muted); font-variant-numeric: tabular-nums; border-top: 1px solid var(--line); }
 .vtl-day.with-cost .vtl-lanes { left: 84px; }
+
+/* pictures on coverage bars */
+.vtl-bar.vertical { writing-mode: horizontal-tb; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 3px 1px; }
+.vtl-bar.vertical .bar-text { writing-mode: vertical-rl; text-orientation: mixed; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.vtl-bar .avatar { margin: 0; flex: 0 0 auto; border: 2px solid rgba(255,255,255,.85); box-shadow: none; }
+.vtl-bar .bar-name { display: flex; align-items: center; gap: 5px; }
+.vtl-bar .bar-name .avatar { margin: 0; }
+.grid td.name { white-space: nowrap; }
+.grid td.name .avatar { margin-right: 10px; }
+.card .who { gap: 10px; font-size: 1.05rem; }
+.card .who .avatar { margin: 0; }

@@ -221,7 +221,7 @@ async function renderSchedule() {
     h("h2", {}, fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })),
     dayShifts.length
       ? h("div", { class: "list" }, dayShifts.map((s) => {
-          const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 26), s.staff_name),
+          const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 40), s.staff_name),
             h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · "))];
           return data.editable ? h("button", { class: "card", type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: "card" }, card);
         }))
@@ -240,7 +240,7 @@ async function renderSchedule() {
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
       h("th", { class: d === today ? "today" : "" }, fmt(d, { weekday: "short", day: "numeric", month: "short" }))))),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
-      h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 26), name), days.map((d) =>
+      h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`];
@@ -297,6 +297,9 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const ph = desktop ? 44 : 56; // pixels per hour
   const y = (m) => ((m - startMin) / 60) * ph;
   const today = ymd(new Date());
+  const mainWidth = $app.clientWidth || 360;
+  const colWidth = desktop ? Math.max(payroll && state.showHourlyCost ? 160 : 118, (mainWidth - 48) / 7) : mainWidth - 48;
+  const laneArea = colWidth - 46 - (payroll && state.showHourlyCost ? 42 : 0);
 
   const gapLines = [];
   let anyTargets = false;
@@ -326,7 +329,12 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
-      const body = wide ? [h("b", { class: "bar-name" }, avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, 20), x.s.staff_name), range] : `${x.s.staff_name} ${range}`;
+      // Picture size follows the room available in this lane; skip it on very short bars.
+      const size = Math.max(14, Math.min(30, Math.floor(laneArea / lanes) - 6));
+      const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
+      const body = wide
+        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name), range]
+        : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`)];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     const shade = (from, to) => (to > from ? h("div", { class: "vtl-closed", title: t("beforeOpen"), style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
