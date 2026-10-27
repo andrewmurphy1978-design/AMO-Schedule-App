@@ -321,3 +321,21 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .th-zoom { border: 0; background: none; font: inherit; font-weight: 700; color: inherit; cursor: zoom-in; padding: 4px 6px; border-radius: 6px; text-decoration: underline dotted; text-underline-offset: 3px; }
 .th-zoom:hover { background: color-mix(in srgb, var(--brand) 14%, transparent); }
 .grid th.today .th-zoom:hover { background: rgba(255,255,255,.2); }
+
+/* weekly hours, "elsewhere" markers, sick shifts */
+.grid td.total { min-width: 96px; text-align: right; background: var(--bg); font-variant-numeric: tabular-nums; }
+.grid td.total strong { display: block; }
+.grid td.total small { display: block; color: var(--muted); font-size: .72rem; }
+.grid td.total.over strong, .grid td.total .warn { color: var(--warn); }
+.elsewhere { margin-bottom: 4px; padding: 3px 6px; border-radius: 6px; font-size: .78rem; color: var(--muted); background: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--muted) 12%, transparent) 5px 10px); border: 1px dashed var(--line); }
+.elsewhere-list { margin-top: 1rem; display: grid; gap: .4rem; }
+.elsewhere-list h3 { margin: 0; font-size: .95rem; color: var(--muted); }
+.hours-panel { margin-top: 1rem; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: .5rem .9rem; }
+.hours-panel summary { min-height: var(--tap); display: flex; align-items: center; font-weight: 700; cursor: pointer; }
+.hours-line { display: flex; justify-content: space-between; gap: 1rem; padding: .4rem 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.hours-line.over b { color: var(--warn); }
+.payroll.over .row b { color: var(--warn); }
+.shift-chip.sick, .card.sick { opacity: .75; border-style: dashed; background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgba(180,83,9,.12) 6px 12px); }
+.sick-badge { display: inline-block; margin-top: 2px; padding: 1px 8px; border-radius: 999px; background: #fff7ed; border: 1px solid #fdba74; color: var(--warn); font-size: .75rem; font-weight: 700; }
+.replaced { display: block; font-size: .75rem; color: var(--muted); }
+.vtl-bar.sick { opacity: .5; outline: 2px dashed var(--warn); outline-offset: -3px; }

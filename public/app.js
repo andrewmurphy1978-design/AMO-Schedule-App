@@ -74,6 +74,7 @@ async function api(path, opts = {}) {
 }
 
 const money = (cents, decimals = false) => new Intl.NumberFormat(locale(), { style: "currency", currency: "CAD", minimumFractionDigits: decimals ? 2 : 0, maximumFractionDigits: decimals ? 2 : 0 }).format(cents / 100);
+const hrs = (n) => `${Math.round(n * 10) / 10}`.replace(".", getLang() === "fr" ? "," : ".");
 const pad = (n) => String(n).padStart(2, "0");
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parseYmd = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
@@ -221,15 +222,29 @@ async function renderSchedule() {
     h("button", { type: "button", class: byDay(d).length ? "has" : "", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
       h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
   const dayShifts = byDay(sel.day);
+  const nameById = new Map([...roster.map((r) => [r.staff_id, r.name]), ...data.shifts.map((x) => [x.staff_id, x.staff_name])]);
+  const elsewhereToday = (data.elsewhere ?? []).filter((e) => dayOf(e.start_at) === sel.day);
   const daily = h("section", { class: "daily" },
     h("h2", {}, fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })),
     dayShifts.length
       ? h("div", { class: "list" }, dayShifts.map((s) => {
+          const sickDay = s.status === "sick_open";
           const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 40), s.staff_name),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · "))];
-          return data.editable ? h("button", { class: "card", type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: "card" }, card);
+            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")),
+            sickDay ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
+          const cls = `card ${sickDay ? "sick" : ""}`;
+          return data.editable ? h("button", { class: cls, type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: cls }, card);
         }))
-      : h("div", { class: "empty" }, t("noShifts")));
+      : h("div", { class: "empty" }, t("noShifts")),
+    // People on this schedule who work somewhere else that day (managers only).
+    elsewhereToday.length ? h("div", { class: "elsewhere-list" }, h("h3", {}, t("elsewhereToday")),
+      elsewhereToday.map((e) => h("div", { class: "elsewhere" }, h("b", {}, `↗ ${nameById.get(e.staff_id) ?? ""} · ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant}`))) : null,
+    // Weekly hours per person (phones; on desktop they are the last column of the grid).
+    data.hours && Object.keys(data.hours).length ? h("details", { class: "hours-panel" }, h("summary", {}, t("weekHours")),
+      Object.entries(data.hours).map(([id, hh]) => [Number(id), hh]).sort((a, b) => (nameById.get(a[0]) ?? "").localeCompare(nameById.get(b[0]) ?? "", locale())).map(([id, hh]) =>
+        h("div", { class: `hours-line ${hh.all > (data.limits?.overtime_hours ?? 40) ? "over" : ""}` }, h("span", {}, nameById.get(id) ?? ""),
+          h("b", {}, `${hrs(hh.here)} ${t("hoursShort")}`, hh.all - hh.here > 0.01 ? ` (${hrs(hh.all)} ${t("hoursShort")} ${t("allPlaces")})` : "", hh.all > (data.limits?.overtime_hours ?? 40) ? " ⚠" : "")))) : null);
   const fab = data.editable ? h("button", { class: "fab", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: sel.day }) }, "+") : null;
 
   // Desktop: staff × days grid
@@ -240,23 +255,41 @@ async function renderSchedule() {
   for (const r of roster) meta.set(r.staff_id, { color: r.color, photo_v: r.photo_v });
   for (const sh of data.shifts) meta.set(sh.staff_id, { color: sh.staff_color, photo_v: sh.photo_v });
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
+  const limit = data.limits?.overtime_hours ?? 40;
+  const elsewhereAt = (id, d) => (data.elsewhere ?? []).filter((e) => e.staff_id === id && dayOf(e.start_at) === d);
+  const place = (e) => (e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant);
+  const totalCell = (id) => {
+    const hh = data.hours?.[id];
+    if (!hh) return h("td", { class: "total" }, "");
+    const over = hh.all > limit;
+    return h("td", { class: `total ${over ? "over" : ""}`, title: over ? t("overtimeWarn") : "" },
+      h("strong", {}, `${hrs(hh.here)} ${t("hoursShort")}`),
+      hh.all - hh.here > 0.01 ? h("small", {}, `${hrs(hh.all)} ${t("hoursShort")} ${t("allPlaces")}`) : null,
+      over ? h("small", { class: "warn" }, `⚠ ${t("overtimeWarn")}`) : null);
+  };
   const grid = h("div", { class: "grid-wrap" }, h("table", { class: "grid" },
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
       h("th", { class: d === today ? "today" : "" },
         // Clicking a day here zooms the coverage view below on that day and scrolls to it.
         h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
-          fmt(d, { weekday: "short", day: "numeric", month: "short" })))))),
+          fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", {}, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
-            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`];
+            const sick = s.status === "sick_open";
+            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+              s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
-            return data.editable ? h("button", { class: "shift-chip", type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: "shift-chip", style }, body);
+            const cls = `shift-chip ${sick ? "sick" : ""}`;
+            return data.editable ? h("button", { class: cls, type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: cls, style }, body);
           }),
-          data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null))))
-      : h("tr", {}, h("td", { colSpan: 8 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
+          // Working somewhere else the same day: shown in grey so you don't double-book by mistake.
+          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: t("elsewhere") }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`)),
+          data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null)),
+        data.hours ? totalCell(id) : null))
+      : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
   $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
@@ -322,7 +355,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   let anyTargets = false;
   const dayCols = perDay.map((d) => {
     if (d.wins.length) anyTargets = true;
-    const buckets = coverage(d.items.map((x) => x.s), d.day, startMin, endMin);
+    const buckets = coverage(d.items.map((x) => x.s).filter((x) => x.status !== "sick_open"), d.day, startMin, endMin);
     const dayLabel = shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : "";
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
     for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
@@ -343,8 +376,8 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const color = staffColor(x.s.staff_id, x.s.staff_color);
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
-        class: `vtl-bar ${wide ? "" : "vertical"}`,
-        title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}`,
+        class: `vtl-bar ${wide ? "" : "vertical"} ${x.s.status === "sick_open" ? "sick" : ""}`,
+        title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
       // Picture size follows the room available in this lane; skip it on very short bars.
@@ -515,15 +548,17 @@ async function renderMine() {
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prev"), onClick: () => { sel.week = addDays(sel.week, -7); render(); } }, "‹"),
     h("div", { class: "label" }, weekLabel(sel.week)),
     h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); render(); } }, "›"));
+  const myHours = h("div", { class: `payroll ${data.total_hours > (data.limits?.overtime_hours ?? 40) ? "over" : ""}` },
+    h("div", { class: "row" }, h("span", {}, t("myWeekHours")), h("b", {}, `${hrs(data.total_hours)} ${t("hoursShort")}${data.total_hours > (data.limits?.overtime_hours ?? 40) ? " ⚠" : ""}`)));
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i)).filter((d) => data.shifts.some((s) => dayOf(s.start_at) === d));
   const body = days.length
     ? days.map((d) => h("section", {}, h("h2", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
         h("div", { class: "list", style: "margin-bottom:1rem" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
           h("div", { class: "card" }, h("span", { class: "time" }, range(s)),
             h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")))))))
+            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null)))))
     : [h("div", { class: "empty" }, t("noShiftsWeek"))];
-  $app.replaceChildren(nav, ...body);
+  $app.replaceChildren(nav, myHours, ...body);
 }
 
 // ---------- admin ----------

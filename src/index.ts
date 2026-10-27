@@ -4,6 +4,7 @@ import { fetchAccessKeys, verifyAccessJwt } from "./access.ts";
 import { findOverlaps, SHIFT_TIME_RE } from "./conflicts.ts";
 import { weekBounds } from "./week.ts";
 import { computeCosts, parseRate } from "./payroll.ts";
+import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
 
 type Env = {
   DB: D1Database;
@@ -116,6 +117,10 @@ async function withOpenHours<T extends { id: number; open_time: string; close_ti
       close_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.close_time ?? r.close_time),
     };
   });
+}
+
+async function loadSettings(db: D1Database): Promise<Settings> {
+  return parseSettings((await db.prepare("SELECT key, value FROM settings").all<{ key: string; value: string }>()).results);
 }
 
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
@@ -398,6 +403,16 @@ app.delete("/api/staff/:id/photo", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---------- Settings (admin) ----------
+app.get("/api/settings", requireAdmin, async (c) => c.json(await loadSettings(c.env.DB)));
+
+app.put("/api/settings", requireAdmin, async (c) => {
+  const rows = validateSettingsPatch(await c.req.json().catch(() => null));
+  if (!rows) return c.json({ error: "invalid_setting" }, 400);
+  await c.env.DB.batch(Object.entries(rows).map(([k, v]) => c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, v)));
+  return c.json(await loadSettings(c.env.DB));
+});
+
 // ---------- Wages and labour cost (ADMIN ONLY) ----------
 // Hourly rates never appear in any other endpoint. Managers and employees get 403 here.
 app.put("/api/staff/:id/wage", requireAdmin, async (c) => {
@@ -433,7 +448,7 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT sh.start_at, sh.end_at, ro.department_id, w.hourly_cents AS rate_cents
      FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
-     WHERE sh.restaurant_id = ? AND sh.start_at >= ? AND sh.start_at < ?`,
+     WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
   )
     .bind(restaurantId, `${prev.toISOString().slice(0, 10)}T00:00`, bounds.end)
     .all<{ start_at: string; end_at: string; department_id: string; rate_cents: number | null }>();
@@ -543,7 +558,8 @@ app.get("/api/schedule", async (c) => {
 
   const shifts = await c.env.DB.prepare(
     `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.name_fr, ro.name_en,
-            sh.start_at, sh.end_at, sh.until_close, sh.notes
+            sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status, sh.replaced_staff_id,
+            (SELECT name FROM staff WHERE id = sh.replaced_staff_id) AS replaced_name
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ?
      ORDER BY sh.start_at, s.name`,
@@ -551,7 +567,40 @@ app.get("/api/schedule", async (c) => {
     .bind(restaurantId, department, bounds.start, bounds.end)
     .all();
   const editable = await canManage(c.env.DB, me, restaurantId, department);
-  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results });
+  const settings = await loadSettings(c.env.DB);
+
+  // Weekly hours per person (all restaurants and departments) and "working elsewhere" markers.
+  // Managers/admins see them for everyone on this schedule; everyone else only sees their own hours.
+  const ids = new Set<number>((shifts.results as { staff_id: number }[]).map((x) => x.staff_id));
+  if (editable) {
+    const roster = await c.env.DB.prepare(
+      "SELECT DISTINCT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.restaurant_id = ? AND ro.department_id = ?",
+    ).bind(restaurantId, department).all<{ staff_id: number }>();
+    for (const r of roster.results) ids.add(r.staff_id);
+  }
+  const visible = [...ids].filter((id) => editable || id === me.id);
+  const hours: Record<number, { here: number; all: number }> = {};
+  let elsewhere: unknown[] = [];
+  if (visible.length) {
+    const marks = visible.map(() => "?").join(",");
+    const h = await c.env.DB.prepare(
+      `SELECT staff_id,
+              sum((julianday(end_at) - julianday(start_at)) * 24) AS h_all,
+              sum(CASE WHEN restaurant_id = ? THEN (julianday(end_at) - julianday(start_at)) * 24 ELSE 0 END) AS h_here
+       FROM shifts WHERE status = 'ok' AND staff_id IN (${marks}) AND start_at >= ? AND start_at < ? GROUP BY staff_id`,
+    ).bind(restaurantId, ...visible, bounds.start, bounds.end).all<{ staff_id: number; h_all: number; h_here: number }>();
+    for (const r of h.results) hours[r.staff_id] = { here: Math.round(r.h_here * 100) / 100, all: Math.round(r.h_all * 100) / 100 };
+    if (editable) {
+      elsewhere = (await c.env.DB.prepare(
+        `SELECT sh.staff_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, sh.start_at, sh.end_at
+         FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+         WHERE sh.status = 'ok' AND sh.staff_id IN (${marks}) AND sh.start_at >= ? AND sh.start_at < ?
+           AND NOT (sh.restaurant_id = ? AND ro.department_id = ?)
+         ORDER BY sh.start_at`,
+      ).bind(...visible, bounds.start, bounds.end, restaurantId, department).all()).results;
+    }
+  }
+  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, limits: { overtime_hours: settings.overtime_hours } });
 });
 
 // The caller's own shifts across every restaurant and department.
@@ -560,13 +609,16 @@ app.get("/api/my-shifts", async (c) => {
   if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
   const r = await c.env.DB.prepare(
     `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en,
-            sh.start_at, sh.end_at, sh.until_close, sh.notes
+            sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
   )
     .bind(c.get("me").id, bounds.start, bounds.end)
     .all();
-  return c.json({ week: c.req.query("week"), shifts: r.results });
+  const rows = r.results as { start_at: string; end_at: string; status: string }[];
+  const minutes = (a: string, b: string) => (Date.parse(`${b}:00Z`) - Date.parse(`${a}:00Z`)) / 60000;
+  const total_hours = Math.round((rows.filter((x) => x.status === "ok").reduce((n, x) => n + minutes(x.start_at, x.end_at), 0) / 60) * 100) / 100;
+  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: (await loadSettings(c.env.DB)).overtime_hours } });
 });
 
 // ---------- Roster & admin overview ----------
@@ -660,7 +712,7 @@ async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
     .prepare(
       `SELECT sh.id, sh.start_at, sh.end_at, rs.name AS restaurant
        FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id
-       WHERE sh.staff_id = ? AND sh.id != ? AND sh.start_at < ? AND sh.end_at > ?`,
+       WHERE sh.staff_id = ? AND sh.id != ? AND sh.status = 'ok' AND sh.start_at < ? AND sh.end_at > ?`,
     )
     .bind(b.staff_id, ignoreShiftId ?? -1, b.end_at, b.start_at)
     .all<{ id: number; start_at: string; end_at: string; restaurant: string }>();
