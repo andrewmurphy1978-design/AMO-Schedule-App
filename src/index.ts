@@ -3,6 +3,7 @@ import { ensureMigrated } from "./migrate.ts";
 import { fetchAccessKeys, verifyAccessJwt } from "./access.ts";
 import { findOverlaps, SHIFT_TIME_RE } from "./conflicts.ts";
 import { weekBounds } from "./week.ts";
+import { computeCosts, parseRate } from "./payroll.ts";
 
 type Env = {
   DB: D1Database;
@@ -391,6 +392,50 @@ app.delete("/api/staff/:id/photo", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---------- Wages and labour cost (ADMIN ONLY) ----------
+// Hourly rates never appear in any other endpoint. Managers and employees get 403 here.
+app.put("/api/staff/:id/wage", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const { hourly_rate } = await c.req.json<{ hourly_rate?: string | number | null }>();
+  const empty = hourly_rate === null || hourly_rate === undefined || hourly_rate === "";
+  const cents = parseRate(hourly_rate);
+  if (!empty && cents === null) return c.json({ error: "invalid_rate" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  if (cents === null) await c.env.DB.prepare("DELETE FROM staff_wages WHERE staff_id = ?").bind(id).run();
+  else await c.env.DB.prepare("INSERT OR REPLACE INTO staff_wages (staff_id, hourly_cents) VALUES (?, ?)").bind(id, cents).run();
+  return c.json({ ok: true, hourly_cents: cents });
+});
+
+// GET /api/admin/payroll?restaurant=1&department=kitchen&week=2026-10-26
+// -> labour cost of that department (per day and per clock hour) and of the whole restaurant.
+app.get("/api/admin/payroll", requireAdmin, async (c) => {
+  const restaurantId = intParam(c.req.query("restaurant"));
+  const department = c.req.query("department");
+  const weekStart = c.req.query("week") ?? "";
+  const bounds = weekBounds(weekStart);
+  if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
+  if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(`${weekStart}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+  // include the night before so a shift running past midnight into Monday is counted
+  const prev = new Date(`${weekStart}T00:00:00Z`);
+  prev.setUTCDate(prev.getUTCDate() - 1);
+  const rows = await c.env.DB.prepare(
+    `SELECT sh.start_at, sh.end_at, ro.department_id, w.hourly_cents AS rate_cents
+     FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
+     WHERE sh.restaurant_id = ? AND sh.start_at >= ? AND sh.start_at < ?`,
+  )
+    .bind(restaurantId, `${prev.toISOString().slice(0, 10)}T00:00`, bounds.end)
+    .all<{ start_at: string; end_at: string; department_id: string; rate_cents: number | null }>();
+  const dept = computeCosts(rows.results.filter((r) => r.department_id === department), days);
+  const all = computeCosts(rows.results, days);
+  return c.json({ week: weekStart, department: dept, restaurant: { total_cents: all.total_cents, total_hours: all.total_hours, unrated_hours: all.unrated_hours, days: all.days.map((d) => ({ date: d.date, cents: d.cents })) } });
+});
+
 // ---------- Roles held by staff ----------
 // Admin: any. Manager: only for departments they manage at that restaurant.
 app.post("/api/staff-roles", async (c) => {
@@ -544,7 +589,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),

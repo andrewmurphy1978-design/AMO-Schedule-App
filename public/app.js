@@ -73,6 +73,7 @@ async function api(path, opts = {}) {
   return body;
 }
 
+const money = (cents, decimals = false) => new Intl.NumberFormat(locale(), { style: "currency", currency: "CAD", minimumFractionDigits: decimals ? 2 : 0, maximumFractionDigits: decimals ? 2 : 0 }).format(cents / 100);
 const pad = (n) => String(n).padStart(2, "0");
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parseYmd = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
@@ -110,6 +111,7 @@ const state = {
 };
 
 const DEPTS = ["floor", "kitchen", "delivery"];
+state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
 function allowedDepartments(restaurantId) {
   const { me, roles } = state.me ? { me: state.me.me, roles: state.me } : {};
@@ -177,9 +179,14 @@ async function renderSchedule() {
   const q = `restaurant=${sel.restaurant}&department=${sel.department}&week=${sel.week}`;
   const data = await api(`/schedule?${q}`);
   const roster = data.editable ? await api(`/roster?restaurant=${sel.restaurant}&department=${sel.department}`) : [];
-  const [targets, sets] = await Promise.all([
+  // Labour cost: only requested for admins; the server refuses everyone else.
+  const payrollReq = state.me.me.is_admin
+    ? api(`/admin/payroll?restaurant=${sel.restaurant}&department=${sel.department}&week=${sel.week}`).catch(() => null)
+    : Promise.resolve(null);
+  const [targets, sets, payroll] = await Promise.all([
     api(`/targets?restaurant=${sel.restaurant}&department=${sel.department}`),
     api(`/target-sets?restaurant=${sel.restaurant}`),
+    payrollReq,
   ]);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i));
   if (!days.includes(sel.day)) sel.day = days.includes(ymd(new Date())) ? ymd(new Date()) : days[0];
@@ -244,7 +251,7 @@ async function renderSchedule() {
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null))))
       : h("tr", {}, h("td", { colSpan: 8 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
-  const timeline = renderTimeline({ data, days, targets, sets, openEditor });
+  const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
   $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
 }
 
@@ -266,7 +273,7 @@ function assignLanes(items) {
   return Math.max(1, ends.length);
 }
 
-function renderTimeline({ data, days, targets, sets, openEditor }) {
+function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const sel = state.sel;
   const desktop = mqDesktop.matches;
   const shown = desktop ? days : [sel.day];
@@ -278,7 +285,8 @@ function renderTimeline({ data, days, targets, sets, openEditor }) {
     const wins = targetWindows(dayTargets, closeMin);
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
       .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
-    return { day, wins, items, labels, openMin };
+    const cost = payroll?.department.days.find((x) => x.date === day) ?? null;
+    return { day, wins, items, labels, openMin, cost };
   });
 
   const starts = perDay.flatMap((d) => [...d.items.map((x) => Math.max(0, x.span.s)), ...d.wins.map((w) => w.from)]);
@@ -322,12 +330,20 @@ function renderTimeline({ data, days, targets, sets, openEditor }) {
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     const shade = (from, to) => (to > from ? h("div", { class: "vtl-closed", title: t("beforeOpen"), style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
-    return h("div", { class: "vtl-day" }, shade(startMin, d.openMin), shade(closeMin, endMin), h("div", { class: "vtl-cov" }, cells), h("div", { class: "vtl-lanes" }, bars));
+    const hourly = payroll && state.showHourlyCost && d.cost;
+    const costCol = hourly
+      ? h("div", { class: "vtl-costcol" }, Array.from({ length: hours }, (_, i) => {
+          const c = d.cost.by_hour[(startMin / 60 + i) % 24];
+          return h("div", { class: "vtl-costcell", style: `top:${i * ph}px;height:${ph}px`, title: `${(startMin / 60 + i) % 24}h` }, c > 0 ? money(c) : "");
+        }))
+      : null;
+    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin), shade(closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
   });
 
   const heads = perDay.map((d) => h("div", { class: `vtl-head ${d.day === today ? "today" : ""}` },
     fmt(d.day, { weekday: "short" }), h("small", {}, fmt(d.day, { day: "numeric", month: "short" })),
-    d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null));
+    d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null,
+    d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null));
   const axis = h("div", { class: "vtl-axis" }, Array.from({ length: hours }, (_, i) =>
     h("div", { class: "vtl-hour", style: `top:${i * ph}px` }, `${(startMin / 60 + i) % 24}h`)));
 
@@ -341,12 +357,24 @@ function renderTimeline({ data, days, targets, sets, openEditor }) {
     h("button", { type: "button", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
       h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
 
+  const payrollBox = payroll ? (() => {
+    const today = payroll.department.days.find((x) => x.date === sel.day);
+    return h("div", { class: "payroll" },
+      shown.length === 1 && today ? h("div", { class: "row" }, h("span", {}, `${t("costDay")} — ${t("costDept")}`), h("b", {}, `${money(today.cents, true)} · ${today.hours} ${t("hoursShort")}`)) : null,
+      h("div", { class: "row" }, h("span", {}, `${t("costWeek")} — ${t("costDept")}`), h("b", {}, `${money(payroll.department.total_cents, true)} · ${payroll.department.total_hours} ${t("hoursShort")}`)),
+      h("div", { class: "row" }, h("span", {}, `${t("costWeek")} — ${t("costRestaurant")}`), h("b", {}, `${money(payroll.restaurant.total_cents, true)} · ${payroll.restaurant.total_hours} ${t("hoursShort")}`)),
+      payroll.restaurant.unrated_hours > 0 ? h("div", { class: "warn" }, `${payroll.restaurant.unrated_hours} ${t("unratedHours")}`) : null,
+      h("button", { class: "btn", type: "button", onClick: () => { state.showHourlyCost = !state.showHourlyCost; try { localStorage.setItem("hourlyCost", state.showHourlyCost ? "1" : "0"); } catch { /* ignore */ } render(); } },
+        state.showHourlyCost ? t("hideHourlyCost") : t("showHourlyCost")));
+  })() : null;
+
   return h("section", { class: "timeline" },
     h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })}`),
     dayTabs,
+    payrollBox,
     h("div", { class: "gaps" }, gapBox),
     h("div", { class: "vtl-scroll" },
-      h("div", { class: "vtl", style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${desktop ? 118 : 240}px` },
+      h("div", { class: "vtl", style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
     h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
@@ -736,6 +764,7 @@ function staffCard(s, ov) {
   const phone = h("input", { type: "tel", value: s.phone ?? "" });
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
+  const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
   const refreshAvatars = () => {
@@ -770,11 +799,16 @@ function staffCard(s, ov) {
   const summaryDot = h("span", { class: "dot", style: `background:${staffColor(s.id, chosen)}` });
   const details = h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
-    try { await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } }); toast(t("saved")); } catch (err) { toast(errorText(err)); }
+    try {
+      await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value } });
+      s.hourly_cents = w.hourly_cents; toast(t("saved"));
+    } catch (err) { toast(err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
     h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
     photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches),
     h("button", { class: "btn primary", type: "submit" }, t("save")));

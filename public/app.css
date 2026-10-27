@@ -238,3 +238,13 @@ button.vtl-bar { cursor: pointer; }
 .photo-row { display: flex; align-items: center; gap: 1rem; margin-bottom: .6rem; }
 .photo-row .avatar { margin: 0; }
 .photo-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+
+/* ---------- Payroll (admins only) ---------- */
+.payroll { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: var(--radius); padding: .7rem .9rem; margin: .6rem 0; display: grid; gap: .3rem; }
+.payroll .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .4rem 1rem; font-variant-numeric: tabular-nums; }
+.payroll .row b { font-size: 1.05rem; }
+.payroll .warn { color: var(--warn); font-size: .85rem; }
+.vtl-head .cost { display: block; margin-top: 2px; font-size: .74rem; font-weight: 700; font-variant-numeric: tabular-nums; opacity: .9; }
+.vtl-costcol { position: absolute; left: 40px; top: 0; bottom: 0; width: 40px; }
+.vtl-costcell { position: absolute; left: 0; right: 0; padding: 2px 3px 0 0; text-align: right; font-size: .68rem; color: var(--muted); font-variant-numeric: tabular-nums; border-top: 1px solid var(--line); }
+.vtl-day.with-cost .vtl-lanes { left: 84px; }
