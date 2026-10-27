@@ -5,6 +5,14 @@ import { findOverlaps, SHIFT_TIME_RE } from "./conflicts.ts";
 import { weekBounds } from "./week.ts";
 import { computeCosts, parseRate } from "./payroll.ts";
 import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
+import { normalizePhone } from "./phone.ts";
+import { loadConnections, deliver } from "./notify.ts";
+import { publicConnectionView } from "./connections.ts";
+import { verifyTwilioSignature } from "./twilio.ts";
+import { T, formatWhen, type Lang } from "./templates.ts";
+import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
+import { loadSettingsFrom } from "./settings-db.ts";
+import { localNow } from "./week.ts";
 
 type Env = {
   DB: D1Database;
@@ -17,6 +25,12 @@ type Env = {
   // Local development ONLY (set in .dev.vars, never in production).
   DEV_MODE?: string;
   DEV_USER_EMAIL?: string;
+  // Public address of the app (used in links sent by SMS/email) and the restaurants' time zone.
+  APP_URL?: string;
+  TIMEZONE?: string;
+  // Optional: messaging credentials as environment secrets (otherwise they are saved from the Administration screen).
+  TWILIO_ACCOUNT_SID?: string; TWILIO_AUTH_TOKEN?: string; TWILIO_FROM?: string; TWILIO_API_BASE?: string;
+  SMTP_HOST?: string; SMTP_PORT?: string; SMTP_SECURE?: string; SMTP_USER?: string; SMTP_PASS?: string; SMTP_FROM?: string;
 };
 
 interface Me {
@@ -418,14 +432,28 @@ app.put("/api/settings", requireAdmin, async (c) => {
 app.put("/api/staff/:id/wage", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  const { hourly_rate } = await c.req.json<{ hourly_rate?: string | number | null }>();
+  const { hourly_rate, role_rates } = await c.req.json<{ hourly_rate?: string | number | null; role_rates?: Record<string, string | number | null> }>();
   const empty = hourly_rate === null || hourly_rate === undefined || hourly_rate === "";
   const cents = parseRate(hourly_rate);
   if (!empty && cents === null) return c.json({ error: "invalid_rate" }, 400);
   if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
   if (cents === null) await c.env.DB.prepare("DELETE FROM staff_wages WHERE staff_id = ?").bind(id).run();
   else await c.env.DB.prepare("INSERT OR REPLACE INTO staff_wages (staff_id, hourly_cents) VALUES (?, ?)").bind(id, cents).run();
-  return c.json({ ok: true, hourly_cents: cents });
+  // Optional per-role rates: { "<role_id>": "17.25" | "" } (empty = use the general rate).
+  const saved: Record<string, number> = {};
+  if (role_rates) {
+    const stmts: D1PreparedStatement[] = [];
+    for (const [rid, v] of Object.entries(role_rates)) {
+      const roleId = intParam(rid);
+      const rc = parseRate(v);
+      const blank = v === null || v === undefined || v === "";
+      if (!roleId || (!blank && rc === null)) return c.json({ error: "invalid_rate" }, 400);
+      if (rc === null) stmts.push(c.env.DB.prepare("DELETE FROM staff_role_wages WHERE staff_id = ? AND role_id = ?").bind(id, roleId));
+      else { stmts.push(c.env.DB.prepare("INSERT OR REPLACE INTO staff_role_wages (staff_id, role_id, hourly_cents) VALUES (?, ?, ?)").bind(id, roleId, rc)); saved[rid] = rc; }
+    }
+    if (stmts.length) await c.env.DB.batch(stmts);
+  }
+  return c.json({ ok: true, hourly_cents: cents, role_rates: saved });
 });
 
 // GET /api/admin/payroll?restaurant=1&department=kitchen&week=2026-10-26
@@ -446,8 +474,9 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   const prev = new Date(`${weekStart}T00:00:00Z`);
   prev.setUTCDate(prev.getUTCDate() - 1);
   const rows = await c.env.DB.prepare(
-    `SELECT sh.start_at, sh.end_at, ro.department_id, w.hourly_cents AS rate_cents
+    `SELECT sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents) AS rate_cents
      FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
+          LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = sh.role_id
      WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
   )
     .bind(restaurantId, `${prev.toISOString().slice(0, 10)}T00:00`, bounds.end)
@@ -455,6 +484,140 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   const dept = computeCosts(rows.results.filter((r) => r.department_id === department), days);
   const all = computeCosts(rows.results, days);
   return c.json({ week: weekStart, department: dept, restaurant: { total_cents: all.total_cents, total_hours: all.total_hours, unrated_hours: all.unrated_hours, days: all.days.map((d) => ({ date: d.date, cents: d.cents })) } });
+});
+
+// ---------- Sick calls and replacements ----------
+const flowError = (c: Context<any>, e: unknown) => {
+  if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
+  throw e;
+};
+
+// An employee reports sick for one of their own upcoming shifts (or a manager/admin does it for them).
+app.post("/api/shifts/:id/sick", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const me = c.get("me");
+  const row = await c.env.DB.prepare("SELECT sh.staff_id, sh.restaurant_id, ro.department_id FROM shifts sh JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(id).first<{ staff_id: number; restaurant_id: number; department_id: string }>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+  if (row.staff_id !== me.id && !(await canManage(c.env.DB, me, row.restaurant_id, row.department_id))) return c.json({ error: "forbidden" }, 403);
+  try {
+    return c.json(await startSickCall(c.env, c.env.DB, id, me.id), 201);
+  } catch (e) { return flowError(c, e); }
+});
+
+// Replacement requests the caller may follow: open ones plus the last 7 days.
+app.get("/api/coverage", async (c) => {
+  const me = c.get("me");
+  const since = Date.now() - 7 * 86_400_000;
+  const rows = await c.env.DB.prepare(
+    `SELECT cr.id, cr.shift_id, cr.status, cr.restaurant_id, rs.name AS restaurant, cr.start_at, cr.end_at, cr.created_at, cr.escalated_at, cr.filled_at,
+            ro.department_id, ro.name_fr, ro.name_en, sh.until_close, sick.name AS sick_name, fb.name AS filled_by_name,
+            (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id) AS offers,
+            (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'declined') AS declined,
+            (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'sent') AS waiting
+     FROM coverage_requests cr JOIN restaurants rs ON rs.id = cr.restaurant_id JOIN roles ro ON ro.id = cr.role_id
+          JOIN shifts sh ON sh.id = cr.shift_id JOIN staff sick ON sick.id = cr.sick_staff_id LEFT JOIN staff fb ON fb.id = cr.filled_by
+     WHERE (cr.status = 'open' OR cr.created_at >= ?)
+       AND (?2 = 1 OR EXISTS (SELECT 1 FROM managers m WHERE m.staff_id = ?3 AND m.restaurant_id = cr.restaurant_id AND m.department_id = ro.department_id))
+     ORDER BY (cr.status = 'open') DESC, cr.created_at DESC LIMIT 100`,
+  ).bind(since, me.is_admin ? 1 : 0, me.id).all();
+  return c.json(rows.results);
+});
+
+async function requestScope(c: Context<any>, id: number) {
+  const req = await c.env.DB.prepare(
+    "SELECT cr.id, cr.restaurant_id, cr.role_id, cr.sick_staff_id, cr.start_at, cr.end_at, cr.status, ro.department_id FROM coverage_requests cr JOIN roles ro ON ro.id = cr.role_id WHERE cr.id = ?",
+  ).bind(id).first() as { id: number; restaurant_id: number; role_id: number; sick_staff_id: number; start_at: string; end_at: string; status: string; department_id: string } | null;
+  if (!req) return { error: c.json({ error: "not_found" }, 404) };
+  if (!(await canManage(c.env.DB, c.get("me"), req.restaurant_id, req.department_id))) return { error: c.json({ error: "forbidden" }, 403) };
+  return { req };
+}
+
+app.get("/api/coverage/:id/candidates", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const { req, error } = await requestScope(c, id);
+  if (error) return error;
+  const settings = await loadSettingsFrom(c.env.DB);
+  const r = await gatherCandidates(c.env.DB, { restaurant_id: req!.restaurant_id, role_id: req!.role_id, start_at: req!.start_at, end_at: req!.end_at, sick_staff_id: req!.sick_staff_id }, settings);
+  return c.json({ eligible: r.eligible.map((p) => ({ staff_id: p.staff_id, name: p.name, week_hours: Math.round(p.week_hours * 10) / 10 })), excluded: r.excluded });
+});
+
+// A manager picks the replacement by hand (for example after the "action required" message).
+app.post("/api/coverage/:id/assign", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { staff_id } = await c.req.json<{ staff_id?: number }>();
+  if (!id || !staff_id) return c.json({ error: "bad_request" }, 400);
+  const { req, error } = await requestScope(c, id);
+  if (error) return error;
+  const holds = await c.env.DB.prepare("SELECT 1 FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(staff_id, req!.restaurant_id, req!.role_id).first();
+  if (!holds) return c.json({ error: "staff_does_not_hold_role_at_restaurant" }, 422);
+  try {
+    const out = await fillRequest(c.env, c.env.DB, await loadConnections(c.env, c.env.DB), id, staff_id, "manager");
+    return out === "ok" ? c.json({ ok: true }) : c.json({ error: out === "conflict" ? "overlap" : "already_filled" }, 409);
+  } catch (e) { return flowError(c, e); }
+});
+
+app.post("/api/coverage/:id/cancel", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const { error } = await requestScope(c, id);
+  if (error) return error;
+  try { await cancelRequest(c.env.DB, id); return c.json({ ok: true }); } catch (e) { return flowError(c, e); }
+});
+
+// ---------- Messaging connections and log (admin) ----------
+app.get("/api/connections", requireAdmin, async (c) => c.json(publicConnectionView(await loadConnections(c.env, c.env.DB))));
+
+app.put("/api/connections", requireAdmin, async (c) => {
+  const b = await c.req.json<{ twilio?: { sid?: string; token?: string; from?: string } | null; smtp?: { host?: string; port?: number; secure?: string; user?: string; pass?: string; from?: string } | null }>();
+  const writes: [string, string | null][] = [];
+  if (b.twilio === null) for (const k of ["sid", "token", "from"]) writes.push([`conn_twilio_${k}`, null]);
+  else if (b.twilio) {
+    const { sid, token, from } = b.twilio;
+    if (sid && !/^AC[0-9A-Za-z]{32}$/.test(sid)) return c.json({ error: "invalid_twilio_sid" }, 400);
+    const phone = from ? normalizePhone(from) : undefined;
+    if (from && !phone) return c.json({ error: "invalid_phone" }, 400);
+    if (sid) writes.push(["conn_twilio_sid", sid]);
+    if (token) writes.push(["conn_twilio_token", token]); // empty = keep the saved token
+    if (phone) writes.push(["conn_twilio_from", phone]);
+  }
+  if (b.smtp === null) for (const k of ["host", "port", "secure", "user", "pass", "from"]) writes.push([`conn_smtp_${k}`, null]);
+  else if (b.smtp) {
+    const { host, port, secure, user, pass, from } = b.smtp;
+    if (host && !/^[A-Za-z0-9.-]{1,253}$/.test(host)) return c.json({ error: "invalid_host" }, 400);
+    if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) return c.json({ error: "invalid_port" }, 400);
+    if (secure !== undefined && !["implicit", "starttls", "none"].includes(secure)) return c.json({ error: "invalid_secure" }, 400);
+    if (from && !from.includes("@")) return c.json({ error: "invalid_email" }, 400);
+    if (host) writes.push(["conn_smtp_host", host]);
+    if (port !== undefined) writes.push(["conn_smtp_port", String(port)]);
+    if (secure) writes.push(["conn_smtp_secure", secure]);
+    if (user !== undefined) writes.push(["conn_smtp_user", user]);
+    if (pass) writes.push(["conn_smtp_pass", pass]); // empty = keep the saved password
+    if (from) writes.push(["conn_smtp_from", from]);
+  }
+  await c.env.DB.batch(writes.map(([k, v]) => (v === null ? c.env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(k) : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, v))));
+  return c.json(publicConnectionView(await loadConnections(c.env, c.env.DB)));
+});
+
+app.post("/api/connections/test", requireAdmin, async (c) => {
+  const { channel, to } = await c.req.json<{ channel?: string; to?: string }>();
+  const conn = await loadConnections(c.env, c.env.DB);
+  const lang: Lang = c.get("me") && (await c.env.DB.prepare("SELECT lang FROM staff WHERE id = ?").bind(c.get("me").id).first<{ lang: string }>())?.lang === "en" ? "en" : "fr";
+  if (channel === "sms") {
+    const phone = normalizePhone(to);
+    if (!phone) return c.json({ error: "invalid_phone" }, 400);
+    return c.json(await deliver(c.env.DB, conn, "sms", phone, T.test(lang), "test", null));
+  }
+  if (channel === "email" && to && to.includes("@")) return c.json(await deliver(c.env.DB, conn, "email", to.trim(), T.test(lang), "test", null));
+  return c.json({ error: "invalid_request" }, 400);
+});
+
+app.get("/api/admin/notifications", requireAdmin, async (c) => {
+  const rows = await c.env.DB.prepare(
+    "SELECT n.id, n.created_at, n.channel, n.to_addr, n.subject, n.kind, n.status, n.error, s.name AS staff_name FROM notifications n LEFT JOIN staff s ON s.id = n.staff_id ORDER BY n.id DESC LIMIT 60",
+  ).all();
+  return c.json(rows.results);
 });
 
 // ---------- Roles held by staff ----------
@@ -646,11 +809,12 @@ app.get("/api/roster", async (c) => {
 
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
-  const [staff, roles, managers, restaurants] = await Promise.all([
+  const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
     db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
+    db.prepare("SELECT staff_id, role_id, hourly_cents FROM staff_role_wages").all<{ staff_id: number; role_id: number; hourly_cents: number }>(),
   ]);
   return c.json({
     restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
@@ -659,6 +823,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
       is_admin: s.is_admin === 1,
       roles: roles.results.filter((r) => r.staff_id === s.id),
       managers: managers.results.filter((m) => m.staff_id === s.id),
+      role_rates: Object.fromEntries(roleWages.results.filter((w) => w.staff_id === s.id).map((w) => [w.role_id, w.hourly_cents])),
     })),
   });
 });
@@ -671,9 +836,11 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   if (b.color != null && !/^#[0-9a-fA-F]{6}$/.test(b.color)) return c.json({ error: "invalid_color" }, 400);
   const lang = b.lang === "en" ? "en" : "fr";
   const channel = b.notify_channel === "email" ? "email" : "sms";
+  const phone = b.phone?.trim() ? normalizePhone(b.phone) : null;
+  if (b.phone?.trim() && !phone) return c.json({ error: "invalid_phone" }, 400);
   try {
     await c.env.DB.prepare("UPDATE staff SET name=?, email=?, phone=?, lang=?, notify_channel=?, color=? WHERE id=?")
-      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, b.phone?.trim() || null, lang, channel, b.color?.toLowerCase() ?? null, id)
+      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, id)
       .run();
   } catch {
     return c.json({ error: "email_taken" }, 409);
@@ -772,6 +939,104 @@ app.delete("/api/shifts/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---------- Public routes (no Access login): reply links and the Twilio webhook ----------
+// These must be reachable without logging in, so the hostname needs an Access "Bypass" rule for /r/* and /hooks/*.
+// The reply link is protected by its long random token; the webhook by Twilio's request signature.
+const esc = (v: string) => v.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+
+interface OfferView { id: number; request_id: number; staff_id: number; status: string; req_status: string; lang: string; restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }
+const offerByToken = (db: D1Database, token: string) => db.prepare(
+  `SELECT o.id, o.request_id, o.staff_id, o.status, cr.status AS req_status, s.lang, rs.name AS restaurant, ro.name_fr, ro.name_en, cr.start_at, cr.end_at, sh.until_close
+   FROM coverage_offers o JOIN coverage_requests cr ON cr.id = o.request_id JOIN staff s ON s.id = o.staff_id
+        JOIN restaurants rs ON rs.id = cr.restaurant_id JOIN roles ro ON ro.id = cr.role_id JOIN shifts sh ON sh.id = cr.shift_id
+   WHERE o.token = ?`,
+).bind(token).first<OfferView>();
+
+app.get("/r/:token", async (c) => {
+  await ensureMigrated(c.env.DB);
+  const token = c.req.param("token");
+  const o = /^[A-Za-z0-9_-]{20,64}$/.test(token) ? await offerByToken(c.env.DB, token) : null;
+  const lang: Lang = o?.lang === "en" ? "en" : "fr";
+  const L = lang === "fr"
+    ? { title: "Remplacement demandé", yes: "Accepter", no: "Refuser", gone: "Ce lien n’est plus valide.", filled: "Le remplacement a déjà été comblé. Merci quand même!", done: "Merci, c’est noté.", accepted: "Confirmé! Le quart est à ton horaire.", declined: "Refusé. Merci de nous avoir répondu.", err: "Une erreur est survenue. Réessaie." }
+    : { title: "Replacement needed", yes: "Accept", no: "Decline", gone: "This link is no longer valid.", filled: "The replacement has already been filled. Thanks anyway!", done: "Thanks, noted.", accepted: "Confirmed! The shift is on your schedule.", declined: "Declined. Thanks for answering.", err: "Something went wrong. Please try again." };
+  const open = !!o && o.status === "sent" && o.req_status === "open";
+  const detail = o ? `${lang === "fr" ? o.name_fr : o.name_en} — ${o.restaurant}<br><b>${esc(formatWhen(o.start_at, o.end_at, !!o.until_close, lang))}</b>` : "";
+  const html = `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Mikes</title>
+<style>body{font:18px/1.4 system-ui,sans-serif;margin:0;background:#f6f4f1;color:#1f1f23}header{background:#da291c;color:#fff;padding:14px 18px;font-weight:800;font-style:italic;font-size:1.5rem}main{max-width:480px;margin:0 auto;padding:22px 18px}
+.card{background:#fff;border-radius:14px;padding:18px;border:1px solid #e3dfd9}button{width:100%;min-height:52px;border-radius:12px;border:0;font:inherit;font-weight:700;margin-top:12px}.y{background:#da291c;color:#fff}.n{background:#fff;border:1px solid #c9c4bc}</style></head>
+<body><header>Mikes</header><main><div class="card"><h2 style="margin-top:0">${L.title}</h2>
+${o ? `<p>${detail}</p>` : `<p>${L.gone}</p>`}
+${open ? `<div id="btns"><button class="y" onclick="ans(true)">${L.yes}</button><button class="n" onclick="ans(false)">${L.no}</button></div>` : o ? `<p>${o.status === "accepted" ? L.accepted : o.status === "declined" ? L.declined : L.filled}</p>` : ""}
+<p id="msg" role="status"></p></div></main>
+<script>async function ans(a){document.getElementById('btns').style.display='none';try{const r=await fetch('/hooks/offer/${esc(token)}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({accept:a})});const j=await r.json();
+document.getElementById('msg').textContent=j.result==='accepted'?${JSON.stringify(L.accepted)}:j.result==='declined'?${JSON.stringify(L.declined)}:${JSON.stringify(L.filled)}}catch(e){document.getElementById('msg').textContent=${JSON.stringify(L.err)};document.getElementById('btns').style.display=''}}</script></body></html>`;
+  return c.html(html, 200, { "cache-control": "no-store" });
+});
+
+app.post("/hooks/offer/:token", async (c) => {
+  await ensureMigrated(c.env.DB);
+  const token = c.req.param("token");
+  const o = /^[A-Za-z0-9_-]{20,64}$/.test(token) ? await offerByToken(c.env.DB, token) : null;
+  if (!o) return c.json({ error: "invalid_link" }, 404);
+  const { accept } = await c.req.json<{ accept?: boolean }>().catch(() => ({ accept: undefined }));
+  if (typeof accept !== "boolean") return c.json({ error: "bad_request" }, 400);
+  return c.json({ result: await answerOffer(c.env, c.env.DB, o, accept) });
+});
+
+// Inbound SMS from Twilio: YES / NO to an offer, or SICK to report the next shift.
+app.post("/hooks/twilio", async (c) => {
+  await ensureMigrated(c.env.DB);
+  const conn = await loadConnections(c.env, c.env.DB);
+  const form = await c.req.formData().catch(() => null);
+  const params: Record<string, string> = {};
+  form?.forEach((v, k) => { if (typeof v === "string") params[k] = v; });
+  const url = conn.appUrl ? `${conn.appUrl}/hooks/twilio` : c.req.url;
+  if (!conn.twilio || !(await verifyTwilioSignature(conn.twilio.token, url, params, c.req.header("X-Twilio-Signature")))) return c.text("forbidden", 403);
+  const twiml = (text?: string) => c.body(`<?xml version="1.0" encoding="UTF-8"?><Response>${text ? `<Message>${esc(text)}</Message>` : ""}</Response>`, 200, { "content-type": "text/xml" });
+  const from = normalizePhone(params.From);
+  const person = from ? await c.env.DB.prepare("SELECT id, name, lang FROM staff WHERE phone = ?").bind(from).first<{ id: number; name: string; lang: string }>() : null;
+  if (!person) return twiml();
+  const lang: Lang = person.lang === "en" ? "en" : "fr";
+  const word = (params.Body ?? "").trim().toLowerCase();
+
+  if (/^(oui|o|yes|y|1|ok)\b/.test(word) || /^(non|n|no|2)\b/.test(word)) {
+    const accept = /^(oui|o|yes|y|1|ok)\b/.test(word);
+    const offer = await c.env.DB.prepare("SELECT id, request_id, staff_id, status FROM coverage_offers WHERE staff_id = ? AND status = 'sent' ORDER BY sent_at DESC LIMIT 1").bind(person.id).first<{ id: number; request_id: number; staff_id: number; status: string }>();
+    if (!offer) return twiml(T.noOpenOffer(lang).text);
+    const result = await answerOffer(c.env, c.env.DB, offer, accept);
+    // The winner also receives the normal confirmation message from the flow; answer the others right here.
+    if (result === "declined") return twiml(lang === "fr" ? "Mikes: merci, c’est noté." : "Mikes: thanks, noted.");
+    if (result === "filled" || result === "closed") return twiml(lang === "fr" ? "Mikes: le remplacement est déjà comblé. Merci!" : "Mikes: the replacement is already filled. Thanks!");
+    if (result === "conflict") return twiml(lang === "fr" ? "Mikes: tu as déjà un quart à ce moment-là." : "Mikes: you already have a shift at that time.");
+    return twiml();
+  }
+  if (/^(malade|sick|malad)/.test(word)) {
+    const now = localNow(c.env.TIMEZONE);
+    const soon = new Date(`${now}:00Z`); soon.setUTCHours(soon.getUTCHours() + 24);
+    const shift = await c.env.DB.prepare(
+      "SELECT id FROM shifts WHERE staff_id = ? AND status = 'ok' AND end_at > ? AND start_at < ? ORDER BY start_at LIMIT 1",
+    ).bind(person.id, now, soon.toISOString().slice(0, 16)).first<{ id: number }>();
+    if (!shift) return twiml(T.noUpcomingShift(lang).text);
+    try {
+      await startSickCall(c.env, c.env.DB, shift.id, person.id);
+      const row = await c.env.DB.prepare("SELECT sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(shift.id).first<{ start_at: string; end_at: string; until_close: number; restaurant: string; name_fr: string; name_en: string }>();
+      return twiml(row ? T.sickRecorded(lang, { restaurant: row.restaurant, role: lang === "fr" ? row.name_fr : row.name_en, when: formatWhen(row.start_at, row.end_at, !!row.until_close, lang) }).text : undefined);
+    } catch (e) {
+      if (e instanceof FlowError) return twiml(lang === "fr" ? "Mikes: ce quart est déjà signalé ou terminé." : "Mikes: that shift is already reported or over.");
+      throw e;
+    }
+  }
+  return twiml(T.smsHelp(lang).text);
+});
+
+
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); })());
+  },
+};

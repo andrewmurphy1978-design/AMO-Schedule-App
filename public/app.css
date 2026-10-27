@@ -339,3 +339,4 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .sick-badge { display: inline-block; margin-top: 2px; padding: 1px 8px; border-radius: 999px; background: #fff7ed; border: 1px solid #fdba74; color: var(--warn); font-size: .75rem; font-weight: 700; }
 .replaced { display: block; font-size: .75rem; color: var(--muted); }
 .vtl-bar.sick { opacity: .5; outline: 2px dashed var(--warn); outline-offset: -3px; }
+.role-rate{display:flex;align-items:center;gap:8px;margin-top:6px}.role-rate span{flex:1}.role-rate input{width:110px}

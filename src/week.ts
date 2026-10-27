@@ -20,3 +20,15 @@ export function weekBounds(monday: string): { start: string; end: string } | nul
   next.setUTCDate(next.getUTCDate() + 7);
   return { start: `${monday}T00:00`, end: `${next.toISOString().slice(0, 10)}T00:00` };
 }
+
+/** Monday ('YYYY-MM-DD') of the week containing the given date. */
+export function mondayOfDate(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+}
+
+/** Current wall-clock time in the restaurant's time zone as 'YYYY-MM-DDTHH:MM'. */
+export function localNow(timeZone = "America/Toronto", at = new Date()): string {
+  return at.toLocaleString("sv-SE", { timeZone, hour12: false }).replace(" ", "T").slice(0, 16);
+}

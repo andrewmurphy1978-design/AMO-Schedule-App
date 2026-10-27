@@ -113,7 +113,7 @@ const state = {
   sel: { restaurant: null, department: null, week: mondayOf(new Date()), day: ymd(new Date()) },
 };
 
-const DEPTS = ["floor", "kitchen", "delivery"];
+const DEPTS = ["floor", "kitchen", "prep", "delivery"];
 state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
@@ -884,6 +884,13 @@ function staffCard(s, ov) {
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
   const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
+  // Optional hourly rate per role held (e.g. delivery driver vs cook); blank = use the general rate.
+  const heldRoleIds = [...new Set(s.roles.map((r) => r.role_id))];
+  const roleRateInputs = heldRoleIds.map((rid) => {
+    const ro = state.roles.find((x) => x.id === rid);
+    const cents = s.role_rates?.[rid];
+    return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("sameAsGeneral"), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
+  }).filter((x) => x.ro);
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
   const refreshAvatars = () => {
@@ -920,14 +927,16 @@ function staffCard(s, ov) {
     e.preventDefault();
     try {
       await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
-      const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value } });
-      s.hourly_cents = w.hourly_cents; toast(t("saved"));
+      const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
+      s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates; toast(t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
     h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
+    roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
+      h("label", { class: "role-rate" }, h("span", {}, roleName(x.ro)), x.input))) : null,
     photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches),
     h("button", { class: "btn primary", type: "submit" }, t("save")));

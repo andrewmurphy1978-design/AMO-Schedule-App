@@ -48,7 +48,7 @@ const dict = {
     zoomDay: "Agrandir ce jour", backToWeek: "Semaine complète", prevDay: "Jour précédent", nextDay: "Jour suivant", zoomHint: "Cliquez sur un jour pour l’agrandir.",
     total: "Total", allPlaces: "au total", overtimeWarn: "Dépasse le seuil d’heures", sickOpen: "Malade", replacing: "remplace", elsewhere: "Travaille ailleurs ce jour-là",
     elsewhereToday: "Travaille ailleurs ce jour-là", weekHours: "Heures de la semaine", myWeekHours: "Mes heures cette semaine",
-    "dept.floor": "Salle", "dept.kitchen": "Cuisine", "dept.delivery": "Livraison",
+    "dept.floor": "Salle", "dept.kitchen": "Cuisine", "dept.prep": "Plonge / Préparation", "sameAsGeneral": "Taux général", "rateByRole": "Taux par rôle", "dept.delivery": "Livraison",
     footer: "Toujours Mikes — gestion des horaires",
   },
   en: {
@@ -99,7 +99,7 @@ const dict = {
     zoomDay: "Zoom on this day", backToWeek: "Full week", prevDay: "Previous day", nextDay: "Next day", zoomHint: "Click a day to zoom in.",
     total: "Total", allPlaces: "in total", overtimeWarn: "Over the weekly-hours limit", sickOpen: "Sick", replacing: "replacing", elsewhere: "Working elsewhere that day",
     elsewhereToday: "Working elsewhere that day", weekHours: "Weekly hours", myWeekHours: "My hours this week",
-    "dept.floor": "Floor", "dept.kitchen": "Kitchen", "dept.delivery": "Delivery",
+    "dept.floor": "Floor", "dept.kitchen": "Kitchen", "dept.prep": "Dish / Prep", "sameAsGeneral": "General rate", "rateByRole": "Rate by role", "dept.delivery": "Delivery",
     footer: "Toujours Mikes — schedule management",
   },
 };

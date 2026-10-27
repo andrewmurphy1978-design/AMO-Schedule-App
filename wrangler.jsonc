@@ -8,13 +8,17 @@
   // Per-client values live here, in version control, so a deploy can never lose them.
   "vars": {
     "ACCESS_TEAM_DOMAIN": "small-dawn-0a02.cloudflareaccess.com",
-    "ACCESS_AUD": "762341318b5a63148bf9875ab57bbf3cfe415d1166940862d72e8d684725b4a3"
+    "ACCESS_AUD": "762341318b5a63148bf9875ab57bbf3cfe415d1166940862d72e8d684725b4a3",
+    "APP_URL": "https://mikes.andrewmurphy.online",
+    "TIMEZONE": "America/Toronto"
   },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/r/*", "/hooks/*"]
   },
+  // Every 5 minutes: alert managers when nobody accepted a sick-call replacement in time.
+  "triggers": { "crons": ["*/5 * * * *"] },
   "d1_databases": [
     { "binding": "DB", "database_name": "mikes-schedule-db", "database_id": "c9c1e842-b5b7-4db2-97a5-907080a4715a" }
   ]
