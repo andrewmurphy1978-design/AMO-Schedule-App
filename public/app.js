@@ -402,7 +402,7 @@ async function renderSchedule() {
         h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
           fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
-      h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
+      h("tr", { class: data.shifts.some((s) => s.staff_id === id) || (data.elsewhere ?? []).some((e) => e.staff_id === id) ? "" : "noshift" }, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
           offAt(id, d) ? offChip(offAt(id, d)) : null,
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
@@ -416,7 +416,7 @@ async function renderSchedule() {
             return data.editable ? h("button", { class: cls, type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: cls, style }, body);
           }),
           // Working somewhere else the same day: shown in grey so you don't double-book by mistake.
-          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: t("elsewhere") }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`)),
+          elsewhereAt(id, d).map((e) => h("div", { class: "elsewhere", title: t("elsewhere") }, h("b", {}, `↗ ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${place(e)}`, h("span", { class: "print-only" }, ` (${t("shiftElsewhere")})`))),
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null)),
         data.hours ? totalCell(id) : null))
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
@@ -1166,11 +1166,13 @@ async function renderAdmin() {
   })();
   const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
   const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
+  const inactiveCount = ov.staff.filter((s) => s.active === false).length;
+  const showInactive = inactiveCount ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!state.showInactive, onChange: (e) => { state.showInactive = e.target.checked; render(); } }), h("span", {}, `${t("showInactive")} (${inactiveCount})`)) : null;
 
   const sections = {
     restaurants: () => [restaurantsPanel, hoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
-    staff: () => [staffPanel, ...staffList],
+    staff: () => [staffPanel, showInactive, h("div", { class: state.showInactive ? "" : "hide-inactive" }, staffList)],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
@@ -1654,6 +1656,15 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.active !== false, onChange: async (e) => {
+      const want = e.target.checked;
+      adminMsg.textContent = "";
+      try {
+        const r = await api(`/staff/${s.id}/active`, { method: "PUT", body: { active: want } });
+        s.active = want; rowEl.classList.toggle("inactive", !want);
+        toast(!want && r.upcoming_shifts ? `${t("saved")} — ⚠ ${r.upcoming_shifts} ${t("upcomingShiftsKept")}` : t("saved"));
+      } catch (err) { e.target.checked = !want; adminMsg.textContent = { cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err); }
+    } }), h("span", {}, t("activeLabel"))),
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.is_admin, onChange: async (e) => {
       const want = e.target.checked;
       adminMsg.textContent = "";
@@ -1752,9 +1763,11 @@ function staffCard(s, ov) {
     dlg.addEventListener("close", () => { s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };
-  return h("button", { class: "staff-row", type: "button", onClick: open },
+  const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
     h("span", { class: "who-row" }, summaryAvatar, nameEl), iconBlock,
+    h("span", { class: "inactive-badge badge" }, t("inactive")),
     s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? ""));
+  return rowEl;
 }
 
 // ---------- boot ----------

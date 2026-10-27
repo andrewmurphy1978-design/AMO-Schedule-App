@@ -74,9 +74,9 @@ app.use("/api/*", async (c, next) => {
   await ensureMigrated(c.env.DB);
   const { email, reason } = await identify(c);
   if (!email) return c.json({ error: "unauthenticated", reason }, 401);
-  let row = await c.env.DB.prepare("SELECT id, name, email, is_admin FROM staff WHERE lower(email) = ?")
+  let row = await c.env.DB.prepare("SELECT id, name, email, is_admin, active FROM staff WHERE lower(email) = ?")
     .bind(email)
-    .first<{ id: number; name: string; email: string; is_admin: number }>();
+    .first<{ id: number; name: string; email: string; is_admin: number; active?: number }>();
   if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
     // An admin record created without an email (e.g. by an import) is claimed by the first ADMIN_EMAIL login.
     row = await c.env.DB.prepare(
@@ -92,6 +92,7 @@ app.use("/api/*", async (c, next) => {
     row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1 };
   }
   if (!row) return c.json({ error: "unknown_user", email }, 403);
+  if (row.active === 0) return c.json({ error: "inactive", email }, 403); // deactivated employees cannot sign in
   c.set("me", { ...row, is_admin: row.is_admin === 1 });
   await next();
 });
@@ -184,6 +185,25 @@ app.put("/api/roles/:id/pre-open", requireAdmin, async (c) => {
   if (!id || !Number.isInteger(minutes) || (minutes as number) < 0 || (minutes as number) > 180) return c.json({ error: "invalid_minutes" }, 400);
   const r = await c.env.DB.prepare("UPDATE roles SET pre_open_minutes = ? WHERE id = ?").bind(minutes, id).run();
   return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// Deactivate / reactivate an employee (admin only; not yourself).
+app.put("/api/staff/:id/active", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { active } = await c.req.json<{ active?: boolean }>();
+  if (!id || typeof active !== "boolean") return c.json({ error: "bad_request" }, 400);
+  if (!active && id === c.get("me").id) return c.json({ error: "cannot_remove_self" }, 409);
+  if (!active) {
+    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND active = 1 AND id != ?").bind(id).first<{ n: number }>();
+    const isAdmin = await c.env.DB.prepare("SELECT is_admin FROM staff WHERE id = ?").bind(id).first<{ is_admin: number }>();
+    if (isAdmin?.is_admin === 1 && !n?.n) return c.json({ error: "last_admin" }, 409);
+  }
+  const r = await c.env.DB.prepare("UPDATE staff SET active = ? WHERE id = ?").bind(active ? 1 : 0, id).run();
+  if (!r.meta.changes) return c.json({ error: "not_found" }, 404);
+  // Pending replacement offers to this person are no longer valid.
+  if (!active) await c.env.DB.prepare("UPDATE coverage_offers SET status = 'closed' WHERE staff_id = ? AND status = 'sent'").bind(id).run().catch(() => {});
+  const future = await c.env.DB.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND status = 'ok' AND start_at >= ?").bind(id, localNow(c.env.TIMEZONE)).first<{ n: number }>();
+  return c.json({ ok: true, active, upcoming_shifts: active ? 0 : future?.n ?? 0 });
 });
 
 // Make someone an administrator (or remove it). The last administrator and yourself cannot be removed.
@@ -710,7 +730,7 @@ async function approversOf(db: D1Database, staffId: number): Promise<number[]> {
     `SELECT DISTINCT m.staff_id FROM managers m
        JOIN (SELECT DISTINCT sr.restaurant_id, ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?) x
          ON x.restaurant_id = m.restaurant_id AND x.department_id = m.department_id
-     UNION SELECT id FROM staff WHERE is_admin = 1`,
+     UNION SELECT id FROM staff WHERE is_admin = 1 AND active = 1`,
   ).bind(staffId).all<{ staff_id: number }>();
   return r.results.map((x) => x.staff_id);
 }
@@ -756,7 +776,7 @@ app.post("/api/time-off", async (c) => {
 // People a manager/admin may enter time off for.
 app.get("/api/time-off/people", async (c) => {
   const me = c.get("me");
-  const rows = sortByName((await c.env.DB.prepare("SELECT id, name FROM staff").all<{ id: number; name: string }>()).results);
+  const rows = sortByName((await c.env.DB.prepare("SELECT id, name FROM staff WHERE active = 1").all<{ id: number; name: string }>()).results);
   if (me.is_admin) return c.json(rows);
   const out = [];
   for (const r of rows) if (r.id !== me.id && (await approversOf(c.env.DB, r.id)).includes(me.id)) out.push(r);
@@ -1206,7 +1226,7 @@ app.get("/api/schedule", async (c) => {
   const ids = new Set<number>((shifts.results as { staff_id: number }[]).map((x) => x.staff_id));
   if (editable) {
     const roster = await c.env.DB.prepare(
-      "SELECT DISTINCT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.restaurant_id = ? AND ro.department_id = ?",
+      "SELECT DISTINCT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN staff s ON s.id = sr.staff_id WHERE sr.restaurant_id = ? AND ro.department_id = ? AND s.active = 1",
     ).bind(restaurantId, department).all<{ staff_id: number }>();
     for (const r of roster.results) ids.add(r.staff_id);
   }
@@ -1279,7 +1299,7 @@ app.get("/api/roster", async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT s.id AS staff_id, s.name, s.first_name, s.last_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
      JOIN staff s ON s.id = sr.staff_id JOIN roles ro ON ro.id = sr.role_id
-     WHERE sr.restaurant_id = ? AND ro.department_id = ? ORDER BY s.name`,
+     WHERE sr.restaurant_id = ? AND ro.department_id = ? AND s.active = 1 ORDER BY s.name`,
   )
     .bind(restaurantId, department)
     .all<{ staff_id: number; name: string; first_name: string; last_name: string; color: string | null; photo_v: number | null; role_id: number }>();
@@ -1295,7 +1315,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, first_name, last_name, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
@@ -1307,6 +1327,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
     staff: sortByName(staff.results as any[]).map((s) => ({
       ...s,
       is_admin: s.is_admin === 1,
+      active: s.active !== 0,
       roles: roles.results.filter((r) => r.staff_id === s.id),
       managers: managers.results.filter((m) => m.staff_id === s.id),
       role_rates: Object.fromEntries(roleWages.results.filter((w) => w.staff_id === s.id).map((w) => [w.role_id, w.hourly_cents])),

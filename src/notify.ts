@@ -50,7 +50,7 @@ export async function notifyStaff(db: D1Database, conn: Connections, person: Sta
 export async function managersOf(db: D1Database, restaurantId: number, departmentId: string): Promise<StaffContact[]> {
   const r = await db.prepare(
     `SELECT DISTINCT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel FROM staff s
-     WHERE s.is_admin = 1 OR s.id IN (SELECT staff_id FROM managers WHERE restaurant_id = ? AND department_id = ?)`,
+     WHERE s.active = 1 AND (s.is_admin = 1 OR s.id IN (SELECT staff_id FROM managers WHERE restaurant_id = ? AND department_id = ?))`,
   ).bind(restaurantId, departmentId).all<StaffContact>();
   return r.results;
 }

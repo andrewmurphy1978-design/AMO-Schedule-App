@@ -36,7 +36,7 @@ function newToken(): string {
 export async function gatherCandidates(db: D1Database, req: { restaurant_id: number; role_id: number; start_at: string; end_at: string; sick_staff_id: number }, settings: { overtime_hours: number; replacement_allow_overtime: boolean }) {
   const people = (await db.prepare(
     `SELECT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id
-     WHERE sr.restaurant_id = ? AND sr.role_id = ? AND s.id != ?`,
+     WHERE sr.restaurant_id = ? AND sr.role_id = ? AND s.id != ? AND s.active = 1`,
   ).bind(req.restaurant_id, req.role_id, req.sick_staff_id).all<StaffContact>()).results;
   if (!people.length) return { contacts: new Map<number, StaffContact>(), eligible: [] as Candidate[], excluded: [] as { staff_id: number; name: string; reason: string }[] };
   const marks = people.map(() => "?").join(",");
