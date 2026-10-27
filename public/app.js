@@ -113,6 +113,7 @@ const state = {
 };
 
 const DEPTS = ["floor", "kitchen", "delivery"];
+state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
 function allowedDepartments(restaurantId) {
@@ -191,6 +192,7 @@ async function renderSchedule() {
     payrollReq,
   ]);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i));
+  if (state.zoomDay && !days.includes(state.zoomDay)) state.zoomDay = null;
   if (!days.includes(sel.day)) sel.day = days.includes(ymd(new Date())) ? ymd(new Date()) : days[0];
   const today = ymd(new Date());
 
@@ -278,7 +280,8 @@ function assignLanes(items) {
 function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const sel = state.sel;
   const desktop = mqDesktop.matches;
-  const shown = desktop ? days : [sel.day];
+  const zoom = !!(desktop && state.zoomDay && days.includes(state.zoomDay));
+  const shown = zoom ? [state.zoomDay] : desktop ? days : [sel.day];
 
   const perDay = shown.map((day) => {
     const { targets: dayTargets, labels } = resolveForDate(targets, sets, day);
@@ -296,11 +299,11 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const startMin = Math.floor(Math.min(...perDay.map((d) => d.openMin), ...starts) / 60) * 60;
   const endMin = Math.ceil(Math.max(...perDay.map((d) => d.closeMin), ...ends) / 60) * 60;
   const hours = (endMin - startMin) / 60;
-  const ph = desktop ? 44 : 56; // pixels per hour
+  const ph = zoom ? 68 : desktop ? 44 : 56; // pixels per hour
   const y = (m) => ((m - startMin) / 60) * ph;
   const today = ymd(new Date());
   const mainWidth = $app.clientWidth || 360;
-  const colWidth = desktop ? Math.max(payroll && state.showHourlyCost ? 160 : 118, (mainWidth - 48) / 7) : mainWidth - 48;
+  const colWidth = zoom ? mainWidth - 48 : desktop ? Math.max(payroll && state.showHourlyCost ? 160 : 118, (mainWidth - 48) / 7) : mainWidth - 48;
   const laneArea = colWidth - 46 - (payroll && state.showHourlyCost ? 42 : 0);
 
   const gapLines = [];
@@ -325,7 +328,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     const bars = clipped.map((x) => {
       const range = `${hhmm(x.s.start_at)}–${x.s.until_close ? "F" : hhmm(x.s.end_at)}`;
       const height = ((x.to - x.from) / 60) * ph;
-      const wide = lanes <= 2 || (!desktop && lanes <= 3);
+      const wide = zoom || lanes <= 2 || (!desktop && lanes <= 3);
       const color = staffColor(x.s.staff_id, x.s.staff_color);
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
@@ -334,9 +337,11 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
       // Picture size follows the room available in this lane; skip it on very short bars.
-      const size = Math.max(14, Math.min(30, Math.floor(laneArea / lanes) - 6));
+      const size = Math.max(14, Math.min(zoom ? 44 : 30, Math.floor(laneArea / lanes) - 6));
       const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
-      const body = wide
+      const body = zoom
+        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
+        : wide
         ? [h("b", { class: "bar-name" }, pic, x.s.staff_name), range]
         : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`)];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
@@ -352,10 +357,26 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin), shade(d.closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
   });
 
-  const heads = perDay.map((d) => h("div", { class: `vtl-head ${d.day === today ? "today" : ""}` },
-    fmt(d.day, { weekday: "short" }), h("small", {}, fmt(d.day, { day: "numeric", month: "short" })),
-    d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null,
-    d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null));
+  const heads = perDay.map((d) => {
+    const kids = [fmt(d.day, { weekday: "short" }), h("small", {}, fmt(d.day, { day: "numeric", month: "short" })),
+      d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null,
+      d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null];
+    const cls = `vtl-head ${d.day === today ? "today" : ""}`;
+    // Week view on desktop: clicking a day header zooms into that day.
+    return desktop && !zoom && shown.length > 1
+      ? h("button", { class: `${cls} zoomable`, type: "button", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d.day, { weekday: "long", day: "numeric", month: "long" })}`,
+          onClick: () => { state.zoomDay = d.day; sel.day = d.day; render(); } }, kids)
+      : h("div", { class: cls }, kids);
+  });
+  const stepDay = (n) => {
+    const nd = addDays(state.zoomDay, n);
+    if (!days.includes(nd)) sel.week = mondayOf(parseYmd(nd));
+    state.zoomDay = nd; sel.day = nd; render();
+  };
+  const zoomBar = zoom ? h("div", { class: "zoom-bar" },
+    h("button", { class: "btn", type: "button", onClick: () => { state.zoomDay = null; render(); } }, `← ${t("backToWeek")}`),
+    h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => stepDay(-1) }, "‹"),
+    h("button", { class: "icon-btn", type: "button", "aria-label": t("nextDay"), onClick: () => stepDay(1) }, "›")) : null;
   const axis = h("div", { class: "vtl-axis" }, Array.from({ length: hours }, (_, i) =>
     h("div", { class: "vtl-hour", style: `top:${i * ph}px` }, `${(startMin / 60 + i) % 24}h`)));
 
@@ -385,12 +406,14 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   })() : null;
 
   return h("section", { class: "timeline" },
-    h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })}`),
+    h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(shown[0], { weekday: "long", day: "numeric", month: "long" })}`),
+    shown.length > 1 && desktop ? h("p", { class: "meta" }, t("zoomHint")) : null,
+    zoomBar,
     dayTabs,
     payrollBox,
     h("div", { class: "gaps" }, gapBox, extraBox),
     h("div", { class: "vtl-scroll" },
-      h("div", { class: "vtl", style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
+      h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
     h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),

@@ -296,3 +296,19 @@ button.vtl-bar { cursor: pointer; }
   .hours-row .mini > span { display: block; }
   .hours-row .time24 { max-width: none; }
 }
+
+/* ---------- Zoom on one day (desktop) ---------- */
+.vtl { --cov: 38px; }
+.vtl.zoomed { --cov: 58px; }
+.vtl-cov { width: var(--cov); }
+.vtl-lanes { left: calc(var(--cov) + 4px); }
+.vtl-costcol { left: calc(var(--cov) + 2px); }
+.vtl-day.with-cost .vtl-lanes { left: calc(var(--cov) + 46px); }
+button.vtl-head { border: 0; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); font: inherit; color: inherit; cursor: zoom-in; }
+button.vtl-head:hover { background: color-mix(in srgb, var(--brand) 12%, var(--bg)); }
+button.vtl-head.today:hover { background: var(--brand-dark); }
+.zoom-bar { display: flex; align-items: center; gap: .5rem; margin: .4rem 0 .8rem; }
+.vtl.zoomed .vtl-cell { font-size: .9rem; }
+.vtl.zoomed .vtl-bar { font-size: .9rem; line-height: 1.25; padding: 6px 10px; gap: 2px; display: flex; flex-direction: column; align-items: flex-start; }
+.vtl.zoomed .vtl-bar em { opacity: .9; font-size: .8rem; }
+.vtl.zoomed .vtl-hour { font-size: .85rem; }
