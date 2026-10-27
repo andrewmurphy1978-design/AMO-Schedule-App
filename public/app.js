@@ -170,6 +170,7 @@ async function render() {
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
+    console.error("render failed:", e);
     $app.replaceChildren(h("div", { class: "empty" }, errorText(e)));
   }
 }
@@ -949,7 +950,6 @@ async function renderTimeOff() {
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
-  const sex = h("select", {}, [["", t("sexUnspecified")], ["M", t("sexMale")], ["F", t("sexFemale")]].map(([v, l]) => h("option", { value: v, selected: (s.sex ?? "") === v }, l)));
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: acc.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: acc.notify_channel === v }, l)));
   const save = async (e) => {
@@ -1701,6 +1701,7 @@ function staffCard(s, ov) {
   const fullName = () => joinName(first.value, last.value);
   const email = h("input", { type: "email", value: s.email ?? "" });
   const phone = h("input", { type: "tel", value: s.phone ?? "" });
+  const sex = h("select", {}, [["", t("sexUnspecified")], ["M", t("sexMale")], ["F", t("sexFemale")]].map(([v, l]) => h("option", { value: v, selected: (s.sex ?? "") === v }, l)));
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
   const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: ov.default_rates?.general_cents != null ? `${t("defaultWord")} ${(ov.default_rates.general_cents / 100).toFixed(2)}` : t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
