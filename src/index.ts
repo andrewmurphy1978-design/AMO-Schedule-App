@@ -719,6 +719,64 @@ app.post("/api/time-off/:id/decide", async (c) => {
   return c.json({ ok: true, shifts_on_those_days: approve ? clash?.n ?? 0 : 0 });
 });
 
+// ---------- Attendance incidents (ADMIN ONLY) ----------
+// A private record of no call / no show, late arrivals and early departures that were not granted.
+// Employees and managers never see these: every endpoint requires admin.
+const INCIDENT_KINDS = ["no_call_no_show", "late_arrival", "early_departure"];
+
+app.get("/api/admin/incidents", requireAdmin, async (c) => {
+  const staffId = intParam(c.req.query("staff"));
+  const rows = await c.env.DB.prepare(
+    `SELECT i.id, i.staff_id, s.name AS staff_name, i.shift_id, i.restaurant_id, rs.name AS restaurant, i.incident_date, i.kind, i.minutes, i.notes, rb.name AS recorded_by_name, i.created_at
+     FROM incidents i JOIN staff s ON s.id = i.staff_id LEFT JOIN restaurants rs ON rs.id = i.restaurant_id LEFT JOIN staff rb ON rb.id = i.recorded_by
+     WHERE (?1 IS NULL OR i.staff_id = ?1) ORDER BY i.incident_date DESC, i.id DESC LIMIT 500`,
+  ).bind(staffId ?? null).all();
+  const counts = await c.env.DB.prepare(
+    `SELECT i.staff_id, s.name AS staff_name,
+            sum(i.kind = 'no_call_no_show') AS no_shows, sum(i.kind = 'late_arrival') AS lates, sum(i.kind = 'early_departure') AS early, count(*) AS total
+     FROM incidents i JOIN staff s ON s.id = i.staff_id WHERE i.incident_date >= date('now', '-365 day') GROUP BY i.staff_id ORDER BY total DESC, s.name`,
+  ).all();
+  return c.json({ incidents: rows.results, last_12_months: counts.results });
+});
+
+app.post("/api/admin/incidents", requireAdmin, async (c) => {
+  const b = await c.req.json<{ staff_id?: number; shift_id?: number | null; incident_date?: string; kind?: string; minutes?: number | null; notes?: string }>();
+  if (!b.staff_id || !INCIDENT_KINDS.includes(b.kind ?? "")) return c.json({ error: "bad_request" }, 400);
+  if (!DATE_RE3.test(b.incident_date ?? "")) return c.json({ error: "invalid_dates" }, 400);
+  const needsMinutes = b.kind !== "no_call_no_show";
+  const minutes = b.minutes ?? null;
+  if (minutes !== null && !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440)) return c.json({ error: "invalid_minutes" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(b.staff_id).first())) return c.json({ error: "not_found" }, 404);
+  let restaurantId: number | null = null;
+  if (b.shift_id) {
+    const sh = await c.env.DB.prepare("SELECT restaurant_id, staff_id FROM shifts WHERE id = ?").bind(b.shift_id).first<{ restaurant_id: number; staff_id: number }>();
+    if (!sh) return c.json({ error: "shift_not_found" }, 404);
+    restaurantId = sh.restaurant_id;
+  }
+  const r = await c.env.DB.prepare("INSERT INTO incidents (staff_id, shift_id, restaurant_id, incident_date, kind, minutes, notes, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(b.staff_id, b.shift_id ?? null, restaurantId, b.incident_date, b.kind, needsMinutes ? minutes : null, b.notes?.trim().slice(0, 1000) || null, c.get("me").id, Date.now()).run();
+  return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+app.delete("/api/admin/incidents/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  await c.env.DB.prepare("DELETE FROM incidents WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+// An employee's shifts around a date, to link an incident to the right shift.
+app.get("/api/admin/staff/:id/shifts", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const date = c.req.query("date") ?? "";
+  if (!id || !DATE_RE3.test(date)) return c.json({ error: "bad_request" }, 400);
+  const r = await c.env.DB.prepare(
+    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+     WHERE sh.staff_id = ? AND substr(sh.start_at, 1, 10) = ? ORDER BY sh.start_at`,
+  ).bind(id, date).all();
+  return c.json(r.results);
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);

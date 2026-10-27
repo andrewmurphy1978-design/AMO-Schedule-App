@@ -643,6 +643,10 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     alertBox,
     h("div", { class: "actions" },
       shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmSickFor"))) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST" }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
+      shift && state.me.me.is_admin ? h("button", { class: "btn", type: "button", onClick: async () => {
+        const list = await api("/admin/overview").then((o) => o.staff).catch(() => []);
+        dlg.close(); incidentDialog({ staffList: list, staffId: shift.staff_id, date: dayOf(shift.start_at), shift });
+      } }, t("recordIncident")) : null,
       shift ? h("button", { class: "btn danger", type: "button", onClick: del }, t("delete")) : null,
       h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")),
       h("button", { class: "btn primary", type: "submit" }, t("save"))));
@@ -755,6 +759,68 @@ async function renderMine() {
 }
 
 // ---------- admin ----------
+// ---------- Attendance incidents (admin only): no call / no show, late arrival, early departure not granted ----------
+const INCIDENT_KINDS = ["no_call_no_show", "late_arrival", "early_departure"];
+const incidentLabel = (k) => t(`inc.${k}`);
+
+// Small form, used from the Incidents screen and from the shift editor (prefilled with the shift).
+function incidentDialog({ staffList, staffId, date, shift, onSaved }) {
+  const dlg = document.getElementById("modal");
+  const who = h("select", { required: true }, staffList.map((s) => h("option", { value: s.id, selected: s.id === staffId }, s.name)));
+  const day = h("input", { type: "date", required: true, value: date ?? ymd(new Date()) });
+  const kind = h("select", {}, INCIDENT_KINDS.map((k) => h("option", { value: k }, incidentLabel(k))));
+  const minutes = h("input", { type: "number", min: 1, max: 1440, inputMode: "numeric", placeholder: t("minutes") });
+  const notes = h("textarea", { rows: 3, maxLength: 1000, placeholder: t("incidentNotes") });
+  const shiftSel = h("select", {}, h("option", { value: "" }, t("noShiftLink")));
+  const minField = h("label", { class: "field" }, h("span", {}, t("minutes")), minutes);
+  const sync = () => { minField.hidden = kind.value === "no_call_no_show"; };
+  kind.addEventListener("change", sync); sync();
+  const loadShifts = async () => {
+    shiftSel.replaceChildren(h("option", { value: "" }, t("noShiftLink")));
+    if (!who.value || !day.value) return;
+    try { for (const sh of await api(`/admin/staff/${who.value}/shifts?date=${day.value}`)) shiftSel.append(h("option", { value: sh.id, selected: shift?.id === sh.id }, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)} · ${sh.restaurant} · ${roleName(sh)}`)); } catch { /* optional */ }
+  };
+  who.addEventListener("change", loadShifts); day.addEventListener("change", loadShifts); loadShifts();
+  if (shift) kind.value = "no_call_no_show", sync();
+  const alertBox = h("div", {});
+  dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
+    e.preventDefault();
+    try {
+      await api("/admin/incidents", { method: "POST", body: { staff_id: Number(who.value), incident_date: day.value, kind: kind.value, minutes: kind.value === "no_call_no_show" || !minutes.value ? null : Number(minutes.value), shift_id: shiftSel.value ? Number(shiftSel.value) : null, notes: notes.value } });
+      dlg.close(); toast(t("saved")); onSaved?.();
+    } catch (err) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(err))); }
+  } }, h("h2", {}, t("recordIncident")),
+    h("label", { class: "field" }, h("span", {}, t("employee")), who), h("label", { class: "field" }, h("span", {}, t("date")), day),
+    h("label", { class: "field" }, h("span", {}, t("incidentType")), kind), minField,
+    h("label", { class: "field" }, h("span", {}, t("linkedShift")), shiftSel), h("label", { class: "field" }, h("span", {}, t("notes")), notes), alertBox,
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+  dlg.showModal();
+}
+
+function incidentsPanel(ov) {
+  const box = h("section", { class: "panel" });
+  const st = { staff: "" };
+  async function load() {
+    const data = await api(`/admin/incidents${st.staff ? `?staff=${st.staff}` : ""}`);
+    const filter = h("select", { onChange: (e) => { st.staff = e.target.value; load(); } }, h("option", { value: "" }, t("everyone")), ov.staff.map((s) => h("option", { value: s.id, selected: String(s.id) === String(st.staff) }, s.name)));
+    box.replaceChildren(
+      h("h2", {}, t("adminIncidents")), h("p", { class: "meta" }, t("incidentsHelp")),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => incidentDialog({ staffList: ov.staff, onSaved: load }) }, `+ ${t("recordIncident")}`)),
+      data.last_12_months.length ? h("details", { open: true }, h("summary", {}, t("last12Months")),
+        h("div", { class: "log" }, data.last_12_months.map((r) => h("div", { class: "log-row" }, h("b", {}, r.staff_name),
+          h("span", { class: "meta" }, `${r.no_shows} ${t("inc.no_call_no_show").toLowerCase()} · ${r.lates} ${t("inc.late_arrival").toLowerCase()} · ${r.early} ${t("inc.early_departure").toLowerCase()}`))))) : null,
+      h("label", { class: "field" }, h("span", {}, t("employee")), filter),
+      data.incidents.length ? h("div", { class: "log" }, data.incidents.map((i) => h("div", { class: "log-row inc" },
+        h("div", {}, h("b", {}, i.staff_name), ` · ${fmt(i.incident_date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`),
+        h("div", {}, h("span", { class: `badge inc-${i.kind}` }, incidentLabel(i.kind)), i.minutes ? ` ${i.minutes} min` : "", i.restaurant ? ` · ${i.restaurant}` : ""),
+        i.notes ? h("div", { class: "meta" }, i.notes) : null,
+        h("div", { class: "meta" }, `${t("recordedBy")} ${i.recorded_by_name ?? "—"}`),
+        h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmDeleteIncident"))) { await api(`/admin/incidents/${i.id}`, { method: "DELETE" }); load(); } } }, t("delete"))))) : h("div", { class: "empty" }, t("noIncidents")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // ---------- Administration: messaging connections, replacement settings, message log ----------
 function messagingPanel() {
   const box = h("section", { class: "panel" });
@@ -876,7 +942,7 @@ function payslipsAdminPanel(ov) {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -910,6 +976,7 @@ async function renderAdmin() {
     staff: () => [staffPanel, ...staffList],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
+    incidents: () => [incidentsPanel(ov)],
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, ADMIN_SECTIONS.map(([id, label]) =>
     h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));

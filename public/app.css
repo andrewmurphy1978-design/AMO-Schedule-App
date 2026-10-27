@@ -368,3 +368,6 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .cov-row{display:grid;gap:6px;padding:10px;border:1px solid #e3dfd9;border-radius:12px;margin:8px 0;background:#fff}
 .cov-row.open{border-color:#e8a29b;background:#fff7f6}
 .sick-btn{margin-top:6px}
+
+.badge.inc-no_call_no_show{background:#fde8e6;color:#b4160b}.badge.inc-late_arrival{background:#fff4d6;color:#8a5a00}.badge.inc-early_departure{background:#e7eefc;color:#1c4fa0}
+.log-row.inc{gap:4px}
