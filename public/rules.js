@@ -92,3 +92,33 @@ export const SEASON_PRESETS = [
   { id: "winter", fr: "Hiver", en: "Winter", rule: { type: "range", from: "01-06", to: "03-19" } },
   { id: "spring", fr: "Printemps", en: "Spring", rule: { type: "range", from: "03-20", to: "06-20" } },
 ];
+
+// ---------- holidays shown as flags (Québec) ----------
+// statutory = jour férié (chômé et payé) under the Québec Act respecting labour standards; the rest are busy days worth flagging.
+// Easter Monday and Good Friday are both flagged because an employer chooses which one it observes.
+const HOLIDAYS = [
+  { id: "nyd", fr: "Jour de l’An", en: "New Year’s Day", statutory: true, on: (y) => utc(y, 1, 1) },
+  { id: "valentine", fr: "Saint-Valentin", en: "Valentine’s Day", on: (y) => utc(y, 2, 14) },
+  { id: "stpat", fr: "Saint-Patrick", en: "St. Patrick’s Day", on: (y) => utc(y, 3, 17) },
+  { id: "goodfriday", fr: "Vendredi saint", en: "Good Friday", statutory: true, on: (y) => addDays(easterSunday(y), -2) },
+  { id: "easter", fr: "Pâques", en: "Easter Sunday", on: (y) => easterSunday(y) },
+  { id: "eastermon", fr: "Lundi de Pâques", en: "Easter Monday", statutory: true, on: (y) => addDays(easterSunday(y), 1) },
+  { id: "mothers", fr: "Fête des Mères", en: "Mother’s Day", on: (y) => nthWeekday(y, 5, 6, 2) },
+  { id: "patriotes", fr: "Journée nationale des patriotes", en: "National Patriots’ Day", statutory: true, on: (y) => { const d = utc(y, 5, 24); return addDays(d, -weekdayOf(d)); } },
+  { id: "fathers", fr: "Fête des Pères", en: "Father’s Day", on: (y) => nthWeekday(y, 6, 6, 3) },
+  { id: "stjean", fr: "Fête nationale du Québec", en: "Saint-Jean-Baptiste Day", statutory: true, on: (y) => utc(y, 6, 24) },
+  { id: "canada", fr: "Fête du Canada", en: "Canada Day", statutory: true, on: (y) => utc(y, 7, 1) },
+  { id: "labour", fr: "Fête du Travail", en: "Labour Day", statutory: true, on: (y) => nthWeekday(y, 9, 0, 1) },
+  { id: "thanks", fr: "Action de grâce", en: "Thanksgiving", statutory: true, on: (y) => nthWeekday(y, 10, 0, 2) },
+  { id: "halloween", fr: "Halloween", en: "Halloween", on: (y) => utc(y, 10, 31) },
+  { id: "xmaseve", fr: "Veille de Noël", en: "Christmas Eve", on: (y) => utc(y, 12, 24) },
+  { id: "xmas", fr: "Noël", en: "Christmas Day", statutory: true, on: (y) => utc(y, 12, 25) },
+  { id: "boxing", fr: "Lendemain de Noël", en: "Boxing Day", on: (y) => utc(y, 12, 26) },
+  { id: "nye", fr: "Veille du jour de l’An", en: "New Year’s Eve", on: (y) => utc(y, 12, 31) },
+];
+
+/** Holidays falling on `day` ('YYYY-MM-DD'): [{id, fr, en, statutory}]. */
+export function holidaysOn(day) {
+  const y = Number(day.slice(0, 4));
+  return HOLIDAYS.filter((hd) => iso(hd.on(y)) === day).map(({ id, fr, en, statutory }) => ({ id, fr, en, statutory: !!statutory }));
+}

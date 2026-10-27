@@ -65,3 +65,22 @@ test("most specific layer wins, slot by slot", () => {
   const r = resolveForDate([...rows, { set_id: 3, dow: -1, slot: "11:00", count: 8 }], both, "2026-07-01");
   assert.deepEqual(r, { targets: { "11:00": 8, "17:00": 4 }, labels: ["Été", "Fête du Canada"] });
 });
+
+test("Québec holidays are flagged on the right dates", async () => {
+  // @ts-ignore plain JS module shared with the browser
+  const { holidaysOn } = await import("../public/rules.js");
+  const ids = (d: string) => holidaysOn(d).map((x: { id: string }) => x.id);
+  assert.deepEqual(ids("2026-04-03"), ["goodfriday"]);
+  assert.deepEqual(ids("2026-04-05"), ["easter"]);
+  assert.deepEqual(ids("2026-04-06"), ["eastermon"]);
+  assert.deepEqual(ids("2026-05-10"), ["mothers"]);
+  assert.deepEqual(ids("2026-05-18"), ["patriotes"]); // Monday before May 25
+  assert.deepEqual(ids("2026-06-21"), ["fathers"]);
+  assert.deepEqual(ids("2026-09-07"), ["labour"]);
+  assert.deepEqual(ids("2026-10-12"), ["thanks"]);
+  assert.deepEqual(ids("2026-12-25"), ["xmas"]);
+  assert.deepEqual(ids("2026-12-31"), ["nye"]);
+  assert.deepEqual(ids("2026-11-03"), []);
+  assert.equal(holidaysOn("2026-12-25")[0].statutory, true);
+  assert.equal(holidaysOn("2026-05-10")[0].statutory, false);
+});

@@ -1,6 +1,6 @@
 import { t, getLang, setLang, locale, roleName } from "./i18n.js";
 import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
-import { resolveForDate, SPECIAL_PRESETS, SEASON_PRESETS } from "./rules.js";
+import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
 // ---------- helpers ----------
@@ -653,7 +653,7 @@ async function renderAdmin() {
 
   const sections = {
     restaurants: () => [restaurantsPanel, hoursPanel(ov)],
-    targets: () => [targetsPanel(ov)],
+    targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffList],
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, ADMIN_SECTIONS.map(([id, label]) =>
@@ -759,6 +759,99 @@ function periodDialog({ restaurantId, kind, set, onSaved }) {
   dlg.showModal();
 }
 
+// Staffing targets as a week table (like the schedule): one column per date, one row per time slot.
+// Each cell shows the number that applies on that date (base, season and special days combined).
+function weeklyTargetsPanel(ov) {
+  const st = { restaurant: ov.restaurants[0]?.id, department: "kitchen", week: mondayOf(new Date()), scope: "week" };
+  const box = h("section", { class: "panel" });
+
+  async function load() {
+    if (!st.restaurant) { box.replaceChildren(); return; }
+    const [rows, sets] = await Promise.all([
+      api(`/targets?restaurant=${st.restaurant}&department=${st.department}`),
+      api(`/target-sets?restaurant=${st.restaurant}`),
+    ]);
+    const days = Array.from({ length: 7 }, (_, i) => addDays(st.week, i));
+    const info = days.map((day) => {
+      const r = resolveForDate(rows, sets, day);
+      const hol = holidaysOn(day);
+      // a special day or one-off date already applying to this date, if any (used when saving)
+      const activeSet = sets.filter((x) => x.kind === "special" && ruleMatchesDay(x.rule, day)).sort((a, b) => b.id - a.id)[0] ?? null;
+      return { day, eff: r.targets, labels: r.labels, hol, activeSet };
+    });
+    const inputs = days.map(() => ({}));
+    const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
+    const lang = getLang();
+
+    const head = days.map((day, i) => h("th", { class: `tw-head ${info[i].hol.some((x) => x.statutory) ? "stat" : info[i].hol.length ? "spec" : ""}${day === ymd(new Date()) ? " today" : ""}` },
+      h("div", { class: "dow" }, fmt(day, { weekday: "short" })),
+      h("div", { class: "dom" }, fmt(day, { day: "numeric", month: "short" })),
+      info[i].hol.map((x) => h("div", { class: `hol ${x.statutory ? "stat" : "spec"}`, title: x.statutory ? t("statutoryHoliday") : t("busyDay") }, `${x.statutory ? "🏛 " : "★ "}${lang === "fr" ? x.fr : x.en}`)),
+      info[i].labels.length ? h("div", { class: "periods" }, info[i].labels.join(", ")) : null));
+
+    const body = SLOTS.map((slot) => h("tr", {},
+      h("th", { class: "tw-slot" }, slotLabel(slot)),
+      days.map((day, i) => {
+        const v = info[i].eff[slot];
+        const input = h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", "aria-label": `${slotLabel(slot)} ${fmt(day, { weekday: "long", day: "numeric" })}` });
+        input.dataset.orig = v === undefined ? "" : String(v);
+        inputs[i][slot] = input;
+        return h("td", {}, input);
+      })));
+
+    const save = async () => {
+      try {
+        let touched = 0;
+        for (let i = 0; i < 7; i++) {
+          const changed = {};
+          for (const slot of SLOTS) { const inp = inputs[i][slot]; if (inp.value !== inp.dataset.orig && inp.value !== "") changed[slot] = Number(inp.value); }
+          if (!Object.keys(changed).length) continue;
+          touched++;
+          const day = days[i];
+          let setId = 0, dow = i;
+          if (st.scope === "week" || info[i].activeSet) {
+            // Date-specific values live in a one-off special day for that date (or in the special day already covering it).
+            let target = info[i].activeSet;
+            if (st.scope === "week") target = sets.find((x) => x.kind === "special" && x.rule.type === "date" && x.rule.date === day) ?? null;
+            if (!target) {
+              const created = await api("/target-sets", { method: "POST", body: { restaurant_id: st.restaurant, name: `${fmt(day, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`, kind: "special", rule: { type: "date", date: day } } });
+              target = { id: created.id };
+            }
+            setId = target.id; dow = -1;
+          }
+          const own = {};
+          for (const r of rows.filter((x) => x.set_id === setId && x.dow === dow)) own[r.slot] = r.count;
+          await api("/targets", { method: "PUT", body: { restaurant_id: st.restaurant, department_id: st.department, set_id: setId, dow, slots: { ...own, ...changed } } });
+        }
+        toast(touched ? t("saved") : t("nothingChanged"));
+        load();
+      } catch (e) { toast(errorText(e)); }
+    };
+
+    box.replaceChildren(
+      h("h2", {}, t("targetsWeekTitle")), h("p", { class: "meta" }, t("targetsWeekHelp")),
+      h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
+        h("label", { class: "field" }, h("span", {}, t("restaurant")), sel(ov.restaurants.map((r) => [r.id, r.name]), st.restaurant, (e) => { st.restaurant = Number(e.target.value); load(); })),
+        h("label", { class: "field" }, h("span", {}, t("department")), sel(DEPTS.map((d) => [d, t(`dept.${d}`)]), st.department, (e) => { st.department = e.target.value; load(); }))),
+      h("div", { class: "weeknav", style: "margin:8px 0" },
+        h("button", { class: "icon-btn", type: "button", "aria-label": t("prev"), onClick: () => { st.week = addDays(st.week, -7); load(); } }, "‹"),
+        h("div", { class: "label" }, weekLabel(st.week)),
+        h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { st.week = addDays(st.week, 7); load(); } }, "›"),
+        h("button", { class: "btn", type: "button", onClick: () => { st.week = mondayOf(new Date()); load(); } }, t("today"))),
+      h("div", { class: "field" }, h("span", {}, t("applyChangesTo")),
+        h("div", { class: "seg" },
+          [["week", t("scopeWeek")], ["always", t("scopeAlways")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(st.scope === v), onClick: () => { st.scope = v; load(); } }, l))),
+        h("span", { class: "meta" }, st.scope === "week" ? t("scopeWeekHelp") : t("scopeAlwaysHelp"))),
+      h("div", { class: "tw-scroll" }, h("table", { class: "tw" }, h("thead", {}, h("tr", {}, h("th"), head)), h("tbody", {}, body))),
+      h("p", { class: "meta" }, `🏛 ${t("statutoryHoliday")} · ★ ${t("busyDay")} · ${t("closeHelp")}`),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: save }, t("save"))));
+  }
+  load();
+  return box;
+}
+
+function ruleMatchesDay(rule, day) { return ruleMatches(rule, day); }
+
 function targetsPanel(ov) {
   const st = { restaurant: ov.restaurants[0]?.id, department: "kitchen", setId: 0, dow: -1 };
   const box = h("section", { class: "panel" });
@@ -797,7 +890,7 @@ function targetsPanel(ov) {
       ...sets.filter((x) => x.kind === "special").map((x) => [x.id, `${t("specialWord")} · ${x.name}`])];
 
     box.replaceChildren(...[
-      h("h2", {}, t("targets")), h("p", { class: "meta" }, t("targetsHelp")),
+      h("h2", {}, t("targetsPeriods")), h("p", { class: "meta" }, t("targetsHelp")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
         h("label", { class: "field" }, h("span", {}, t("restaurant")), sel(ov.restaurants.map((r) => [r.id, r.name]), st.restaurant, (e) => { st.restaurant = Number(e.target.value); st.setId = 0; reload(); })),
         h("label", { class: "field" }, h("span", {}, t("department")), sel(DEPTS.map((d) => [d, t(`dept.${d}`)]), st.department, (e) => { st.department = e.target.value; reload(); })),

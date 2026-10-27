@@ -340,3 +340,17 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .replaced { display: block; font-size: .75rem; color: var(--muted); }
 .vtl-bar.sick { opacity: .5; outline: 2px dashed var(--warn); outline-offset: -3px; }
 .role-rate{display:flex;align-items:center;gap:8px;margin-top:6px}.role-rate span{flex:1}.role-rate input{width:110px}
+
+.tw-scroll{overflow-x:auto;margin:8px 0}
+.tw{border-collapse:collapse;width:100%;min-width:560px}
+.tw th,.tw td{border:1px solid var(--line,#e3dfd9);padding:3px;text-align:center}
+.tw-head{vertical-align:top;min-width:78px;font-size:.8rem;background:#faf8f5}
+.tw-head .dow{font-weight:700;text-transform:capitalize}
+.tw-head.today .dow{color:#da291c}
+.tw-head.stat{background:#fde8e6}.tw-head.spec{background:#fff4d6}
+.tw-head .hol{font-size:.68rem;line-height:1.2;margin-top:2px;font-weight:700}
+.tw-head .hol.stat{color:#b4160b}.tw-head .hol.spec{color:#8a5a00}
+.tw-head .periods{font-size:.65rem;color:#666;margin-top:2px}
+.tw-slot{white-space:nowrap;padding:0 8px;background:#faf8f5;font-size:.85rem}
+.tw td input{width:100%;min-width:44px;text-align:center;border:0;background:transparent;font:inherit;padding:8px 2px}
+.tw td input:focus{outline:2px solid #da291c;background:#fff}
