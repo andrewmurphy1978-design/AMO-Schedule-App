@@ -1,4 +1,4 @@
-import { t, getLang, setLang, locale, roleName, roleIcon } from "./i18n.js";
+import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
 import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
@@ -1546,7 +1546,16 @@ function staffCard(s, ov) {
     })));
 
   // The card is a compact row; the details open in their own dialog (separate from #modal, which the role dialogs use).
-  const roleIcons = [...new Set(s.roles.map((r) => roleIcon(state.roles.find((x) => x.id === r.role_id))))].join(" ");
+  // Icons grouped by restaurant: the roles held there, then ⭐ + the department icon for each department managed there.
+  const shortName = (n) => n.split(/-des-|\sdes\s/)[0];
+  const byResto = ov.restaurants.map((r) => {
+    const roleIcons = [...new Set(s.roles.filter((x) => x.restaurant_id === r.id).map((x) => roleIcon(state.roles.find((y) => y.id === x.role_id))))];
+    const mgr = s.managers.filter((m) => m.restaurant_id === r.id).map((m) => deptIcon(m.department_id));
+    return { r, roleIcons, mgr };
+  }).filter((x) => x.roleIcons.length || x.mgr.length);
+  const iconBlock = h("span", { class: "staff-icons" }, byResto.map(({ r, roleIcons, mgr }) =>
+    h("span", { class: "resto-icons", title: r.name }, h("small", {}, shortName(r.name)), ` ${roleIcons.join(" ")}`,
+      mgr.length ? h("span", { class: "mgr-icons", title: t("managerOf") }, mgr.map((i) => h("span", {}, `⭐${i}`))) : null)));
   const nameEl = h("span", {}, s.name);
   const open = () => {
     let dlg = document.getElementById("staff-modal");
@@ -1559,7 +1568,7 @@ function staffCard(s, ov) {
     dlg.showModal();
   };
   return h("button", { class: "staff-row", type: "button", onClick: open },
-    h("span", { class: "who-row" }, summaryAvatar, nameEl), h("span", { class: "staff-icons" }, roleIcons),
+    h("span", { class: "who-row" }, summaryAvatar, nameEl), iconBlock,
     s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? ""));
 }
 

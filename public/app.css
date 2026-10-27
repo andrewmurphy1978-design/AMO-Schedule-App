@@ -392,3 +392,8 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .pay-num small{color:var(--muted,#666);font-weight:400}
 .pay-total{background:#faf3f2}
 .alert:empty{display:none}
+
+.staff-icons{display:flex;flex-wrap:wrap;gap:.2rem .8rem;justify-content:flex-end;letter-spacing:0;font-weight:400}
+.resto-icons small{color:var(--muted,#666);font-weight:700;margin-right:2px}
+.mgr-icons{margin-left:6px;white-space:nowrap}.mgr-icons span{margin-left:2px}
+.staff-row{flex-wrap:wrap}

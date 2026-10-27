@@ -64,7 +64,7 @@ const dict = {
     isAdminLabel: "Administrateur (accès à tout)", adminNeedsEmail: "Cet employé n’a pas de courriel. Écris-le dans le champ Courriel ci-dessus, puis recoche : il sert à la connexion.", cannotRemoveSelf: "Tu ne peux pas retirer ton propre accès administrateur.", lastAdmin: "Il doit rester au moins un administrateur.",
     preOpenTitle: "Arrivée avant l’ouverture", preOpenHelp: "Nombre de minutes avant l’ouverture où chaque rôle doit arriver (ex. cuisinier et serveur : 30). Le début des nouveaux quarts est réglé en conséquence et la période est indiquée dans la couverture.", setupTime: "Préparation avant l’ouverture",
     defaultRatesTitle: "Taux horaires par défaut", defaultRatesHelp: "Utilisés quand un employé n’a pas de taux à lui. Serveurs et livreurs : taux du personnel à pourboires. Les autres : taux général. Un taux inscrit sur la fiche d’un employé a toujours priorité.", generalRate: "Taux général ($ / h)", defaultWord: "Défaut",
-    close: "Fermer", invalidEmail: "Courriel invalide.", emailTaken: "Ce courriel est déjà utilisé par un autre employé.",
+    close: "Fermer", managerOf: "Gestionnaire de ce département", invalidEmail: "Courriel invalide.", emailTaken: "Ce courriel est déjà utilisé par un autre employé.",
     targets: "Cibles de personnel", targetsHelp: "Nombre d’employés souhaité à chaque heure. Laissez vide s’il n’y a pas de cible.",
     allDays: "Tous les jours", resetDay: "Retirer les valeurs propres à ce jour", dayOverride: "Valeurs propres à ce jour",
     closeTime: "Heure de fermeture", openTime: "Heure d’ouverture", choosePhoto: "Choisir une photo", removePhoto: "Retirer la photo", badImage: "Image non valide (JPEG, PNG ou WebP).", photo: "Photo", colour: "Couleur", autoColour: "Couleur automatique", openTimes: "Heure d’ouverture pour chaque jour de la semaine.", hoursTitle: "Heures d’ouverture", beforeOpen: "Avant l’ouverture / après la fermeture", closeSlot: "Fermeture", closeHelp: "La cible « Fermeture » s’applique à la dernière heure avant la fermeture.",
@@ -155,7 +155,7 @@ const dict = {
     isAdminLabel: "Administrator (access to everything)", adminNeedsEmail: "This employee has no email. Type it in the Email field above, then tick again: it is used to sign in.", cannotRemoveSelf: "You cannot remove your own administrator access.", lastAdmin: "At least one administrator must remain.",
     preOpenTitle: "Arrival before opening", preOpenHelp: "How many minutes before opening each role should arrive (e.g. cook and waiter: 30). New shifts start accordingly and the period is shown on the coverage view.", setupTime: "Setup before opening",
     defaultRatesTitle: "Default hourly rates", defaultRatesHelp: "Used when an employee has no rate of their own. Waiters and delivery drivers: the tipped-staff rate. Everyone else: the general rate. A rate entered on an employee’s card always wins.", generalRate: "General rate ($ / h)", defaultWord: "Default",
-    close: "Close", invalidEmail: "Invalid email.", emailTaken: "This email is already used by another employee.",
+    close: "Close", managerOf: "Manager of this department", invalidEmail: "Invalid email.", emailTaken: "This email is already used by another employee.",
     targets: "Staffing targets", targetsHelp: "How many employees you want at each time. Leave blank for no target.",
     allDays: "Every day", resetDay: "Remove this day’s own values", dayOverride: "Values specific to this day",
     closeTime: "Closing time", openTime: "Opening time", choosePhoto: "Choose a picture", removePhoto: "Remove picture", badImage: "Invalid image (JPEG, PNG or WebP).", photo: "Picture", colour: "Colour", autoColour: "Automatic colour", openTimes: "Opening time for each day of the week.", hoursTitle: "Opening hours", beforeOpen: "Before opening / after closing", closeSlot: "Close", closeHelp: "The “Close” target applies to the last hour before closing.",
@@ -202,6 +202,7 @@ export const locale = () => (lang === "fr" ? "fr-CA" : "en-CA");
 // One emoji per role (matched on the English role name); unknown roles fall back to their department's icon.
 const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤" };
 const DEPT_ICONS = { floor: "🍴", kitchen: "🍕", prep: "🔪", delivery: "🚗" };
+export const deptIcon = (d) => DEPT_ICONS[d] ?? "•";
 export const roleIcon = (r) => ROLE_ICONS[(r?.name_en ?? "").toLowerCase()] ?? DEPT_ICONS[r?.department_id] ?? "•";
 export const roleName = (r) => (lang === "fr" ? r.name_fr : r.name_en);
 document.documentElement.lang = lang;
