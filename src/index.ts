@@ -569,14 +569,25 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   // include the night before so a shift running past midnight into Monday is counted
   const prev = new Date(`${weekStart}T00:00:00Z`);
   prev.setUTCDate(prev.getUTCDate() - 1);
+  const from = `${prev.toISOString().slice(0, 10)}T00:00`;
   const rows = await c.env.DB.prepare(
-    `SELECT sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
+    `SELECT sh.id, sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
      FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
           LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = sh.role_id
      WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
   )
-    .bind(restaurantId, `${prev.toISOString().slice(0, 10)}T00:00`, bounds.end)
-    .all<{ start_at: string; end_at: string; department_id: string; rate_cents: number | null }>();
+    .bind(restaurantId, from, bounds.end)
+    .all<{ id: number; start_at: string; end_at: string; department_id: string; rate_cents: number | null }>();
+  // A shift covering several roles (cook + dishwasher) is paid at the highest of their rates; its cost stays in the main role's department.
+  const extra = await c.env.DB.prepare(
+    `SELECT x.shift_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
+     FROM shift_roles x JOIN shifts sh ON sh.id = x.shift_id JOIN roles ro ON ro.id = x.role_id
+          LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = x.role_id
+     WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
+  ).bind(restaurantId, from, bounds.end).all<{ shift_id: number; rate_cents: number | null }>();
+  const best = new Map<number, number>();
+  for (const e of extra.results) if (e.rate_cents != null) best.set(e.shift_id, Math.max(best.get(e.shift_id) ?? 0, e.rate_cents));
+  for (const r of rows.results) { const b = best.get(r.id); if (b != null && (r.rate_cents == null || b > r.rate_cents)) r.rate_cents = b; }
   const dept = computeCosts(rows.results.filter((r) => r.department_id === department), days);
   const all = computeCosts(rows.results, days);
   return c.json({ week: weekStart, department: dept, restaurant: { total_cents: all.total_cents, total_hours: all.total_hours, unrated_hours: all.unrated_hours, days: all.days.map((d) => ({ date: d.date, cents: d.cents })) } });
@@ -1213,11 +1224,19 @@ app.get("/api/schedule", async (c) => {
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status, sh.replaced_staff_id,
             (SELECT name FROM staff WHERE id = sh.replaced_staff_id) AS replaced_name
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
-     WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ?
+     WHERE sh.restaurant_id = ? AND (ro.department_id = ? OR EXISTS (SELECT 1 FROM shift_roles x JOIN roles r2 ON r2.id = x.role_id WHERE x.shift_id = sh.id AND r2.department_id = ?))
+       AND sh.start_at >= ? AND sh.start_at < ?
      ORDER BY sh.start_at, s.name`,
   )
-    .bind(restaurantId, department, bounds.start, bounds.end)
-    .all();
+    .bind(restaurantId, department, department, bounds.start, bounds.end)
+    .all<any>();
+  // Extra roles of multi-role shifts (cook + dishwasher…)
+  const extraRoles = new Map<number, { id: number; name_fr: string; name_en: string; department_id: string }[]>();
+  if (shifts.results.length) {
+    const sids = shifts.results.map((x: any) => x.id);
+    for (const r of (await c.env.DB.prepare(`SELECT x.shift_id, ro.id, ro.name_fr, ro.name_en, ro.department_id FROM shift_roles x JOIN roles ro ON ro.id = x.role_id WHERE x.shift_id IN (${sids.map(() => "?").join(",")})`).bind(...sids).all<any>()).results) extraRoles.set(r.shift_id, [...(extraRoles.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en, department_id: r.department_id }]);
+    for (const sh of shifts.results as any[]) sh.extra_roles = extraRoles.get(sh.id) ?? [];
+  }
   const editable = await canManage(c.env.DB, me, restaurantId, department);
   const settings = await loadSettings(c.env.DB);
 
@@ -1247,9 +1266,9 @@ app.get("/api/schedule", async (c) => {
         `SELECT sh.staff_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, sh.start_at, sh.end_at
          FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
          WHERE sh.status = 'ok' AND sh.staff_id IN (${marks}) AND sh.start_at >= ? AND sh.start_at < ?
-           AND NOT (sh.restaurant_id = ? AND ro.department_id = ?)
+           AND NOT (sh.restaurant_id = ? AND (ro.department_id = ? OR EXISTS (SELECT 1 FROM shift_roles x JOIN roles r2 ON r2.id = x.role_id WHERE x.shift_id = sh.id AND r2.department_id = ?)))
          ORDER BY sh.start_at`,
-      ).bind(...visible, bounds.start, bounds.end, restaurantId, department).all()).results;
+      ).bind(...visible, bounds.start, bounds.end, restaurantId, department, department).all()).results;
     }
   }
   // Time off overlapping this week: everyone's for managers/admin, only the caller's own for the rest.
@@ -1309,7 +1328,9 @@ app.get("/api/roster", async (c) => {
     e.role_ids.push(r.role_id);
     byStaff.set(r.staff_id, e);
   }
-  return c.json(sortByName([...byStaff.values()]));
+  // All roles each person holds at this restaurant (any department): a shift can cover roles outside the schedule being edited.
+  const allRoles = (await c.env.DB.prepare("SELECT staff_id, role_id FROM staff_roles WHERE restaurant_id = ?").bind(restaurantId).all<{ staff_id: number; role_id: number }>()).results;
+  return c.json(sortByName([...byStaff.values()].map((e) => ({ ...e, all_role_ids: allRoles.filter((r) => r.staff_id === e.staff_id).map((r) => r.role_id) }))));
 });
 
 app.get("/api/admin/overview", requireAdmin, async (c) => {
@@ -1366,6 +1387,7 @@ interface ShiftInput {
   notes?: string;
   until_close?: boolean;
   force?: boolean;
+  extra_role_ids?: number[];  // other roles covered by the same shift (e.g. cook + dishwasher)
 }
 
 async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
@@ -1381,6 +1403,15 @@ async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
     .bind(b.staff_id, b.restaurant_id, b.role_id)
     .first();
   if (!holds) return { status: 422, body: { error: "staff_does_not_hold_role_at_restaurant" } };
+  // Extra roles: at most 3, all held by the person here, and the caller must manage each department involved.
+  const extras = [...new Set(b.extra_role_ids ?? [])].filter((r) => r !== b.role_id);
+  if (extras.length > 3 || extras.some((r) => !Number.isInteger(r))) return { status: 400, body: { error: "invalid_roles" } };
+  for (const rid of extras) {
+    const r = await db.prepare("SELECT ro.department_id, (SELECT 1 FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ro.id) AS held FROM roles ro WHERE ro.id = ?").bind(b.staff_id, b.restaurant_id, rid).first<{ department_id: string; held: number | null }>();
+    if (!r) return { status: 404, body: { error: "role_not_found" } };
+    if (!r.held) return { status: 422, body: { error: "staff_does_not_hold_role_at_restaurant" } };
+    if (!(await canManage(db, c.get("me"), b.restaurant_id, r.department_id))) return { status: 403, body: { error: "forbidden" } };
+  }
 
   // Overlap check spans every restaurant and department for this person.
   const others = await db
@@ -1417,6 +1448,14 @@ async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
   return null;
 }
 
+async function saveExtraRoles(db: D1Database, shiftId: number, b: ShiftInput) {
+  const extras = [...new Set(b.extra_role_ids ?? [])].filter((r) => r !== b.role_id);
+  await db.batch([
+    db.prepare("DELETE FROM shift_roles WHERE shift_id = ?").bind(shiftId),
+    ...extras.map((rid) => db.prepare("INSERT INTO shift_roles (shift_id, role_id) VALUES (?, ?)").bind(shiftId, rid)),
+  ]);
+}
+
 app.post("/api/shifts", async (c) => {
   const b = await c.req.json<ShiftInput>();
   const problem = await validateShift(c, b);
@@ -1426,6 +1465,7 @@ app.post("/api/shifts", async (c) => {
   )
     .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0)
     .run();
+  await saveExtraRoles(c.env.DB, r.meta.last_row_id as number, b);
   return c.json({ id: r.meta.last_row_id }, 201);
 });
 
@@ -1449,6 +1489,7 @@ app.put("/api/shifts/:id", async (c) => {
   )
     .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0, id)
     .run();
+  await saveExtraRoles(c.env.DB, id, b);
   return c.json({ ok: true });
 });
 

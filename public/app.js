@@ -195,6 +195,10 @@ function weekTimeOffPanel(data) {
         h("button", { class: "btn primary", type: "button", onClick: () => answer(o, true) }, t("approve")),
         h("button", { class: "btn", type: "button", onClick: () => answer(o, false) }, t("deny"))) : null)));
 }
+// A shift can cover several roles (cook + dishwasher): the main role first, then the extra ones.
+const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])];
+const shiftRoleLabel = (s) => shiftRoles(s).map(roleName).join(" + ");
+const shiftRoleIcons = (s) => shiftRoles(s).map(roleIcon).join("");
 const nowLocal = () => { const d = new Date(); return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 // Open replacement requests (managers/admins): who was asked, assign by hand, cancel.
@@ -248,7 +252,7 @@ function mergeRosters(rosters) {
   const by = new Map();
   for (const r of rosters.flat()) {
     const e = by.get(r.staff_id);
-    if (e) e.role_ids = [...new Set([...e.role_ids, ...r.role_ids])]; else by.set(r.staff_id, { ...r, role_ids: [...r.role_ids] });
+    if (e) { e.role_ids = [...new Set([...e.role_ids, ...r.role_ids])]; e.all_role_ids = [...new Set([...(e.all_role_ids ?? []), ...(r.all_role_ids ?? [])])]; } else by.set(r.staff_id, { ...r, role_ids: [...r.role_ids] });
   }
   return [...by.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -350,7 +354,7 @@ async function renderSchedule() {
       ? h("div", { class: "list" }, dayShifts.map((s) => {
           const sickDay = s.status === "sick_open";
           const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 40), s.staff_name),
-            h("span", { class: "meta" }, [`${roleIcon(s)} ${roleName(s)}`, s.notes].filter(Boolean).join(" · ")),
+            h("span", { class: "meta" }, [`${shiftRoleIcons(s)} ${shiftRoleLabel(s)}`, s.notes].filter(Boolean).join(" · ")),
             sickDay ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
             s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
           const cls = `card ${sickDay ? "sick" : ""}`;
@@ -413,7 +417,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleIcon(s)} ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${shiftRoleIcons(s)} ${shiftRoleLabel(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -534,16 +538,16 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
         class: `vtl-bar ${wide ? "" : "vertical"} ${x.s.status === "sick_open" ? "sick" : ""}`,
-        title: `${roleIcon(x.s)} ${x.s.staff_name} · ${range} · ${roleName(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
+        title: `${shiftRoleIcons(x.s)} ${x.s.staff_name} · ${range} · ${shiftRoleLabel(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
       // Picture size follows the room available in this lane; skip it on very short bars.
       const size = Math.max(14, Math.min(zoom ? 44 : 30, Math.floor(laneArea / lanes) - 6));
       const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
       // Role icon (plate = dishwasher, pizza = cook, car = delivery, knife = prep…); the full name is in the tooltip.
-      const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, roleIcon({ ...x.s, department_id: x.s.department_id }));
+      const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, shiftRoleIcons(x.s));
       const body = zoom
-        ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
+        ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), `${range} · ${shiftRoleLabel(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
         ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), range]
         : [pic, icon, h("span", { class: "bar-text" }, `${shortOf.get(x.s.staff_id)} ${range}`)];
@@ -653,14 +657,26 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 
   const staffSel = h("select", { required: true }, roster.map((r) => h("option", { value: r.staff_id, selected: r.staff_id === initial.staff_id }, r.name)));
   const roleSel = h("select", { required: true });
+  // "Also covers": other roles this person holds, checked when the same shift covers them too (e.g. cook + dishwasher).
+  const alsoBox = h("div", { class: "also-roles" });
+  let alsoChecked = new Set((shift?.extra_roles ?? []).map((r) => r.id));
+  const drawAlso = () => {
+    const person = roster.find((r) => r.staff_id === Number(staffSel.value));
+    const main = Number(roleSel.value);
+    const others = state.roles.filter((r) => (person?.all_role_ids ?? person?.role_ids ?? []).includes(r.id) && r.id !== main);
+    alsoBox.replaceChildren(...(others.length ? [h("span", { class: "meta" }, t("alsoCovers"))] : []), ...others.map((r) =>
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: alsoChecked.has(r.id), onChange: (e) => { e.target.checked ? alsoChecked.add(r.id) : alsoChecked.delete(r.id); } }), `${roleIcon(r)} ${roleName(r)}`)));
+  };
   const fillRoles = () => {
     const person = roster.find((r) => r.staff_id === Number(staffSel.value));
     const ids = person?.role_ids ?? [];
     const keep = Number(roleSel.value) || initial.role_id;
     roleSel.replaceChildren(...deptRoles.filter((r) => ids.includes(r.id)).map((r) =>
       h("option", { value: r.id, selected: r.id === keep }, roleName(r))));
+    drawAlso();
   };
-  staffSel.addEventListener("change", () => { fillRoles(); applyPreOpen(); });
+  roleSel.addEventListener("change", () => { alsoChecked.delete(Number(roleSel.value)); drawAlso(); });
+  staffSel.addEventListener("change", () => { alsoChecked = new Set(); fillRoles(); applyPreOpen(); });
   fillRoles();
   const date = h("input", { type: "date", value: initial.date, required: true });
   const start = timeField(initial.start);
@@ -693,6 +709,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
+      extra_role_ids: [...alsoChecked].filter((id) => id !== Number(roleSel.value)),
       start_at: `${date.value}T${start.value}`, end_at: `${endDate}T${endTime}`, until_close: untilClose.checked, notes: notes.value || undefined, force: force || undefined,
     };
   };
@@ -730,7 +747,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const form = h("form", { class: "modal-body", method: "dialog", onSubmit: (e) => { e.preventDefault(); save(false); } },
     h("h2", {}, shift ? t("editShift") : t("addShift")),
     h("label", { class: "field" }, h("span", {}, t("employee")), staffSel),
-    h("label", { class: "field" }, h("span", {}, t("role")), roleSel),
+    h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox,
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),
     h("label", { class: "check" }, untilClose, t("untilClose")),

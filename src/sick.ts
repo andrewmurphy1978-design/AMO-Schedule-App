@@ -137,6 +137,8 @@ export async function fillRequest(env: FlowEnv, db: D1Database, conn: Connection
   if (!claim.meta.changes) return "filled_by_other"; // somebody else got there first
   await db.batch([
     db.prepare("UPDATE shifts SET staff_id = ?, status = 'ok', replaced_staff_id = ? WHERE id = ?").bind(staffId, req.sick_staff_id, req.shift_id),
+    // the extra roles of a multi-role shift stay only if the replacement holds them too
+    db.prepare("DELETE FROM shift_roles WHERE shift_id = ? AND role_id NOT IN (SELECT sr.role_id FROM staff_roles sr JOIN shifts sh ON sh.restaurant_id = sr.restaurant_id WHERE sr.staff_id = ? AND sh.id = ?)").bind(req.shift_id, staffId, req.shift_id),
     db.prepare("UPDATE coverage_offers SET status = CASE WHEN staff_id = ? THEN 'accepted' ELSE 'closed' END, responded_at = ? WHERE request_id = ? AND status = 'sent'").bind(staffId, Date.now(), requestId),
   ]);
   const shift = await db.prepare(`${shiftSql} WHERE sh.id = ?`).bind(req.shift_id).first<ShiftRow>();

@@ -437,3 +437,4 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .grid td.name .name2{display:inline-flex;flex-direction:column;vertical-align:middle;line-height:1.15;white-space:normal}
 .grid td.name .n2{font-weight:400;font-size:.85em;color:var(--muted,#666)}
 .grid td.name .name2{max-width:110px;overflow-wrap:anywhere}
+.also-roles{display:grid;gap:4px}
