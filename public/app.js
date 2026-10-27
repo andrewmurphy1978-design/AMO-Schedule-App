@@ -191,66 +191,92 @@ async function renderSchedule() {
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null))))
       : h("tr", {}, h("td", { colSpan: 8 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
-  const timeline = renderTimeline({ data, days, targets });
+  const timeline = renderTimeline({ data, days, targets, openEditor });
   $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
 }
 
 
-// ---------- coverage timeline ----------
+// ---------- coverage timeline (vertical) ----------
 const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^0/, ""));
+const mqDesktop = window.matchMedia("(min-width: 900px)");
+mqDesktop.addEventListener("change", () => { if (state.me) render(); });
 
-function renderTimeline({ data, days, targets }) {
+// Side-by-side lanes for overlapping bars: greedy interval partitioning.
+function assignLanes(items) {
+  const ends = [];
+  for (const it of items) {
+    let lane = ends.findIndex((e) => e <= it.from);
+    if (lane === -1) { lane = ends.length; ends.push(0); }
+    ends[lane] = it.to;
+    it.lane = lane;
+  }
+  return Math.max(1, ends.length);
+}
+
+function renderTimeline({ data, days, targets, openEditor }) {
   const sel = state.sel;
-  const day = sel.day;
-  const dow = (parseYmd(day).getDay() + 6) % 7;
+  const desktop = mqDesktop.matches;
+  const shown = desktop ? days : [sel.day];
   const closeMin = toMin(closeOf(sel.restaurant));
-  const wins = targetWindows(resolveTargets(targets, dow), closeMin);
-  const shifts = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
-    .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
 
-  const spans = shifts.map((x) => x.span);
-  const first = Math.min(360, ...spans.map((x) => Math.max(0, x.s)), ...wins.map((w) => w.from));
-  const last = Math.max(closeMin, ...spans.map((x) => Math.min(1560, x.e)), ...wins.map((w) => w.to));
-  const startMin = Math.floor(first / 60) * 60;
-  const endMin = Math.ceil(last / 60) * 60;
-  const hours = (endMin - startMin) / 60;
-  const buckets = coverage(shifts.map((x) => x.s), day, startMin, endMin);
-  const gaps = shortages(buckets, wins);
-  const pct = (m) => ((m - startMin) / 60);
-
-  const track = (cls, ...kids) => h("div", { class: `tl-track ${cls ?? ""}` }, kids);
-  const row = (cls, label, trackEl) => h("div", { class: `tl-row ${cls ?? ""}` }, h("div", { class: "tl-label", title: label }, label), trackEl);
-
-  const axis = row("tl-axis", fmt(day, { weekday: "short", day: "numeric" }),
-    track("", Array.from({ length: hours }, (_, i) =>
-      h("div", { class: "tl-tick", style: `left:calc(${i} * var(--px))` }, `${(startMin / 60 + i) % 24}h`))));
-
-  const cellCls = (b) => {
-    const tg = targetAt(wins, b.t);
-    return tg === undefined ? "none" : b.count < tg ? "short" : b.count === tg ? "ok" : "over";
-  };
-  const present = row("", t("present"), track("tl-cells", buckets.map((b) =>
-    h("div", { class: `tl-cell ${cellCls(b)}`, title: `${fromMin(b.t)}` }, String(b.count)))));
-  const targetRow = row("tl-targetrow", t("target"), track("tl-cells", buckets.map((b) => {
-    const tg = targetAt(wins, b.t);
-    return h("div", { class: "tl-cell" }, tg === undefined ? "–" : String(tg));
-  })));
-
-  const bars = shifts.map(({ s, span }) => {
-    const from = Math.max(span.s, startMin), to = Math.min(span.e, endMin);
-    const label = `${hhmm(s.start_at)}–${s.until_close ? "F" : hhmm(s.end_at)}`;
-    const bar = h("div", {
-      class: `tl-bar ${s.until_close ? "until-close" : ""}`, title: `${s.staff_name} ${label} · ${roleName(s)}`,
-      style: `left:calc(${pct(from)} * var(--px)); width:calc(${(to - from) / 60} * var(--px))`,
-    }, label);
-    return row("", s.staff_name, track("tl-gridlines", bar));
+  const perDay = shown.map((day) => {
+    const dow = (parseYmd(day).getDay() + 6) % 7;
+    const wins = targetWindows(resolveTargets(targets, dow), closeMin);
+    const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
+      .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
+    return { day, wins, items };
   });
 
-  const gapBox = !wins.length
+  const starts = perDay.flatMap((d) => [...d.items.map((x) => Math.max(0, x.span.s)), ...d.wins.map((w) => w.from)]);
+  const ends = perDay.flatMap((d) => [...d.items.map((x) => Math.min(1560, x.span.e)), ...d.wins.map((w) => w.to)]);
+  const startMin = Math.floor(Math.min(360, ...starts) / 60) * 60;
+  const endMin = Math.ceil(Math.max(closeMin, ...ends) / 60) * 60;
+  const hours = (endMin - startMin) / 60;
+  const ph = desktop ? 44 : 56; // pixels per hour
+  const y = (m) => ((m - startMin) / 60) * ph;
+  const today = ymd(new Date());
+
+  const gapLines = [];
+  let anyTargets = false;
+  const dayCols = perDay.map((d) => {
+    if (d.wins.length) anyTargets = true;
+    const buckets = coverage(d.items.map((x) => x.s), d.day, startMin, endMin);
+    for (const g of shortages(buckets, d.wins))
+      gapLines.push(`${shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : ""}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
+
+    const cells = buckets.map((b) => {
+      const tg = targetAt(d.wins, b.t);
+      const cls = tg === undefined ? "none" : b.count < tg ? "short" : b.count === tg ? "ok" : "over";
+      return h("div", { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title: `${fromMin(b.t)} — ${t("present")} ${b.count}${tg === undefined ? "" : ` / ${t("target")} ${tg}`}` },
+        tg === undefined ? String(b.count) : `${b.count}/${tg}`);
+    });
+
+    const clipped = d.items.map((x) => ({ ...x, from: Math.max(x.span.s, startMin), to: Math.min(x.span.e, endMin) }));
+    const lanes = assignLanes(clipped);
+    const bars = clipped.map((x) => {
+      const range = `${hhmm(x.s.start_at)}–${x.s.until_close ? "F" : hhmm(x.s.end_at)}`;
+      const height = ((x.to - x.from) / 60) * ph;
+      const wide = lanes <= 2 || (!desktop && lanes <= 3);
+      const props = {
+        class: `vtl-bar ${x.s.until_close ? "until-close" : ""} ${wide ? "" : "vertical"}`,
+        title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}`,
+        style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%`,
+      };
+      const body = wide ? [h("b", {}, x.s.staff_name), range] : `${x.s.staff_name} ${range}`;
+      return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
+    });
+    return h("div", { class: "vtl-day" }, h("div", { class: "vtl-cov" }, cells), h("div", { class: "vtl-lanes" }, bars));
+  });
+
+  const heads = shown.map((d) => h("div", { class: `vtl-head ${d === today ? "today" : ""}` },
+    fmt(d, { weekday: "short" }), h("small", {}, fmt(d, { day: "numeric", month: "short" }))));
+  const axis = h("div", { class: "vtl-axis" }, Array.from({ length: hours }, (_, i) =>
+    h("div", { class: "vtl-hour", style: `top:${i * ph}px` }, `${(startMin / 60 + i) % 24}h`)));
+
+  const gapBox = !anyTargets
     ? h("div", { class: "empty" }, t("noTargetsYet"))
-    : gaps.length
-      ? h("div", { class: "alert", role: "status" }, h("strong", {}, t("shortagesTitle")),
-          h("ul", {}, gaps.map((g) => h("li", {}, `${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`))))
+    : gapLines.length
+      ? h("div", { class: "alert", role: "status" }, h("strong", {}, t("shortagesTitle")), h("ul", {}, gapLines.map((l) => h("li", {}, l))))
       : h("div", { class: "okmsg" }, t("noShortages"));
 
   const dayTabs = h("div", { class: "daytabs tl-days", role: "group" }, days.map((d) =>
@@ -258,10 +284,12 @@ function renderTimeline({ data, days, targets }) {
       h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
 
   return h("section", { class: "timeline" },
-    h("h2", {}, `${t("coverage")} — ${fmt(day, { weekday: "long", day: "numeric", month: "long" })}`),
+    h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })}`),
     dayTabs,
     h("div", { class: "gaps" }, gapBox),
-    h("div", { class: "tl-scroll" }, h("div", { class: "tl", style: `--hours:${hours}` }, [axis, present, targetRow, ...bars])),
+    h("div", { class: "vtl-scroll" },
+      h("div", { class: "vtl", style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${desktop ? 118 : 240}px` },
+        [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
     h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
       h("span", {}, h("i", { style: "background:#93c5fd" }), t("legendOver")), h("span", {}, h("i", { style: "background:var(--line)" }), t("legendNone"))));
