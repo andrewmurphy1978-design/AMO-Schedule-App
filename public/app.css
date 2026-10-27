@@ -360,3 +360,11 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .slip .actions{display:flex;gap:8px;flex-wrap:wrap}.slip .actions select{flex:1;min-width:160px}
 .log{display:grid;gap:6px}.log-row{display:flex;flex-direction:column;gap:2px;padding:8px;border:1px solid #eee;border-radius:10px;text-decoration:none;color:inherit}
 .check{display:flex;gap:8px;align-items:center}
+
+.off-chip{display:inline-block;font-weight:800;font-size:.72rem;padding:2px 6px;border-radius:6px;margin-bottom:3px}
+.off-chip.requested{background:#fff4d6;color:#8a5a00;border:1px dashed #d9a21b}
+.off-chip.approved{background:#d8f0de;color:#1c6b30;border:1px solid #7cc58d}
+.off-chip.denied{background:#eee;color:#666}
+.cov-row{display:grid;gap:6px;padding:10px;border:1px solid #e3dfd9;border-radius:12px;margin:8px 0;background:#fff}
+.cov-row.open{border-color:#e8a29b;background:#fff7f6}
+.sick-btn{margin-top:6px}

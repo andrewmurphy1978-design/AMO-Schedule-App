@@ -6,7 +6,7 @@ import { weekBounds } from "./week.ts";
 import { computeCosts, parseRate } from "./payroll.ts";
 import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
 import { normalizePhone } from "./phone.ts";
-import { loadConnections, deliver } from "./notify.ts";
+import { loadConnections, deliver, notifyStaff } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
@@ -631,6 +631,94 @@ app.get("/api/payslips/:id/pdf", async (c) => {
   return row ? pdfResponse(c, row.filename, row.content_b64) : c.json({ error: "not_found" }, 404);
 });
 
+// ---------- Time off (congé demandé / accordé) ----------
+const DATE_RE3 = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+// Managers who must hear about / decide a request: managers of every restaurant+department where the person works, plus admins.
+async function approversOf(db: D1Database, staffId: number): Promise<number[]> {
+  const r = await db.prepare(
+    `SELECT DISTINCT m.staff_id FROM managers m
+       JOIN (SELECT DISTINCT sr.restaurant_id, ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?) x
+         ON x.restaurant_id = m.restaurant_id AND x.department_id = m.department_id
+     UNION SELECT id FROM staff WHERE is_admin = 1`,
+  ).bind(staffId).all<{ staff_id: number }>();
+  return r.results.map((x) => x.staff_id);
+}
+async function canDecideFor(db: D1Database, me: Me, staffId: number) {
+  return me.is_admin || (me.id !== staffId && (await approversOf(db, staffId)).includes(me.id));
+}
+
+app.post("/api/time-off", async (c) => {
+  const me = c.get("me");
+  const b = await c.req.json<{ start_date?: string; end_date?: string; note?: string }>();
+  const start = b.start_date ?? "", end = b.end_date || start;
+  if (!DATE_RE3.test(start) || !DATE_RE3.test(end) || start > end) return c.json({ error: "invalid_dates" }, 400);
+  if (end < localNow(c.env.TIMEZONE).slice(0, 10)) return c.json({ error: "in_the_past" }, 400);
+  const dup = await c.env.DB.prepare("SELECT 1 FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?").bind(me.id, end, start).first();
+  if (dup) return c.json({ error: "already_requested" }, 409);
+  const note = b.note?.trim().slice(0, 300) || null;
+  const r = await c.env.DB.prepare("INSERT INTO time_off_requests (staff_id, start_date, end_date, note, created_at) VALUES (?, ?, ?, ?, ?)").bind(me.id, start, end, note, Date.now()).run();
+  // Tell the managers (best effort: a messaging problem never blocks the request).
+  try {
+    const conn = await loadConnections(c.env, c.env.DB);
+    const ids = (await approversOf(c.env.DB, me.id)).filter((id) => id !== me.id);
+    if (ids.length) {
+      const people = (await c.env.DB.prepare(`SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<any>()).results;
+      for (const p of people) await notifyStaff(c.env.DB, conn, p, (l) => T.timeOffRequest(l, { name: me.name, from: start, to: end, note }), "time_off_request");
+    }
+  } catch { /* ignore */ }
+  return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+app.get("/api/time-off/mine", async (c) => {
+  const r = await c.env.DB.prepare("SELECT id, start_date, end_date, note, status, decision_note FROM time_off_requests WHERE staff_id = ? AND end_date >= date('now','-60 day') ORDER BY start_date DESC").bind(c.get("me").id).all();
+  return c.json(r.results);
+});
+
+app.post("/api/time-off/:id/cancel", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const r = await c.env.DB.prepare("UPDATE time_off_requests SET status = 'cancelled' WHERE id = ? AND staff_id = ? AND status IN ('requested','approved')").bind(id, c.get("me").id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// Requests the caller may decide on: still waiting, plus the recently decided ones (so a decision can be changed).
+app.get("/api/time-off/review", async (c) => {
+  const me = c.get("me");
+  const rows = (await c.env.DB.prepare(
+    `SELECT t.id, t.staff_id, s.name AS staff_name, t.start_date, t.end_date, t.note, t.status, t.decision_note
+     FROM time_off_requests t JOIN staff s ON s.id = t.staff_id
+     WHERE t.status != 'cancelled' AND (t.status = 'requested' OR t.end_date >= date('now','-14 day')) AND t.end_date >= date('now','-14 day')
+     ORDER BY (t.status = 'requested') DESC, t.start_date LIMIT 200`,
+  ).all<{ staff_id: number }>()).results;
+  if (me.is_admin) return c.json(rows);
+  const out = [];
+  const cache = new Map<number, boolean>();
+  for (const r of rows) {
+    if (!cache.has(r.staff_id)) cache.set(r.staff_id, await canDecideFor(c.env.DB, me, r.staff_id));
+    if (cache.get(r.staff_id)) out.push(r);
+  }
+  return c.json(out);
+});
+
+app.post("/api/time-off/:id/decide", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { approve, note } = await c.req.json<{ approve?: boolean; note?: string }>();
+  if (!id || typeof approve !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const row = await c.env.DB.prepare("SELECT staff_id, start_date, end_date, status FROM time_off_requests WHERE id = ?").bind(id).first<{ staff_id: number; start_date: string; end_date: string; status: string }>();
+  if (!row || row.status === "cancelled") return c.json({ error: "not_found" }, 404);
+  if (!(await canDecideFor(c.env.DB, c.get("me"), row.staff_id))) return c.json({ error: "forbidden" }, 403);
+  const dn = note?.trim().slice(0, 300) || null;
+  await c.env.DB.prepare("UPDATE time_off_requests SET status = ?, decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?").bind(approve ? "approved" : "denied", c.get("me").id, Date.now(), dn, id).run();
+  try {
+    const person = await c.env.DB.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(row.staff_id).first<any>();
+    if (person) await notifyStaff(c.env.DB, await loadConnections(c.env, c.env.DB), person, (l) => T.timeOffDecision(l, { approved: approve, from: row.start_date, to: row.end_date, note: dn }), "time_off_decision");
+  } catch { /* ignore */ }
+  // Shifts already planned on those days: tell the manager so they can be moved.
+  const clash = await c.env.DB.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND status = 'ok' AND substr(start_at,1,10) >= ? AND substr(start_at,1,10) <= ?").bind(row.staff_id, row.start_date, row.end_date).first<{ n: number }>();
+  return c.json({ ok: true, shifts_on_those_days: approve ? clash?.n ?? 0 : 0 });
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
@@ -908,7 +996,13 @@ app.get("/api/schedule", async (c) => {
       ).bind(...visible, bounds.start, bounds.end, restaurantId, department).all()).results;
     }
   }
-  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, limits: { overtime_hours: settings.overtime_hours } });
+  // Time off overlapping this week: everyone's for managers/admin, only the caller's own for the rest.
+  const weekEndDay = new Date(`${bounds.start.slice(0, 10)}T00:00:00Z`); weekEndDay.setUTCDate(weekEndDay.getUTCDate() + 6);
+  const offIds = [...ids].filter((id) => editable || id === me.id);
+  const time_off = offIds.length ? (await c.env.DB.prepare(
+    `SELECT staff_id, start_date, end_date, status FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${offIds.map(() => "?").join(",")}) AND start_date <= ? AND end_date >= ?`,
+  ).bind(...offIds, weekEndDay.toISOString().slice(0, 10), bounds.start.slice(0, 10)).all()).results : [];
+  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, limits: { overtime_hours: settings.overtime_hours } });
 });
 
 // The caller's own shifts across every restaurant and department.
@@ -1031,6 +1125,10 @@ async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
   const clashes = findOverlaps(b, others.results);
   if (clashes.length && !b.force)
     return { status: 409, body: { error: "overlap", conflicts: clashes.map(({ restaurant, start_at, end_at }) => ({ restaurant, start_at, end_at })) } };
+  // Requested or approved time off on that day: warn (the manager can still save anyway).
+  const off = await db.prepare("SELECT start_date, end_date, status FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?")
+    .bind(b.staff_id, b.end_at.slice(0, 10), b.start_at.slice(0, 10)).first<{ start_date: string; end_date: string; status: string }>();
+  if (off && !b.force) return { status: 409, body: { error: "time_off", time_off: off } };
   return null;
 }
 

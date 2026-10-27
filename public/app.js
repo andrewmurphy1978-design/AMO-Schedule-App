@@ -135,7 +135,7 @@ function renderChrome() {
   document.getElementById("footer").textContent = t("footer");
   document.getElementById("brand-sub").textContent = t("app");
   document.title = `Mikes · ${t("app")}`;
-  const tabs = [["schedule", t("schedule")], ["mine", t("myShifts")], ["account", t("account")]];
+  const tabs = [["schedule", t("schedule")], ["mine", t("myShifts")], ["timeoff", t("timeOff")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -155,6 +155,7 @@ async function render() {
     }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
+    else if (state.view === "timeoff") await renderTimeOff();
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
@@ -168,6 +169,38 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 });
 
 // ---------- schedule ----------
+const nowLocal = () => { const d = new Date(); return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+// Open replacement requests (managers/admins): who was asked, assign by hand, cancel.
+function coveragePanel(onChange) {
+  const box = h("section", { class: "panel coverage-panel", hidden: true });
+  api("/coverage").then((rows) => {
+    const open = rows.filter((r) => r.status === "open"), recent = rows.filter((r) => r.status !== "open").slice(0, 5);
+    if (!open.length && !recent.length) return;
+    box.hidden = false;
+    const line = (r) => h("div", { class: `cov-row ${r.status}` },
+      h("div", {}, h("b", {}, `${r.sick_name}`), ` · ${roleName(r)} · ${r.restaurant}`, h("div", { class: "meta" }, `${fmt(r.start_at.slice(0, 10), { weekday: "short", day: "numeric", month: "short" })} ${hhmm(r.start_at)}–${r.until_close ? "F" : hhmm(r.end_at)}`)),
+      h("div", { class: "meta" }, r.status === "open" ? `${t("asked")}: ${r.offers} · ${t("waiting")}: ${r.waiting} · ${t("declined")}: ${r.declined}${r.escalated_at ? ` · ⚠ ${t("actionRequired")}` : ""}`
+        : r.status === "filled" ? `✔ ${t("filledBy")} ${r.filled_by_name ?? ""}` : t("cancelled")),
+      r.status === "open" ? h("div", { class: "actions" },
+        h("button", { class: "btn primary", type: "button", onClick: () => assignDialog(r, onChange) }, t("assignManually")),
+        h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmCancelSick"))) { try { await api(`/coverage/${r.id}/cancel`, { method: "POST" }); onChange(); } catch (e) { toast(errorText(e)); } } } }, t("cancelSick"))) : null);
+    box.replaceChildren(h("h2", {}, t("replacements")), open.map(line), recent.length ? h("details", {}, h("summary", {}, t("recent")), recent.map(line)) : null);
+  }).catch(() => {});
+  return box;
+}
+
+async function assignDialog(r, onChange) {
+  const dlg = document.getElementById("modal");
+  let cand;
+  try { cand = await api(`/coverage/${r.id}/candidates`); } catch (e) { toast(errorText(e)); return; }
+  dlg.replaceChildren(h("div", { class: "modal-body" }, h("h2", {}, t("assignManually")),
+    cand.eligible.length ? cand.eligible.map((p) => h("button", { class: "btn", type: "button", style: "display:block;width:100%;margin:6px 0;text-align:left", onClick: async () => {
+      try { await api(`/coverage/${r.id}/assign`, { method: "POST", body: { staff_id: p.staff_id } }); dlg.close(); toast(t("saved")); onChange(); } catch (e) { toast(errorText(e)); }
+    } }, `${p.name} — ${p.week_hours} ${t("hoursShort")}`)) : h("p", { class: "meta" }, t("nobodyEligible")),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")))));
+  dlg.showModal();
+}
 function mergeSchedules(datas, restaurantId, depts) {
   if (datas.length === 1) return datas[0];
   const seen = new Set();
@@ -179,7 +212,9 @@ function mergeSchedules(datas, restaurantId, depts) {
   const elsewhere = datas.flatMap((d) => d.elsewhere ?? [])
     .filter((e) => !(e.restaurant_id === restaurantId && depts.includes(e.department_id)))
     .filter((e) => { const k = `${e.staff_id}|${e.start_at}|${e.end_at}`; return !key.has(k) && key.add(k); });
-  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere };
+  const offSeen = new Set();
+  const time_off = datas.flatMap((d) => d.time_off ?? []).filter((o) => { const k = `${o.staff_id}|${o.start_date}|${o.end_date}|${o.status}`; return !offSeen.has(k) && offSeen.add(k); });
+  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off };
 }
 function mergeRosters(rosters) {
   const by = new Map();
@@ -273,6 +308,7 @@ async function renderSchedule() {
   const dayShifts = byDay(sel.day);
   const nameById = new Map([...roster.map((r) => [r.staff_id, r.name]), ...data.shifts.map((x) => [x.staff_id, x.staff_name])]);
   const elsewhereToday = (data.elsewhere ?? []).filter((e) => dayOf(e.start_at) === sel.day);
+  const offToday = (data.time_off ?? []).filter((o) => o.start_date <= sel.day && o.end_date >= sel.day);
   const daily = h("section", { class: "daily" },
     h("h2", {}, fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })),
     dayShifts.length
@@ -286,6 +322,9 @@ async function renderSchedule() {
           return data.editable ? h("button", { class: cls, type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: cls }, card);
         }))
       : h("div", { class: "empty" }, t("noShifts")),
+    // Requested (C/D) and approved (C/A) time off that day.
+    offToday.length ? h("div", { class: "off-list" }, h("h3", {}, t("timeOff")),
+      offToday.map((o) => h("div", { class: "elsewhere" }, h("span", { class: `off-chip ${o.status}` }, o.status === "approved" ? "C/A" : "C/D"), ` ${nameById.get(o.staff_id) ?? ""}`))) : null,
     // People on this schedule who work somewhere else that day (managers only).
     elsewhereToday.length ? h("div", { class: "elsewhere-list" }, h("h3", {}, t("elsewhereToday")),
       elsewhereToday.map((e) => h("div", { class: "elsewhere" }, h("b", {}, `↗ ${nameById.get(e.staff_id) ?? ""} · ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant}`))) : null,
@@ -305,6 +344,8 @@ async function renderSchedule() {
   for (const sh of data.shifts) meta.set(sh.staff_id, { color: sh.staff_color, photo_v: sh.photo_v });
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
   const limit = data.limits?.overtime_hours ?? 40;
+  const offAt = (id, d) => (data.time_off ?? []).find((o) => o.staff_id === id && o.start_date <= d && o.end_date >= d);
+  const offChip = (o) => h("div", { class: `off-chip ${o.status}`, title: o.status === "approved" ? t("offApproved") : t("offRequested") }, o.status === "approved" ? "C/A" : "C/D");
   const elsewhereAt = (id, d) => (data.elsewhere ?? []).filter((e) => e.staff_id === id && dayOf(e.start_at) === d);
   const place = (e) => (e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant);
   const totalCell = (id) => {
@@ -325,6 +366,7 @@ async function renderSchedule() {
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
+          offAt(id, d) ? offChip(offAt(id, d)) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
             const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
@@ -341,7 +383,7 @@ async function renderSchedule() {
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
-  $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
+  $app.replaceChildren(...[controls, status, data.editable ? coveragePanel(render) : null, daytabs, daily, timeline, grid, fab].filter(Boolean));
 }
 
 
@@ -577,6 +619,11 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
         alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("overlapTitle")), h("div", {}, t("overlapBody")),
           h("ul", {}, e.body.conflicts.map((c) => h("li", {}, `${c.restaurant} · ${c.start_at.slice(0, 10)} ${hhmm(c.start_at)}–${hhmm(c.end_at)}`))),
           h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
+      } else if (e.body?.error === "time_off") {
+        const o = e.body.time_off;
+        alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("timeOffTitle")),
+          h("div", {}, `${o.status === "approved" ? t("offApproved") : t("offRequested")} : ${o.start_date} → ${o.end_date}`),
+          h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
       } else alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e)));
     }
   };
@@ -595,6 +642,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     h("label", { class: "field" }, h("span", {}, t("notes")), notes),
     alertBox,
     h("div", { class: "actions" },
+      shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmSickFor"))) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST" }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
       shift ? h("button", { class: "btn danger", type: "button", onClick: del }, t("delete")) : null,
       h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")),
       h("button", { class: "btn primary", type: "submit" }, t("save"))));
@@ -603,6 +651,45 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 }
 
 // ---------- my shifts ----------
+// ---------- time off ----------
+async function renderTimeOff() {
+  const today = ymd(new Date());
+  const [mine, review] = await Promise.all([api("/time-off/mine"), api("/time-off/review")]);
+  const from = h("input", { type: "date", required: true, min: today, value: today });
+  const to = h("input", { type: "date", min: today, value: today });
+  from.addEventListener("change", () => { if (to.value < from.value) to.value = from.value; to.min = from.value; });
+  const note = h("input", { maxLength: 300, placeholder: t("optional") });
+  const statusText = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
+  const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short" })}`);
+  const form = h("form", { class: "panel inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
+    e.preventDefault();
+    try { await api("/time-off", { method: "POST", body: { start_date: from.value, end_date: to.value || from.value, note: note.value } }); toast(t("requestSent")); render(); }
+    catch (err) { toast(err.body?.error === "already_requested" ? t("alreadyRequested") : errorText(err)); }
+  } }, h("h2", {}, t("requestTimeOff")),
+    h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to),
+    h("label", { class: "field" }, h("span", {}, t("note")), note), h("button", { class: "btn primary", type: "submit" }, t("sendRequest")));
+  const myList = h("section", { class: "panel" }, h("h2", {}, t("myTimeOff")), mine.length ? mine.map((r) =>
+    h("div", { class: "cov-row" }, h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
+      h("div", { class: "meta" }, `${statusText[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`),
+      r.status === "requested" || r.status === "approved" ? h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmCancelOff"))) { await api(`/time-off/${r.id}/cancel`, { method: "POST" }); render(); } } }, t("cancel")) : null))
+    : h("p", { class: "meta" }, t("noTimeOff")));
+  const decide = async (r, approve) => {
+    const dn = prompt(t("decisionNote")) ?? "";
+    try {
+      const res = await api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve, note: dn } });
+      toast(res.shifts_on_those_days ? `${t("saved")} — ⚠ ${res.shifts_on_those_days} ${t("shiftsOnThoseDays")}` : t("saved")); render();
+    } catch (e) { toast(errorText(e)); }
+  };
+  const reviewBox = review.length || state.me.managed.length || state.me.me.is_admin ? h("section", { class: "panel" }, h("h2", {}, t("timeOffToReview")),
+    review.length ? review.map((r) => h("div", { class: "cov-row" }, h("div", {}, h("b", {}, r.staff_name), ` · ${dates(r)}`),
+      h("div", { class: "meta" }, `${statusText[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}`),
+      h("div", { class: "actions" },
+        r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
+        r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null)))
+    : h("p", { class: "meta" }, t("nothingToReview"))) : null;
+  $app.replaceChildren(h("div", { class: "account" }, form, myList, reviewBox));
+}
+
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
@@ -658,7 +745,11 @@ async function renderMine() {
         h("div", { class: "list", style: "margin-bottom:1rem" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
           h("div", { class: "card" }, h("span", { class: "time" }, range(s)),
             h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null)))))
+            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            s.status === "ok" && s.end_at > nowLocal() ? h("button", { class: "btn sick-btn", type: "button", onClick: async () => {
+              if (!confirm(t("confirmSick"))) return;
+              try { await api(`/shifts/${s.id}/sick`, { method: "POST" }); toast(t("sickStarted")); render(); } catch (e) { toast(e.body?.error === "already_sick" ? t("alreadySick") : errorText(e)); }
+            } }, `🤒 ${t("imSick")}`) : null)))))
     : [h("div", { class: "empty" }, t("noShiftsWeek"))];
   $app.replaceChildren(nav, myHours, ...body);
 }

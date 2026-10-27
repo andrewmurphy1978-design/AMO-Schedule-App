@@ -14,6 +14,7 @@ import m0011 from "../migrations/0011_close_by_day.sql";
 import m0012 from "../migrations/0012_messaging_sick.sql";
 import m0013 from "../migrations/0013_prep_dept_role_wages.sql";
 import m0014 from "../migrations/0014_payslips_sin.sql";
+import m0015 from "../migrations/0015_time_off.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -30,6 +31,7 @@ const MIGRATIONS: [string, string][] = [
   ["0012_messaging_sick", m0012],
   ["0013_prep_dept_role_wages", m0013],
   ["0014_payslips_sin", m0014],
+  ["0015_time_off", m0015],
 ];
 
 const statements = (sql: string) =>
