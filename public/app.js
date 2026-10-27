@@ -1,4 +1,4 @@
-import { splitName, joinName, shortNames } from "./names.js";
+import { splitName, joinName, shortNames, orderStaff } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
 import { DEFAULT_BOUNDARIES, periodKeys, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
@@ -125,6 +125,7 @@ const state = {
 
 const DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
+state.tableOrder = (() => { try { return localStorage.getItem("tableOrder") || "alpha"; } catch { return "alpha"; } })();
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
 function allowedDepartments(restaurantId) {
@@ -328,6 +329,9 @@ async function renderSchedule() {
         h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); sel.day = sel.week; render(); } }, "›"))),
     h("div", { class: "field" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", onClick: () => { sel.week = mondayOf(new Date()); sel.day = ymd(new Date()); render(); } }, t("today"))),
+    h("label", { class: "field" }, h("span", {}, t("tableOrder")),
+      h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
+        [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v }, l)))),
     h("div", { class: "field" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", title: t("printHint"), onClick: () => window.print() }, `🖨 ${t("printSchedule")}`)),
   );
@@ -385,7 +389,21 @@ async function renderSchedule() {
   const parts = new Map();
   for (const r of roster) parts.set(r.staff_id, r.first_name ? { first: r.first_name, last: r.last_name } : splitName(r.name));
   for (const sh of data.shifts) parts.set(sh.staff_id, sh.first_name ? { first: sh.first_name, last: sh.last_name } : splitName(sh.staff_name));
-  const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
+  // Row order: alphabetical, by usual arrival time (who opens most often comes first), or by the position set on each employee.
+  const orderInfo = new Map();
+  for (const r of roster) orderInfo.set(r.staff_id, r.print_order ?? null);
+  for (const sh of data.shifts) orderInfo.set(sh.staff_id, sh.print_order ?? orderInfo.get(sh.staff_id) ?? null);
+  const orderedIds = orderStaff([...people.entries()].map(([id, name]) => ({ id, name, print_order: orderInfo.get(id) ?? null })), data.shifts.filter((x) => x.status !== "sick_open"), state.tableOrder, (a, b) => a.localeCompare(b, locale()));
+  // When Plonge/Préparation is shown together with other departments, its staff go to the bottom of the table.
+  const rosterRoles = new Map(roster.map((r) => [r.staff_id, r.role_ids ?? []]));
+  const prepOnly = (id) => {
+    const mine = data.shifts.filter((x) => x.staff_id === id);
+    if (mine.length) return mine.every((x) => x.department_id === "prep" && (x.extra_roles ?? []).every((r) => r.department_id === "prep"));
+    const ids = rosterRoles.get(id) ?? [];
+    return ids.length > 0 && ids.every((rid) => state.roles.find((r) => r.id === rid)?.department_id === "prep");
+  };
+  const mixed = sel.departments.includes("prep") && sel.departments.length > 1;
+  const rows = [...orderedIds.filter((id) => !(mixed && prepOnly(id))), ...orderedIds.filter((id) => mixed && prepOnly(id))].map((id) => [id, people.get(id)]);
   const limit = data.limits?.overtime_hours ?? 40;
   const offAt = (id, d) => (data.time_off ?? []).find((o) => o.staff_id === id && o.start_date <= d && o.end_date >= d);
   const offChip = (o) => h("div", { class: `off-chip ${o.status}`, title: o.status === "approved" ? t("offApproved") : t("offRequested") }, `${o.status === "approved" ? "C/A" : "C/D"}${o.start_time ? ` ${o.start_time.replace(/^0/, "").replace(":00", "")}–${o.end_time.replace(/^0/, "").replace(":00", "")}` : ""}`);
@@ -1682,6 +1700,7 @@ function staffCard(s, ov) {
     return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: (() => { const dr = ov.default_rates?.roles?.[rid] ?? ov.default_rates?.general_cents; return dr != null ? `${t("defaultWord")} ${(dr / 100).toFixed(2)}` : t("sameAsGeneral"); })(), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
   }).filter((x) => x.ro);
   const adminMsg = h("div", { class: "alert", role: "alert" });
+  const printOrder = h("input", { type: "number", min: 1, max: 999, inputMode: "numeric", placeholder: t("noPrintOrder"), value: s.print_order ?? "" });
   const maxHours = h("input", { type: "number", min: 1, max: 168, step: "0.5", inputMode: "decimal", placeholder: t("noMaxHours"), value: s.max_weekly_hours ?? "" });
   const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
@@ -1719,7 +1738,7 @@ function staffCard(s, ov) {
   const details = h("form", { id: `staff-form-${s.id}`, class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
     try {
-      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || null, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
       const lim = await api(`/staff/${s.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxHours.value } }); s.max_weekly_hours = lim.max_weekly_hours;
@@ -1755,6 +1774,7 @@ function staffCard(s, ov) {
     } }), h("span", {}, t("isAdminLabel"))),
     adminMsg,
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
+    h("label", { class: "field" }, h("span", {}, t("printOrderLabel")), printOrder, h("span", { class: "meta" }, t("printOrderHelp"))),
     h("label", { class: "field" }, h("span", {}, t("maxWeeklyHours")), maxHours, h("span", { class: "meta" }, t("maxWeeklyHoursHelp"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
