@@ -138,8 +138,8 @@ app.get("/api/roles", async (c) =>
 app.get("/api/restaurants", async (c) => {
   const me = c.get("me");
   const sql = me.is_admin
-    ? "SELECT id, name FROM restaurants ORDER BY name"
-    : `SELECT DISTINCT r.id, r.name FROM restaurants r WHERE r.id IN
+    ? "SELECT id, name, close_time FROM restaurants ORDER BY name"
+    : `SELECT DISTINCT r.id, r.name, r.close_time FROM restaurants r WHERE r.id IN
          (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?1
           UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1) ORDER BY r.name`;
   const stmt = c.env.DB.prepare(sql);
@@ -155,6 +155,57 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
   } catch {
     return c.json({ error: "name_taken" }, 409);
   }
+});
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const SLOTS = ["06:30", "08:00", "09:00", "11:00", "14:00", "17:00", "close"];
+
+// Closing time per restaurant. Until-close shifts follow it.
+app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { close_time } = await c.req.json<{ close_time?: string }>();
+  if (!id || !close_time || !TIME_RE.test(close_time)) return c.json({ error: "invalid_times" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE restaurants SET close_time = ? WHERE id = ?").bind(close_time, id),
+    // 'F' shifts end at closing time; keep their stored end in step (only when the shift starts before closing).
+    c.env.DB.prepare(
+      "UPDATE shifts SET end_at = substr(start_at, 1, 10) || 'T' || ?1 WHERE restaurant_id = ?2 AND until_close = 1 AND substr(start_at, 12, 5) < ?1",
+    ).bind(close_time, id),
+  ]);
+  return c.json({ ok: true });
+});
+
+// ---------- Staffing targets ----------
+// GET /api/targets?restaurant=1&department=kitchen  -> [{dow, slot, count}]
+app.get("/api/targets", async (c) => {
+  const restaurantId = intParam(c.req.query("restaurant"));
+  const department = c.req.query("department");
+  if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
+  if (!(await canView(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare("SELECT dow, slot, count FROM staffing_targets WHERE restaurant_id = ? AND department_id = ?")
+    .bind(restaurantId, department)
+    .all();
+  return c.json(r.results);
+});
+
+// Replaces all targets for one day-of-week (-1 = every day) of one restaurant+department.
+app.put("/api/targets", async (c) => {
+  const b = await c.req.json<{ restaurant_id: number; department_id: string; dow: number; slots: Record<string, number> }>();
+  if (!Number.isInteger(b.dow) || b.dow < -1 || b.dow > 6) return c.json({ error: "invalid_day" }, 400);
+  if (!(await canManage(c.env.DB, c.get("me"), b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
+  const entries = Object.entries(b.slots ?? {});
+  for (const [slot, n] of entries) if (!SLOTS.includes(slot) || !Number.isInteger(n) || n < 0 || n > 99) return c.json({ error: "invalid_target" }, 400);
+  const db = c.env.DB;
+  try {
+    await db.batch([
+      db.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ? AND department_id = ? AND dow = ?").bind(b.restaurant_id, b.department_id, b.dow),
+      ...entries.map(([slot, n]) =>
+        db.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, dow, slot, count) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.dow, slot, n)),
+    ]);
+  } catch {
+    return c.json({ error: "invalid_reference" }, 400);
+  }
+  return c.json({ ok: true });
 });
 
 // ---------- Staff (admin) ----------
@@ -307,7 +358,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
     db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
-    db.prepare("SELECT id, name FROM restaurants ORDER BY name").all(),
+    db.prepare("SELECT id, name, close_time FROM restaurants ORDER BY name").all(),
   ]);
   return c.json({
     restaurants: restaurants.results,

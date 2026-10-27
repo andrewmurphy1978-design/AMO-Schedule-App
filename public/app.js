@@ -1,4 +1,5 @@
 import { t, getLang, setLang, locale, roleName } from "./i18n.js";
+import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages } from "./coverage.js";
 
 // ---------- helpers ----------
 function h(tag, attrs = {}, ...kids) {
@@ -11,7 +12,7 @@ function h(tag, attrs = {}, ...kids) {
     else if (k in el && k !== "list") { try { el[k] = v; } catch { el.setAttribute(k, v); } }
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(kid));
   return el;
 }
 
@@ -37,7 +38,7 @@ const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.get
 const hhmm = (iso) => iso.slice(11, 16);
 // Until-close shifts show "F" instead of an end time. end_at is a provisional closing time
 // until per-restaurant closing hours exist.
-const DEFAULT_CLOSE = "22:00";
+const closeOf = (restaurantId) => state.restaurants.find((r) => r.id === restaurantId)?.close_time ?? "22:00";
 const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
 const dayOf = (iso) => iso.slice(0, 10);
 const fmt = (s, opts) => new Intl.DateTimeFormat(locale(), opts).format(parseYmd(s));
@@ -126,6 +127,7 @@ async function renderSchedule() {
   const q = `restaurant=${sel.restaurant}&department=${sel.department}&week=${sel.week}`;
   const data = await api(`/schedule?${q}`);
   const roster = data.editable ? await api(`/roster?restaurant=${sel.restaurant}&department=${sel.department}`) : [];
+  const targets = await api(`/targets?restaurant=${sel.restaurant}&department=${sel.department}`);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i));
   if (!days.includes(sel.day)) sel.day = days.includes(ymd(new Date())) ? ymd(new Date()) : days[0];
   const today = ymd(new Date());
@@ -184,7 +186,80 @@ async function renderSchedule() {
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null))))
       : h("tr", {}, h("td", { colSpan: 8 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
-  $app.replaceChildren(...[controls, status, daytabs, daily, grid, fab].filter(Boolean));
+  const timeline = renderTimeline({ data, days, targets });
+  $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
+}
+
+
+// ---------- coverage timeline ----------
+const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^0/, ""));
+
+function renderTimeline({ data, days, targets }) {
+  const sel = state.sel;
+  const day = sel.day;
+  const dow = (parseYmd(day).getDay() + 6) % 7;
+  const closeMin = toMin(closeOf(sel.restaurant));
+  const wins = targetWindows(resolveTargets(targets, dow), closeMin);
+  const shifts = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
+    .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
+
+  const spans = shifts.map((x) => x.span);
+  const first = Math.min(360, ...spans.map((x) => Math.max(0, x.s)), ...wins.map((w) => w.from));
+  const last = Math.max(closeMin, ...spans.map((x) => Math.min(1560, x.e)), ...wins.map((w) => w.to));
+  const startMin = Math.floor(first / 60) * 60;
+  const endMin = Math.ceil(last / 60) * 60;
+  const hours = (endMin - startMin) / 60;
+  const buckets = coverage(shifts.map((x) => x.s), day, startMin, endMin);
+  const gaps = shortages(buckets, wins);
+  const pct = (m) => ((m - startMin) / 60);
+
+  const track = (cls, ...kids) => h("div", { class: `tl-track ${cls ?? ""}` }, kids);
+  const row = (cls, label, trackEl) => h("div", { class: `tl-row ${cls ?? ""}` }, h("div", { class: "tl-label", title: label }, label), trackEl);
+
+  const axis = row("tl-axis", fmt(day, { weekday: "short", day: "numeric" }),
+    track("", Array.from({ length: hours }, (_, i) =>
+      h("div", { class: "tl-tick", style: `left:calc(${i} * var(--px))` }, `${(startMin / 60 + i) % 24}h`))));
+
+  const cellCls = (b) => {
+    const tg = targetAt(wins, b.t);
+    return tg === undefined ? "none" : b.count < tg ? "short" : b.count === tg ? "ok" : "over";
+  };
+  const present = row("", t("present"), track("tl-cells", buckets.map((b) =>
+    h("div", { class: `tl-cell ${cellCls(b)}`, title: `${fromMin(b.t)}` }, String(b.count)))));
+  const targetRow = row("tl-targetrow", t("target"), track("tl-cells", buckets.map((b) => {
+    const tg = targetAt(wins, b.t);
+    return h("div", { class: "tl-cell" }, tg === undefined ? "–" : String(tg));
+  })));
+
+  const bars = shifts.map(({ s, span }) => {
+    const from = Math.max(span.s, startMin), to = Math.min(span.e, endMin);
+    const label = `${hhmm(s.start_at)}–${s.until_close ? "F" : hhmm(s.end_at)}`;
+    const bar = h("div", {
+      class: `tl-bar ${s.until_close ? "until-close" : ""}`, title: `${s.staff_name} ${label} · ${roleName(s)}`,
+      style: `left:calc(${pct(from)} * var(--px)); width:calc(${(to - from) / 60} * var(--px))`,
+    }, label);
+    return row("", s.staff_name, track("tl-gridlines", bar));
+  });
+
+  const gapBox = !wins.length
+    ? h("div", { class: "empty" }, t("noTargetsYet"))
+    : gaps.length
+      ? h("div", { class: "alert", role: "status" }, h("strong", {}, t("shortagesTitle")),
+          h("ul", {}, gaps.map((g) => h("li", {}, `${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`))))
+      : h("div", { class: "okmsg" }, t("noShortages"));
+
+  const dayTabs = h("div", { class: "daytabs tl-days", role: "group" }, days.map((d) =>
+    h("button", { type: "button", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
+      h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
+
+  return h("section", { class: "timeline" },
+    h("h2", {}, `${t("coverage")} — ${fmt(day, { weekday: "long", day: "numeric", month: "long" })}`),
+    dayTabs,
+    h("div", { class: "gaps" }, gapBox),
+    h("div", { class: "tl-scroll" }, h("div", { class: "tl", style: `--hours:${hours}` }, [axis, present, targetRow, ...bars])),
+    h("div", { class: "tl-legend" },
+      h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
+      h("span", {}, h("i", { style: "background:#93c5fd" }), t("legendOver")), h("span", {}, h("i", { style: "background:var(--line)" }), t("legendNone"))));
 }
 
 // ---------- shift editor ----------
@@ -222,7 +297,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   start.addEventListener("input", syncNext); end.addEventListener("input", syncNext); untilClose.addEventListener("change", syncNext); syncNext();
 
   const payload = (force) => {
-    const endTime = untilClose.checked ? DEFAULT_CLOSE : end.value;
+    const endTime = untilClose.checked ? closeOf(sel.restaurant) : end.value;
     const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
@@ -307,7 +382,64 @@ async function renderAdmin() {
   const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
 
   const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
-  $app.replaceChildren(rest, staffPanel, ...staffList);
+  $app.replaceChildren(rest, targetsPanel(ov), staffPanel, ...staffList);
+}
+
+
+function targetsPanel(ov) {
+  const dowNames = Array.from({ length: 7 }, (_, i) => fmt(addDays("2026-10-26", i), { weekday: "long" }));
+  const st = { restaurant: ov.restaurants[0]?.id, department: "kitchen", dow: -1 };
+  const box = h("section", { class: "panel" });
+  const inputs = {};
+
+  async function load() {
+    if (!st.restaurant) { box.replaceChildren(); return; }
+    const rows = await api(`/targets?restaurant=${st.restaurant}&department=${st.department}`);
+    const own = rows.filter((r) => r.dow === st.dow);
+    const base = st.dow === -1 ? [] : rows.filter((r) => r.dow === -1);
+    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
+    const closeInput = h("input", { type: "time", value: resto.close_time, required: true });
+    const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
+
+    const slotInputs = SLOTS.map((slot) => {
+      const mine = own.find((r) => r.slot === slot)?.count;
+      const dflt = base.find((r) => r.slot === slot)?.count;
+      const input = h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: mine ?? "", placeholder: dflt !== undefined ? String(dflt) : "" });
+      inputs[slot] = input;
+      return h("label", { class: "field" }, h("span", {}, slotLabel(slot)), input);
+    });
+
+    box.replaceChildren(...[
+      h("h2", {}, t("targets")), h("p", { class: "meta" }, t("targetsHelp")),
+      h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
+        h("label", { class: "field" }, h("span", {}, t("restaurant")), sel(ov.restaurants.map((r) => [r.id, r.name]), st.restaurant, (e) => { st.restaurant = Number(e.target.value); load(); })),
+        h("label", { class: "field" }, h("span", {}, t("department")), sel(DEPTS.map((d) => [d, t(`dept.${d}`)]), st.department, (e) => { st.department = e.target.value; load(); })),
+        h("label", { class: "field" }, h("span", {}, t("week")), sel([[-1, t("allDays")], ...dowNames.map((n, i) => [i, n])], st.dow, (e) => { st.dow = Number(e.target.value); load(); }))),
+      st.dow !== -1 ? h("p", { class: "meta" }, t("dayOverride")) : null,
+      h("div", { class: "slot-grid" }, slotInputs),
+      h("p", { class: "meta" }, t("closeHelp")),
+      h("div", { class: "actions" },
+        st.dow !== -1 ? h("button", { class: "btn danger", type: "button", onClick: async () => {
+          try { await api("/targets", { method: "PUT", body: { restaurant_id: st.restaurant, department_id: st.department, dow: st.dow, slots: {} } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+        } }, t("resetDay")) : null,
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          const slots = {};
+          for (const slot of SLOTS) if (inputs[slot].value !== "") slots[slot] = Number(inputs[slot].value);
+          try { await api("/targets", { method: "PUT", body: { restaurant_id: st.restaurant, department_id: st.department, dow: st.dow, slots } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+        } }, t("save"))),
+      h("h2", { style: "margin-top:1.2rem" }, t("closeTime")),
+      h("div", { class: "inline-form" },
+        h("label", { class: "field" }, h("span", {}, resto.name), closeInput), h("span"),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try {
+            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { close_time: closeInput.value } });
+            state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); load();
+          } catch (e) { toast(errorText(e)); }
+        } }, t("save"))),
+    ].filter(Boolean));
+  }
+  load();
+  return box;
 }
 
 function staffCard(s, ov) {
