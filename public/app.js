@@ -135,7 +135,7 @@ function renderChrome() {
   document.getElementById("footer").textContent = t("footer");
   document.getElementById("brand-sub").textContent = t("app");
   document.title = `Mikes · ${t("app")}`;
-  const tabs = [["schedule", t("schedule")], ["mine", t("myShifts")]];
+  const tabs = [["schedule", t("schedule")], ["mine", t("myShifts")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -155,6 +155,7 @@ async function render() {
     }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
+    else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
     $app.replaceChildren(h("div", { class: "empty" }, errorText(e)));
@@ -602,6 +603,41 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 }
 
 // ---------- my shifts ----------
+async function renderAccount() {
+  const acc = await api("/account");
+  const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
+  const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: acc.lang === l }, l === "fr" ? "Français" : "English")));
+  const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: acc.notify_channel === v }, l)));
+  const save = async (e) => {
+    e.preventDefault();
+    try { await api("/account", { method: "PUT", body: { phone: phone.value, lang: lang.value, notify_channel: channel.value } }); toast(t("saved")); }
+    catch (err) { toast(err.body?.error === "invalid_phone" ? t("invalidPhone") : errorText(err)); }
+  };
+  const calBox = h("div", {});
+  const drawCal = (url) => {
+    const host = url ? url.replace(/^https?:\/\//, "") : "";
+    calBox.replaceChildren(...(url ? [
+      h("input", { readonly: true, value: url, onClick: (e) => e.target.select(), "aria-label": t("calendarLink") }),
+      h("div", { class: "actions" },
+        h("a", { class: "btn primary", target: "_blank", rel: "noopener", href: `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(`webcal://${host}`)}` }, t("addToGoogle")),
+        h("button", { class: "btn", type: "button", onClick: async () => { try { await navigator.clipboard.writeText(url); toast(t("copied")); } catch { toast(url); } } }, t("copyLink")),
+        h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmNewLink"))) drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url); } }, t("newLink")),
+        h("button", { class: "btn danger", type: "button", onClick: async () => { await api("/account/calendar-token", { method: "DELETE" }); drawCal(null); } }, t("stopSharing"))),
+    ] : [h("button", { class: "btn primary", type: "button", onClick: async () => drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url) }, t("createLink"))]));
+  };
+  drawCal(acc.calendar_url);
+  $app.replaceChildren(h("div", { class: "account" },
+    h("h2", {}, t("account")),
+    h("section", { class: "panel" }, h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
+      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: save },
+        h("label", { class: "field" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
+        h("label", { class: "field" }, h("span", {}, t("language")), lang),
+        h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+        h("button", { class: "btn primary", type: "submit" }, t("save")))),
+    h("section", { class: "panel" }, h("h3", {}, t("calendarTitle")), h("p", { class: "meta" }, t("calendarHelp")), calBox),
+    h("section", { class: "panel" }, h("h3", {}, t("passwordTitle")), h("p", { class: "meta" }, t("passwordHelp")))));
+}
+
 async function renderMine() {
   const sel = state.sel;
   const data = await api(`/my-shifts?week=${sel.week}`);

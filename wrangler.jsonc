@@ -15,7 +15,7 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*", "/r/*", "/hooks/*"]
+    "run_worker_first": ["/api/*", "/r/*", "/hooks/*", "/cal/*"]
   },
   // Every 5 minutes: alert managers when nobody accepted a sick-call replacement in time.
   "triggers": { "crons": ["*/5 * * * *"] },

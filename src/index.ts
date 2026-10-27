@@ -489,6 +489,36 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   return c.json({ week: weekStart, department: dept, restaurant: { total_cents: all.total_cents, total_hours: all.total_hours, unrated_hours: all.unrated_hours, days: all.days.map((d) => ({ date: d.date, cents: d.cents })) } });
 });
 
+// ---------- My account: contact details and calendar subscription ----------
+const newToken = () => { const b = crypto.getRandomValues(new Uint8Array(24)); return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+
+async function accountView(c: Context<any>) {
+  const me = c.get("me");
+  const env = c.env as Env;
+  const row = await env.DB.prepare("SELECT name, email, phone, lang, notify_channel FROM staff WHERE id = ?").bind(me.id).first();
+  const tok = await env.DB.prepare("SELECT token FROM calendar_tokens WHERE staff_id = ?").bind(me.id).first<{ token: string }>();
+  const base = (env.APP_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
+  return { ...row, calendar_url: tok ? `${base}/cal/${tok.token}.ics` : null };
+}
+app.get("/api/account", async (c) => c.json(await accountView(c)));
+app.put("/api/account", async (c) => {
+  const b = await c.req.json<{ phone?: string; lang?: string; notify_channel?: string }>();
+  const phone = b.phone?.trim() ? normalizePhone(b.phone) : null;
+  if (b.phone?.trim() && !phone) return c.json({ error: "invalid_phone" }, 400);
+  await c.env.DB.prepare("UPDATE staff SET phone = ?, lang = ?, notify_channel = ? WHERE id = ?")
+    .bind(phone, b.lang === "en" ? "en" : "fr", b.notify_channel === "email" ? "email" : "sms", c.get("me").id).run();
+  return c.json(await accountView(c));
+});
+// Creates the personal calendar link, or replaces it (the old link then stops working).
+app.post("/api/account/calendar-token", async (c) => {
+  await c.env.DB.prepare("INSERT OR REPLACE INTO calendar_tokens (staff_id, token, created_at) VALUES (?, ?, ?)").bind(c.get("me").id, newToken(), Date.now()).run();
+  return c.json(await accountView(c));
+});
+app.delete("/api/account/calendar-token", async (c) => {
+  await c.env.DB.prepare("DELETE FROM calendar_tokens WHERE staff_id = ?").bind(c.get("me").id).run();
+  return c.json(await accountView(c));
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
@@ -985,6 +1015,31 @@ app.post("/hooks/offer/:token", async (c) => {
   const { accept } = await c.req.json<{ accept?: boolean }>().catch(() => ({ accept: undefined }));
   if (typeof accept !== "boolean") return c.json({ error: "bad_request" }, 400);
   return c.json({ result: await answerOffer(c.env, c.env.DB, o, accept) });
+});
+
+// Calendar feed (iCalendar) for one employee, read by Google/Apple/Outlook calendars. Protected by its secret token.
+app.get("/cal/:file", async (c) => {
+  await ensureMigrated(c.env.DB);
+  const token = c.req.param("file").replace(/\.ics$/, "");
+  const who = /^[A-Za-z0-9_-]{20,64}$/.test(token) ? await c.env.DB.prepare("SELECT s.id, s.name FROM calendar_tokens ct JOIN staff s ON s.id = ct.staff_id WHERE ct.token = ?").bind(token).first<{ id: number; name: string }>() : null;
+  if (!who) return c.text("not found", 404);
+  const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 16), to = new Date(Date.now() + 180 * 86_400_000).toISOString().slice(0, 16);
+  const rows = await c.env.DB.prepare(
+    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, sh.notes, rs.name AS restaurant, ro.name_fr
+     FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
+  ).bind(who.id, from, to).all<{ id: number; start_at: string; end_at: string; until_close: number; notes: string | null; restaurant: string; name_fr: string }>();
+  const stamp = (v: string) => v.replace(/[-:]/g, "") + "00";
+  const fold = (v: string) => v.replace(/[\\;,]/g, (m) => "\\" + m).replace(/\n/g, "\\n");
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Mikes//Horaire//FR", "CALSCALE:GREGORIAN", "X-WR-CALNAME:Mikes - Horaire", `X-WR-TIMEZONE:${c.env.TIMEZONE ?? "America/Toronto"}`];
+  const now = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+  for (const r of rows.results) {
+    lines.push("BEGIN:VEVENT", `UID:shift-${r.id}@mikes`, `DTSTAMP:${now}`,
+      `DTSTART;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.start_at)}`, `DTEND;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.end_at)}`,
+      `SUMMARY:${fold(`Mikes ${r.restaurant} - ${r.name_fr}`)}`, ...(r.notes ? [`DESCRIPTION:${fold(r.notes)}`] : []), "END:VEVENT");
+  }
+  lines.push("END:VCALENDAR");
+  return c.body(lines.join("\r\n") + "\r\n", 200, { "content-type": "text/calendar; charset=utf-8", "cache-control": "private, max-age=300" });
 });
 
 // Inbound SMS from Twilio: YES / NO to an offer, or SICK to report the next shift.
