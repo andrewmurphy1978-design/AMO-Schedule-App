@@ -988,7 +988,7 @@ async function renderAdmin() {
   const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), preOpenPanel()],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffList],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -1269,6 +1269,27 @@ function fromField() {
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
 }
 
+// Default hourly rates used when an employee has no rate of their own (Québec minimum wages).
+function defaultRatesPanel(ov) {
+  const box = h("section", { class: "panel" });
+  const fmtRate = (c) => (c == null ? "" : (c / 100).toFixed(2));
+  api("/roles").then((roles) => {
+    const d = ov.default_rates ?? { general_cents: null, roles: {} };
+    const general = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", value: fmtRate(d.general_cents) });
+    const rows = roles.map((r) => ({ r, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("sameAsGeneral"), value: fmtRate(d.roles[r.id]) }) }));
+    box.replaceChildren(h("h2", {}, t("defaultRatesTitle")), h("p", { class: "meta" }, t("defaultRatesHelp")),
+      h("label", { class: "field" }, h("span", {}, t("generalRate")), general),
+      h("div", { class: "hours-table" }, rows.map(({ r, input }) => h("div", { class: "hours-row" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), h("label", { class: "mini" }, h("span", {}, "$ / h"), input)))),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
+        try {
+          const saved = await api("/admin/default-rates", { method: "PUT", body: { general: general.value, roles: Object.fromEntries(rows.map(({ r, input }) => [r.id, input.value])) } });
+          ov.default_rates = saved; toast(t("saved"));
+        } catch (e) { toast(e.body?.error === "invalid_rate" ? t("genericError") : errorText(e)); }
+      } }, t("save"))));
+  }).catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // Minutes before opening that each role should arrive (default start of new shifts).
 function preOpenPanel() {
   const box = h("section", { class: "panel" });
@@ -1393,13 +1414,13 @@ function staffCard(s, ov) {
   const phone = h("input", { type: "tel", value: s.phone ?? "" });
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
-  const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
+  const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: ov.default_rates?.general_cents != null ? `${t("defaultWord")} ${(ov.default_rates.general_cents / 100).toFixed(2)}` : t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
   // Optional hourly rate per role held (e.g. delivery driver vs cook); blank = use the general rate.
   const heldRoleIds = [...new Set(s.roles.map((r) => r.role_id))];
   const roleRateInputs = heldRoleIds.map((rid) => {
     const ro = state.roles.find((x) => x.id === rid);
     const cents = s.role_rates?.[rid];
-    return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("sameAsGeneral"), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
+    return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: (() => { const dr = ov.default_rates?.roles?.[rid] ?? ov.default_rates?.general_cents; return dr != null ? `${t("defaultWord")} ${(dr / 100).toFixed(2)}` : t("sameAsGeneral"); })(), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
   }).filter((x) => x.ro);
   const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);

@@ -488,6 +488,30 @@ app.put("/api/staff/:id/wage", requireAdmin, async (c) => {
   return c.json({ ok: true, hourly_cents: cents, role_rates: saved });
 });
 
+// Default rates: one general rate plus optional per-role rates (tipped roles). Used when an employee has no rate of their own.
+async function defaultRates(db: D1Database) {
+  const g = await db.prepare("SELECT value FROM settings WHERE key = 'default_hourly_cents'").first<{ value: string }>();
+  const roles = (await db.prepare("SELECT id, default_hourly_cents FROM roles WHERE default_hourly_cents IS NOT NULL").all<{ id: number; default_hourly_cents: number }>()).results;
+  return { general_cents: g ? Number(g.value) : null, roles: Object.fromEntries(roles.map((r) => [r.id, r.default_hourly_cents])) };
+}
+app.get("/api/admin/default-rates", requireAdmin, async (c) => c.json(await defaultRates(c.env.DB)));
+app.put("/api/admin/default-rates", requireAdmin, async (c) => {
+  const b = await c.req.json<{ general?: string | number | null; roles?: Record<string, string | number | null> }>();
+  const stmts: D1PreparedStatement[] = [];
+  if (b.general !== undefined) {
+    const cents = parseRate(b.general);
+    if (b.general !== null && b.general !== "" && cents === null) return c.json({ error: "invalid_rate" }, 400);
+    stmts.push(cents === null ? c.env.DB.prepare("DELETE FROM settings WHERE key = 'default_hourly_cents'") : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('default_hourly_cents', ?)").bind(String(cents)));
+  }
+  for (const [rid, v] of Object.entries(b.roles ?? {})) {
+    const roleId = intParam(rid), cents = parseRate(v);
+    if (!roleId || (v !== null && v !== "" && cents === null)) return c.json({ error: "invalid_rate" }, 400);
+    stmts.push(c.env.DB.prepare("UPDATE roles SET default_hourly_cents = ? WHERE id = ?").bind(cents, roleId));
+  }
+  if (stmts.length) await c.env.DB.batch(stmts);
+  return c.json(await defaultRates(c.env.DB));
+});
+
 // GET /api/admin/payroll?restaurant=1&department=kitchen&week=2026-10-26
 // -> labour cost of that department (per day and per clock hour) and of the whole restaurant.
 app.get("/api/admin/payroll", requireAdmin, async (c) => {
@@ -506,7 +530,7 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   const prev = new Date(`${weekStart}T00:00:00Z`);
   prev.setUTCDate(prev.getUTCDate() - 1);
   const rows = await c.env.DB.prepare(
-    `SELECT sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents) AS rate_cents
+    `SELECT sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
      FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
           LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = sh.role_id
      WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
@@ -1141,6 +1165,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   ]);
   return c.json({
     restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
+    default_rates: await defaultRates(db),
     staff: (staff.results as any[]).map((s) => ({
       ...s,
       is_admin: s.is_admin === 1,
