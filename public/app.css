@@ -418,3 +418,7 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
   .grid tr { page-break-inside: avoid; }
   .shift-chip { border: 1px solid #ccc; border-left-width: 4px; font-size: 10px; padding: 2px 4px; }
 }
+
+.dropzone{display:grid;gap:4px;justify-items:center;text-align:center;padding:28px 16px;border:2px dashed var(--line,#c9c4bc);border-radius:14px;background:#faf8f5;cursor:pointer;transition:background .15s,border-color .15s}
+.dropzone:hover,.dropzone:focus-visible,.dropzone.over{border-color:var(--brand,#da291c);background:#fdeceb;outline:none}
+.dz-icon{font-size:2rem}

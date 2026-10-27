@@ -22,6 +22,15 @@ function h(tag, attrs = {}, ...kids) {
 
 // 24-hour time picker. <input type="time"> follows the device language (AM/PM on English systems),
 // so we use two selects. It behaves like an input: .value ("HH:MM"), .disabled, and bubbling "input" events.
+// replaceChildren() with arrays and empty values: flatten the arrays and skip null/false/undefined, like h() does for its children
+// (otherwise "null" or "[object HTMLDivElement]" would be written on the page).
+{
+  const native = Element.prototype.replaceChildren;
+  Element.prototype.replaceChildren = function (...nodes) {
+    return native.apply(this, nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false));
+  };
+}
+
 function timeField(value = "00:00") {
   const p2 = (n) => String(n).padStart(2, "0");
   const hh = h("select", { "aria-label": "HH" }, Array.from({ length: 24 }, (_, i) => h("option", { value: p2(i) }, p2(i))));
@@ -1059,8 +1068,11 @@ function payslipsAdminPanel(ov) {
   const status = h("p", { class: "meta", role: "status" });
   async function load() {
     const [setup, rows] = await Promise.all([api("/admin/payslip-setup"), api("/admin/payslips")]);
-    const files = h("input", { type: "file", accept: "application/pdf", multiple: true, onChange: async () => {
-      const list = [...files.files]; let done = 0;
+    // Upload the files one after the other (each is read by the AI on arrival). Used by the picker and by drag and drop.
+    const upload = async (list) => {
+      list = [...list].filter((f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+      if (!list.length) { toast(t("notPdf")); return; }
+      let done = 0;
       for (const f of list) {
         status.textContent = `${t("uploading")} ${done + 1}/${list.length} — ${f.name}`;
         try {
@@ -1069,8 +1081,14 @@ function payslipsAdminPanel(ov) {
         } catch { toast(`${f.name}: ${t("genericError")}`); }
         done++;
       }
-      status.textContent = ""; files.value = ""; load();
-    } });
+      status.textContent = ""; load();
+    };
+    const files = h("input", { type: "file", accept: "application/pdf", multiple: true, hidden: true, onChange: () => { const l = [...files.files]; files.value = ""; upload(l); } });
+    const drop = h("div", { class: "dropzone", tabindex: 0, role: "button", "aria-label": t("uploadPayslips"),
+      onClick: () => files.click(), onKeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); files.click(); } },
+      onDragover: (e) => { e.preventDefault(); drop.classList.add("over"); }, onDragleave: () => drop.classList.remove("over"),
+      onDrop: (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files); } },
+      h("div", { class: "dz-icon" }, "📄"), h("b", {}, t("dropHere")), h("span", { class: "meta" }, t("orClick")), files);
     const key = h("input", { type: "password", placeholder: setup.ai_configured ? t("keepSaved") : "sk-ant-…", autocomplete: "new-password" });
     const staffOpts = (sel) => [h("option", { value: "" }, t("chooseEmployee")), ...ov.staff.map((s) => h("option", { value: s.id, selected: s.id === sel }, s.name))];
     const rowsUi = rows.map((r) => {
@@ -1091,7 +1109,7 @@ function payslipsAdminPanel(ov) {
       h("p", {}, h("span", { class: `badge ${setup.ai_configured ? "edit" : ""}` }, setup.ai_configured ? t("aiReady") : t("aiMissing"))),
       h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => { e.preventDefault(); try { await api("/admin/payslip-setup", { method: "PUT", body: { anthropic_key: key.value || null } }); toast(t("saved")); load(); } catch (err) { toast(err.body?.error === "invalid_key" ? t("genericError") : errorText(err)); } } },
         h("label", { class: "field" }, h("span", {}, t("anthropicKey")), key, h("span", { class: "meta" }, t("anthropicHelp"))), h("button", { class: "btn", type: "submit" }, t("save"))),
-      h("label", { class: "field" }, h("span", {}, t("uploadPayslips")), files, h("span", { class: "meta" }, t("payslipLimit"))), status,
+      h("h3", {}, t("uploadPayslips")), drop, h("p", { class: "meta" }, t("payslipLimit")), status,
       sure.length > 1 ? h("button", { class: "btn primary", type: "button", onClick: async () => { for (const r of sure) await api(`/admin/payslips/${r.id}/assign`, { method: "POST", body: { staff_id: r.suggested_staff_id } }).catch(() => {}); load(); } }, `${t("confirmAllSin")} (${sure.length})`) : null,
       h("h3", {}, `${t("toConfirm")} (${rows.length})`), rows.length ? rowsUi : h("div", { class: "empty" }, t("nothingToConfirm")));
   }
