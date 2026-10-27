@@ -6,6 +6,8 @@ import { weekBounds } from "./week.ts";
 import { computeCosts, parseRate } from "./payroll.ts";
 import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
 import { normalizePhone } from "./phone.ts";
+// @ts-ignore plain JS module shared with the browser
+import { splitName, joinName } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
@@ -84,8 +86,8 @@ app.use("/api/*", async (c, next) => {
       .first<{ id: number; name: string; email: string; is_admin: number }>();
   }
   if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
-    const r = await c.env.DB.prepare("INSERT INTO staff (name, email, is_admin) VALUES (?, ?, 1)")
-      .bind(email.split("@")[0], email)
+    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, email, is_admin) VALUES (?, ?, ?, 1)")
+      .bind(email.split("@")[0], email.split("@")[0], email)
       .run();
     row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1 };
   }
@@ -390,12 +392,20 @@ app.get("/api/staff", async (c) => {
   return c.json(sortByName(((await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results) as { name: string }[]));
 });
 
+// first_name + last_name (or a single "name", split at the first space) -> { first, last, name = "First Last" }.
+function namesFrom(b: { first_name?: string; last_name?: string; name?: string }) {
+  const sp = b.first_name === undefined && b.last_name === undefined ? splitName(b.name) : { first: (b.first_name ?? "").trim(), last: (b.last_name ?? "").trim() };
+  if (!sp.first || sp.first.length > 80 || sp.last.length > 80) return null;
+  return { first: sp.first, last: sp.last, name: joinName(sp.first, sp.last) };
+}
+
 app.post("/api/staff", requireAdmin, async (c) => {
-  const b = await c.req.json<{ name?: string; email?: string; phone?: string; is_admin?: boolean }>();
-  if (!b.name?.trim()) return c.json({ error: "name_required" }, 400);
+  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; is_admin?: boolean }>();
+  const nm = namesFrom(b);
+  if (!nm) return c.json({ error: "name_required" }, 400);
   try {
-    const r = await c.env.DB.prepare("INSERT INTO staff (name, email, phone, is_admin) VALUES (?, ?, ?, ?)")
-      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0)
+    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0)
       .run();
     return c.json({ id: r.meta.last_row_id }, 201);
   } catch {
@@ -1179,7 +1189,7 @@ app.get("/api/schedule", async (c) => {
   if (!(await canView(c.env.DB, me, restaurantId, department))) return c.json({ error: "forbidden" }, 403);
 
   const shifts = await c.env.DB.prepare(
-    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.department_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.first_name, s.last_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.department_id, ro.name_fr, ro.name_en,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status, sh.replaced_staff_id,
             (SELECT name FROM staff WHERE id = sh.replaced_staff_id) AS replaced_name
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
@@ -1267,15 +1277,15 @@ app.get("/api/roster", async (c) => {
   if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
   if (!(await canManage(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
   const rows = await c.env.DB.prepare(
-    `SELECT s.id AS staff_id, s.name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
+    `SELECT s.id AS staff_id, s.name, s.first_name, s.last_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
      JOIN staff s ON s.id = sr.staff_id JOIN roles ro ON ro.id = sr.role_id
      WHERE sr.restaurant_id = ? AND ro.department_id = ? ORDER BY s.name`,
   )
     .bind(restaurantId, department)
-    .all<{ staff_id: number; name: string; color: string | null; photo_v: number | null; role_id: number }>();
-  const byStaff = new Map<number, { staff_id: number; name: string; color: string | null; photo_v: number | null; role_ids: number[] }>();
+    .all<{ staff_id: number; name: string; first_name: string; last_name: string; color: string | null; photo_v: number | null; role_id: number }>();
+  const byStaff = new Map<number, { staff_id: number; name: string; first_name: string; last_name: string; color: string | null; photo_v: number | null; role_ids: number[] }>();
   for (const r of rows.results) {
-    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, color: r.color, photo_v: r.photo_v, role_ids: [] };
+    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, first_name: r.first_name, last_name: r.last_name, color: r.color, photo_v: r.photo_v, role_ids: [] };
     e.role_ids.push(r.role_id);
     byStaff.set(r.staff_id, e);
   }
@@ -1285,7 +1295,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, first_name, last_name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
@@ -1307,16 +1317,17 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
 app.put("/api/staff/:id", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  const b = await c.req.json<{ name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string; color?: string | null }>();
-  if (!b.name?.trim()) return c.json({ error: "name_required" }, 400);
+  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string; color?: string | null }>();
+  const nm = namesFrom(b);
+  if (!nm) return c.json({ error: "name_required" }, 400);
   if (b.color != null && !/^#[0-9a-fA-F]{6}$/.test(b.color)) return c.json({ error: "invalid_color" }, 400);
   const lang = b.lang === "en" ? "en" : "fr";
   const channel = b.notify_channel === "email" ? "email" : "sms";
   const phone = b.phone?.trim() ? normalizePhone(b.phone) : null;
   if (b.phone?.trim() && !phone) return c.json({ error: "invalid_phone" }, 400);
   try {
-    await c.env.DB.prepare("UPDATE staff SET name=?, email=?, phone=?, lang=?, notify_channel=?, color=? WHERE id=?")
-      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, id)
+    await c.env.DB.prepare("UPDATE staff SET name=?, first_name=?, last_name=?, email=?, phone=?, lang=?, notify_channel=?, color=? WHERE id=?")
+      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, id)
       .run();
   } catch {
     return c.json({ error: "email_taken" }, 409);

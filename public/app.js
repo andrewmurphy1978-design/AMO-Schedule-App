@@ -1,3 +1,4 @@
+import { splitName, joinName, shortNames } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
 import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
@@ -440,6 +441,8 @@ function assignLanes(items) {
 }
 
 function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
+  // The coverage view shows first names only (plus the last-name initial when two people share a first name).
+  const shortOf = shortNames([...new Map(data.shifts.map((x) => [x.staff_id, { id: x.staff_id, name: x.staff_name, first_name: x.first_name, last_name: x.last_name }])).values()]);
   const sel = state.sel;
   const desktop = mqDesktop.matches;
   const zoom = !!(desktop && state.zoomDay && days.includes(state.zoomDay));
@@ -510,10 +513,10 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       // Role icon (plate = dishwasher, pizza = cook, car = delivery, knife = prep…); the full name is in the tooltip.
       const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, roleIcon({ ...x.s, department_id: x.s.department_id }));
       const body = zoom
-        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
+        ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
-        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), range]
-        : [pic, icon, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`)];
+        ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), range]
+        : [pic, icon, h("span", { class: "bar-text" }, `${shortOf.get(x.s.staff_id)} ${range}`)];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     // Roles that arrive before opening (cook, waiter…): the closed hatching stops earlier and a lighter "setup" band marks that time.
@@ -1114,12 +1117,13 @@ async function renderAdmin() {
     })());
 
   const addStaff = (() => {
-    const name = h("input", { required: true, maxLength: 80 });
+    const first = h("input", { required: true, maxLength: 80, autocomplete: "off" });
+    const last = h("input", { maxLength: 80, autocomplete: "off" });
     const email = h("input", { type: "email" });
     return h("form", { class: "inline-form", onSubmit: async (e) => {
       e.preventDefault();
-      try { await api("/staff", { method: "POST", body: { name: name.value, email: email.value || undefined } }); render(); } catch (err) { toast(errorText(err)); }
-    } }, h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
+      try { await api("/staff", { method: "POST", body: { first_name: first.value, last_name: last.value, email: email.value || undefined } }); render(); } catch (err) { toast(errorText(err)); }
+    } }, h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("button", { class: "btn primary", type: "submit" }, t("add")));
   })();
   const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
@@ -1547,7 +1551,10 @@ function roleChoiceDialog({ s, r, ro, others, input, roleInputs }) {
 }
 
 function staffCard(s, ov) {
-  const name = h("input", { value: s.name, required: true });
+  const sp = s.first_name ? { first: s.first_name, last: s.last_name } : splitName(s.name);
+  const first = h("input", { value: sp.first, required: true, maxLength: 80 });
+  const last = h("input", { value: sp.last, maxLength: 80 });
+  const fullName = () => joinName(first.value, last.value);
   const email = h("input", { type: "email", value: s.email ?? "" });
   const phone = h("input", { type: "tel", value: s.phone ?? "" });
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
@@ -1598,7 +1605,7 @@ function staffCard(s, ov) {
   const details = h("form", { id: `staff-form-${s.id}`, class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
     try {
-      await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
       const lim = await api(`/staff/${s.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxHours.value } }); s.max_weekly_hours = lim.max_weekly_hours;
@@ -1606,7 +1613,7 @@ function staffCard(s, ov) {
       toast(t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
-    h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
+    h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.is_admin, onChange: async (e) => {
@@ -1704,7 +1711,7 @@ function staffCard(s, ov) {
         tabBar),
       content));
     draw();
-    dlg.addEventListener("close", () => { nameEl.textContent = name.value || s.name; s.name = nameEl.textContent; }, { once: true });
+    dlg.addEventListener("close", () => { s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };
   return h("button", { class: "staff-row", type: "button", onClick: open },
