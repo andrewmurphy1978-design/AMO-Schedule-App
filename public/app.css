@@ -375,3 +375,11 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .role-icon{font-size:.95em;margin-left:4px;filter:drop-shadow(0 0 1px rgba(255,255,255,.7));flex:none}
 .vtl-bar.vertical .role-icon{margin:0 0 2px}
 .vtl-setup{position:absolute;left:0;right:0;background:color-mix(in srgb,#f0c36d 22%,transparent);border-top:1px dashed #d9a21b;pointer-events:none;z-index:0}
+
+.staff-row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;width:100%;text-align:left;border:1px solid var(--line);border-radius:var(--radius);background:var(--card);margin-bottom:.5rem;padding:.7rem 1rem;min-height:var(--tap);font:inherit;font-weight:600;cursor:pointer;color:inherit}
+.staff-row:hover{border-color:var(--brand)}
+.staff-icons{flex:1;text-align:right;letter-spacing:2px}
+dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
+.staff-dialog{display:grid;gap:.8rem;padding:1rem;overflow:auto;max-height:90vh}
+.dlg-head{display:flex;justify-content:space-between;align-items:center}
+.vtl-bar.vertical .role-icon{font-size:.85rem;line-height:1;margin:0}

@@ -400,20 +400,27 @@ const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^
 const mqDesktop = window.matchMedia("(min-width: 900px)");
 mqDesktop.addEventListener("change", () => { if (state.me) render(); });
 
-// Side-by-side lanes for overlapping bars. All shifts of one person share one lane (split shift = same column);
-// a lane is reused by another person only when none of their shifts overlap.
+// Side-by-side lanes for overlapping bars, grouped by department then role (Salle, Cuisine, Plonge/Préparation, Livraison).
+// All shifts of one person share one lane (split shift = same column); a lane is shared with someone else only inside the
+// same department and only when none of their shifts overlap.
+const DEPT_RANK = Object.fromEntries(DEPTS.map((d, i) => [d, i]));
 function assignLanes(items) {
   const people = new Map();
   for (const it of items) {
-    const p = people.get(it.s.staff_id) ?? { first: Infinity, spans: [], items: [] };
-    p.first = Math.min(p.first, it.from); p.spans.push(it); p.items.push(it);
+    const rank = (DEPT_RANK[it.s.department_id] ?? 9) * 1000 + (it.s.role_id ?? 0);
+    const p = people.get(it.s.staff_id) ?? { rank, first: Infinity, name: it.s.staff_name, spans: [], items: [] };
+    p.rank = Math.min(p.rank, rank); p.first = Math.min(p.first, it.from); p.spans.push(it); p.items.push(it);
     people.set(it.s.staff_id, p);
   }
-  const lanes = []; // each lane: all spans placed in it
-  for (const p of [...people.values()].sort((x, y) => x.first - y.first)) {
-    let lane = lanes.findIndex((spans) => spans.every((o) => p.spans.every((m) => o.to <= m.from || m.to <= o.from)));
-    if (lane === -1) { lane = lanes.length; lanes.push([]); }
-    lanes[lane].push(...p.spans);
+  const lanes = []; // { dept, spans }
+  for (const p of [...people.values()].sort((x, y) => x.rank - y.rank || x.first - y.first || x.name.localeCompare(y.name))) {
+    const dept = Math.floor(p.rank / 1000);
+    let lane = lanes.findIndex((l) => l.dept === dept && l.spans.every((o) => p.spans.every((m) => o.to <= m.from || m.to <= o.from)));
+    if (lane === -1) {
+      // keep lanes in department order: insert after the last lane of an earlier-or-equal department
+      lane = lanes.length; lanes.push({ dept, spans: [] });
+    }
+    lanes[lane].spans.push(...p.spans);
     for (const it of p.items) it.lane = lane;
   }
   return Math.max(1, lanes.length);
@@ -493,7 +500,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
         ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), range]
-        : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`), icon];
+        : [pic, icon, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`)];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     // Roles that arrive before opening (cook, waiter…): the closed hatching stops earlier and a lighter "setup" band marks that time.
@@ -1515,9 +1522,22 @@ function staffCard(s, ov) {
           })()));
     })));
 
-  return h("details", { class: "staff" },
-    h("summary", {}, h("span", { class: "who-row" }, summaryAvatar, s.name), s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? "")),
-    h("div", { class: "staff-body" }, h("h3", {}, t("details")), details, h("h3", {}, t("assignments")), blocks));
+  // The card is a compact row; the details open in their own dialog (separate from #modal, which the role dialogs use).
+  const roleIcons = [...new Set(s.roles.map((r) => roleIcon(state.roles.find((x) => x.id === r.role_id))))].join(" ");
+  const nameEl = h("span", {}, s.name);
+  const open = () => {
+    let dlg = document.getElementById("staff-modal");
+    if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
+    dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
+      h("div", { class: "dlg-head" }, h("h2", {}, s.name), h("button", { class: "icon-btn", type: "button", "aria-label": t("close"), onClick: () => dlg.close() }, "✕")),
+      h("h3", {}, t("details")), details, h("h3", {}, t("assignments")), blocks,
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))));
+    dlg.addEventListener("close", () => { nameEl.textContent = name.value || s.name; s.name = nameEl.textContent; }, { once: true });
+    dlg.showModal();
+  };
+  return h("button", { class: "staff-row", type: "button", onClick: open },
+    h("span", { class: "who-row" }, summaryAvatar, nameEl), h("span", { class: "staff-icons" }, roleIcons),
+    s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? ""));
 }
 
 // ---------- boot ----------
