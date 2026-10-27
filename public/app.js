@@ -356,16 +356,23 @@ const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^
 const mqDesktop = window.matchMedia("(min-width: 900px)");
 mqDesktop.addEventListener("change", () => { if (state.me) render(); });
 
-// Side-by-side lanes for overlapping bars: greedy interval partitioning.
+// Side-by-side lanes for overlapping bars. All shifts of one person share one lane (split shift = same column);
+// a lane is reused by another person only when none of their shifts overlap.
 function assignLanes(items) {
-  const ends = [];
+  const people = new Map();
   for (const it of items) {
-    let lane = ends.findIndex((e) => e <= it.from);
-    if (lane === -1) { lane = ends.length; ends.push(0); }
-    ends[lane] = it.to;
-    it.lane = lane;
+    const p = people.get(it.s.staff_id) ?? { first: Infinity, spans: [], items: [] };
+    p.first = Math.min(p.first, it.from); p.spans.push(it); p.items.push(it);
+    people.set(it.s.staff_id, p);
   }
-  return Math.max(1, ends.length);
+  const lanes = []; // each lane: all spans placed in it
+  for (const p of [...people.values()].sort((x, y) => x.first - y.first)) {
+    let lane = lanes.findIndex((spans) => spans.every((o) => p.spans.every((m) => o.to <= m.from || m.to <= o.from)));
+    if (lane === -1) { lane = lanes.length; lanes.push([]); }
+    lanes[lane].push(...p.spans);
+    for (const it of p.items) it.lane = lane;
+  }
+  return Math.max(1, lanes.length);
 }
 
 function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
