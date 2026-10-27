@@ -209,3 +209,18 @@ button.vtl-bar { cursor: pointer; }
 @media (prefers-color-scheme: dark) { .okmsg { background: #14351f; color: #86efac; border-color: #166534; } }
 .slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: .6rem; }
 .slot-grid input { text-align: center; }
+
+.vtl-head .tag { display: block; margin-top: 2px; font-size: .68rem; font-weight: 700; color: var(--brand); line-height: 1.1; }
+.vtl-head.today .tag { color: #fff; }
+.period-bar { display: flex; flex-wrap: wrap; gap: .5rem; margin: .6rem 0; }
+.period-note { padding: .6rem .8rem; border-radius: 10px; background: var(--bg); font-size: .9rem; margin-bottom: .6rem; }
+.vtl-closed { position: absolute; left: 0; right: 0; background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--muted) 14%, transparent) 6px 12px); pointer-events: none; z-index: 0; }
+.vtl-cov, .vtl-lanes { z-index: 1; }
+
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; vertical-align: -1px; flex: 0 0 auto; }
+.dot.big { width: 28px; height: 28px; margin: 0; }
+.colour-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .4rem; }
+.colour-row input[type=color] { width: 56px; min-height: 36px; padding: 2px; }
+.swatches { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.swatch { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--card); box-shadow: 0 0 0 1px var(--line); padding: 0; }
+.shift-chip { border-left: 4px solid var(--brand); }

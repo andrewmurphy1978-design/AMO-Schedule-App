@@ -4,12 +4,20 @@ import m0001 from "../migrations/0001_init.sql";
 import m0002 from "../migrations/0002_staff_prefs.sql";
 import m0003 from "../migrations/0003_until_close.sql";
 import m0004 from "../migrations/0004_targets_hours.sql";
+import m0005 from "../migrations/0005_target_sets.sql";
+import m0006 from "../migrations/0006_open_time.sql";
+import m0007 from "../migrations/0007_open_hours_by_day.sql";
+import m0008 from "../migrations/0008_staff_color.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
   ["0002_staff_prefs", m0002],
   ["0003_until_close", m0003],
   ["0004_targets_hours", m0004],
+  ["0005_target_sets", m0005],
+  ["0006_open_time", m0006],
+  ["0007_open_hours_by_day", m0007],
+  ["0008_staff_color", m0008],
 ];
 
 const statements = (sql: string) =>

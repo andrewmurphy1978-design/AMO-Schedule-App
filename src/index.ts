@@ -103,6 +103,16 @@ const requireAdmin = async (c: any, next: any) => {
   await next();
 };
 
+
+// Adds open_by_dow (7 opening times, Monday..Sunday) to restaurant rows.
+async function withOpenHours<T extends { id: number; open_time: string }>(db: D1Database, rows: T[]) {
+  const hours = await db.prepare("SELECT restaurant_id, dow, open_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string }>();
+  return rows.map((r) => ({
+    ...r,
+    open_by_dow: Array.from({ length: 7 }, (_, d) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d)?.open_time ?? r.open_time),
+  }));
+}
+
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
 
 // ---------- Me ----------
@@ -138,12 +148,13 @@ app.get("/api/roles", async (c) =>
 app.get("/api/restaurants", async (c) => {
   const me = c.get("me");
   const sql = me.is_admin
-    ? "SELECT id, name, close_time FROM restaurants ORDER BY name"
-    : `SELECT DISTINCT r.id, r.name, r.close_time FROM restaurants r WHERE r.id IN
+    ? "SELECT id, name, open_time, close_time FROM restaurants ORDER BY name"
+    : `SELECT DISTINCT r.id, r.name, r.open_time, r.close_time FROM restaurants r WHERE r.id IN
          (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?1
           UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1) ORDER BY r.name`;
   const stmt = c.env.DB.prepare(sql);
-  return c.json((await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results);
+  const rows = (await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results as { id: number; name: string; open_time: string; close_time: string }[];
+  return c.json(await withOpenHours(c.env.DB, rows));
 });
 
 app.post("/api/restaurants", requireAdmin, async (c) => {
@@ -160,17 +171,29 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const SLOTS = ["06:30", "08:00", "09:00", "11:00", "14:00", "17:00", "close"];
 
-// Closing time per restaurant. Until-close shifts follow it.
+// Opening time per weekday (open_times = 7 values, Monday..Sunday) and one closing time per restaurant.
+// Until-close shifts follow the closing time.
 app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
-  const { close_time } = await c.req.json<{ close_time?: string }>();
-  if (!id || !close_time || !TIME_RE.test(close_time)) return c.json({ error: "invalid_times" }, 400);
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE restaurants SET close_time = ? WHERE id = ?").bind(close_time, id),
+  const b = await c.req.json<{ open_times?: string[]; open_time?: string; close_time?: string }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const opens = b.open_times ?? (b.open_time ? Array(7).fill(b.open_time) : null);
+  if (opens && (opens.length !== 7 || !opens.every((x) => typeof x === "string" && TIME_RE.test(x)))) return c.json({ error: "invalid_times" }, 400);
+  if (b.close_time && !TIME_RE.test(b.close_time)) return c.json({ error: "invalid_times" }, 400);
+  const current = await c.env.DB.prepare("SELECT open_time, close_time FROM restaurants WHERE id = ?").bind(id).first<{ open_time: string; close_time: string }>();
+  if (!current) return c.json({ error: "not_found" }, 404);
+  const close = b.close_time ?? current.close_time;
+  const effective = opens ?? (await withOpenHours(c.env.DB, [{ id, open_time: current.open_time }]))[0].open_by_dow;
+  if (effective.some((o) => o >= close)) return c.json({ error: "invalid_times" }, 400);
+  const db = c.env.DB;
+  await db.batch([
+    db.prepare("UPDATE restaurants SET open_time = ?, close_time = ? WHERE id = ?").bind(opens ? opens[0] : current.open_time, close, id),
+    ...(opens
+      ? [db.prepare("DELETE FROM restaurant_open_hours WHERE restaurant_id = ?").bind(id),
+         ...opens.map((o, d) => db.prepare("INSERT INTO restaurant_open_hours (restaurant_id, dow, open_time) VALUES (?, ?, ?)").bind(id, d, o))]
+      : []),
     // 'F' shifts end at closing time; keep their stored end in step (only when the shift starts before closing).
-    c.env.DB.prepare(
-      "UPDATE shifts SET end_at = substr(start_at, 1, 10) || 'T' || ?1 WHERE restaurant_id = ?2 AND until_close = 1 AND substr(start_at, 12, 5) < ?1",
-    ).bind(close_time, id),
+    db.prepare("UPDATE shifts SET end_at = substr(start_at, 1, 10) || 'T' || ?1 WHERE restaurant_id = ?2 AND until_close = 1 AND substr(start_at, 12, 5) < ?1").bind(close, id),
   ]);
   return c.json({ ok: true });
 });
@@ -182,29 +205,106 @@ app.get("/api/targets", async (c) => {
   const department = c.req.query("department");
   if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
   if (!(await canView(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
-  const r = await c.env.DB.prepare("SELECT dow, slot, count FROM staffing_targets WHERE restaurant_id = ? AND department_id = ?")
+  const r = await c.env.DB.prepare("SELECT set_id, dow, slot, count FROM staffing_targets WHERE restaurant_id = ? AND department_id = ?")
     .bind(restaurantId, department)
     .all();
   return c.json(r.results);
 });
 
-// Replaces all targets for one day-of-week (-1 = every day) of one restaurant+department.
+// Replaces all targets for one day-of-week (-1 = every day) of one restaurant+department+set (set_id 0 = base).
 app.put("/api/targets", async (c) => {
-  const b = await c.req.json<{ restaurant_id: number; department_id: string; dow: number; slots: Record<string, number> }>();
+  const b = await c.req.json<{ restaurant_id: number; department_id: string; set_id?: number; dow: number; slots: Record<string, number> }>();
+  const setId = b.set_id ?? 0;
   if (!Number.isInteger(b.dow) || b.dow < -1 || b.dow > 6) return c.json({ error: "invalid_day" }, 400);
   if (!(await canManage(c.env.DB, c.get("me"), b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
+  if (setId !== 0) {
+    const set = await c.env.DB.prepare("SELECT 1 FROM target_sets WHERE id = ? AND restaurant_id = ?").bind(setId, b.restaurant_id).first();
+    if (!set) return c.json({ error: "set_not_found" }, 404);
+  }
   const entries = Object.entries(b.slots ?? {});
   for (const [slot, n] of entries) if (!SLOTS.includes(slot) || !Number.isInteger(n) || n < 0 || n > 99) return c.json({ error: "invalid_target" }, 400);
   const db = c.env.DB;
   try {
     await db.batch([
-      db.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ? AND department_id = ? AND dow = ?").bind(b.restaurant_id, b.department_id, b.dow),
+      db.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ? AND department_id = ? AND set_id = ? AND dow = ?").bind(b.restaurant_id, b.department_id, setId, b.dow),
       ...entries.map(([slot, n]) =>
-        db.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, dow, slot, count) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.dow, slot, n)),
+        db.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, set_id, dow, slot, count) VALUES (?, ?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, setId, b.dow, slot, n)),
     ]);
   } catch {
     return c.json({ error: "invalid_reference" }, 400);
   }
+  return c.json({ ok: true });
+});
+
+// ---------- Seasons and special days ----------
+const MD_RE = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const DATE_RE2 = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const int = (v: unknown, lo: number, hi: number) => Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi;
+
+// Returns the normalised rule or null when it is not valid for the given kind.
+function validRule(kind: string, r: any): Record<string, unknown> | null {
+  if (!r || typeof r !== "object") return null;
+  if (kind === "season") return r.type === "range" && MD_RE.test(r.from) && MD_RE.test(r.to) ? { type: "range", from: r.from, to: r.to } : null;
+  if (kind !== "special") return null;
+  const days = r.days === undefined ? 1 : r.days;
+  if (r.type === "date") return DATE_RE2.test(r.date) ? { type: "date", date: r.date } : null;
+  if (r.type === "fixed") return MD_RE.test(r.md) && int(days, 1, 14) ? { type: "fixed", md: r.md, days } : null;
+  if (r.type === "nth") return int(r.month, 1, 12) && int(r.weekday, 0, 6) && [1, 2, 3, 4, -1].includes(r.n) && int(days, 1, 14) ? { type: "nth", month: r.month, weekday: r.weekday, n: r.n, days } : null;
+  if (r.type === "easter") return int(r.from, -7, 7) && int(r.to, -7, 7) && r.from <= r.to ? { type: "easter", from: r.from, to: r.to } : null;
+  return null;
+}
+
+async function inRestaurant(db: D1Database, me: Me, restaurantId: number) {
+  if (me.is_admin) return true;
+  const r = await db
+    .prepare("SELECT 1 FROM staff_roles WHERE staff_id = ?1 AND restaurant_id = ?2 UNION SELECT 1 FROM managers WHERE staff_id = ?1 AND restaurant_id = ?2")
+    .bind(me.id, restaurantId)
+    .first();
+  return !!r;
+}
+
+app.get("/api/target-sets", async (c) => {
+  const restaurantId = intParam(c.req.query("restaurant"));
+  if (!restaurantId) return c.json({ error: "restaurant_required" }, 400);
+  if (!(await inRestaurant(c.env.DB, c.get("me"), restaurantId))) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare("SELECT id, name, kind, rule FROM target_sets WHERE restaurant_id = ? ORDER BY kind, id").bind(restaurantId).all<{ id: number; name: string; kind: string; rule: string }>();
+  return c.json(r.results.map((x) => ({ ...x, rule: JSON.parse(x.rule) })));
+});
+
+app.post("/api/target-sets", requireAdmin, async (c) => {
+  const b = await c.req.json<{ restaurant_id: number; name?: string; kind: string; rule: unknown }>();
+  const rule = validRule(b.kind, b.rule);
+  if (!b.name?.trim() || b.name.length > 80) return c.json({ error: "name_required" }, 400);
+  if (!rule) return c.json({ error: "invalid_rule" }, 400);
+  try {
+    const r = await c.env.DB.prepare("INSERT INTO target_sets (restaurant_id, name, kind, rule) VALUES (?, ?, ?, ?)")
+      .bind(b.restaurant_id, b.name.trim(), b.kind, JSON.stringify(rule))
+      .run();
+    return c.json({ id: r.meta.last_row_id }, 201);
+  } catch {
+    return c.json({ error: "invalid_reference" }, 400);
+  }
+});
+
+app.put("/api/target-sets/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ name?: string; rule: unknown }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const set = await c.env.DB.prepare("SELECT kind FROM target_sets WHERE id = ?").bind(id).first<{ kind: string }>();
+  if (!set) return c.json({ error: "not_found" }, 404);
+  const rule = validRule(set.kind, b.rule);
+  if (!b.name?.trim() || !rule) return c.json({ error: rule ? "name_required" : "invalid_rule" }, 400);
+  await c.env.DB.prepare("UPDATE target_sets SET name = ?, rule = ? WHERE id = ?").bind(b.name.trim(), JSON.stringify(rule), id).run();
+  return c.json({ ok: true });
+});
+
+app.delete("/api/target-sets/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM staffing_targets WHERE set_id = ?").bind(id),
+    c.env.DB.prepare("DELETE FROM target_sets WHERE id = ?").bind(id),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -332,7 +432,7 @@ app.get("/api/schedule", async (c) => {
   if (!(await canView(c.env.DB, me, restaurantId, department))) return c.json({ error: "forbidden" }, 403);
 
   const shifts = await c.env.DB.prepare(
-    `SELECT sh.id, sh.staff_id, s.name AS staff_name, sh.role_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, sh.role_id, ro.name_fr, ro.name_en,
             sh.start_at, sh.end_at, sh.until_close, sh.notes
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ?
@@ -385,13 +485,13 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
-    db.prepare("SELECT id, name, close_time FROM restaurants ORDER BY name").all(),
+    db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
   ]);
   return c.json({
-    restaurants: restaurants.results,
+    restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
     staff: (staff.results as any[]).map((s) => ({
       ...s,
       is_admin: s.is_admin === 1,
@@ -404,13 +504,14 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
 app.put("/api/staff/:id", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  const b = await c.req.json<{ name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string }>();
+  const b = await c.req.json<{ name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string; color?: string | null }>();
   if (!b.name?.trim()) return c.json({ error: "name_required" }, 400);
+  if (b.color != null && !/^#[0-9a-fA-F]{6}$/.test(b.color)) return c.json({ error: "invalid_color" }, 400);
   const lang = b.lang === "en" ? "en" : "fr";
   const channel = b.notify_channel === "email" ? "email" : "sms";
   try {
-    await c.env.DB.prepare("UPDATE staff SET name=?, email=?, phone=?, lang=?, notify_channel=? WHERE id=?")
-      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, b.phone?.trim() || null, lang, channel, id)
+    await c.env.DB.prepare("UPDATE staff SET name=?, email=?, phone=?, lang=?, notify_channel=?, color=? WHERE id=?")
+      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, b.phone?.trim() || null, lang, channel, b.color?.toLowerCase() ?? null, id)
       .run();
   } catch {
     return c.json({ error: "email_taken" }, 409);
