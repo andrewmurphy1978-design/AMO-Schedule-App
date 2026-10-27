@@ -4,6 +4,12 @@
   "compatibility_date": "2026-10-01",
   // Custom domain: created automatically on deploy (andrewmurphy.online is a zone in this account).
   "routes": [{ "pattern": "mikes.andrewmurphy.online", "custom_domain": true }],
+  // Public identifiers (not credentials): the Cloudflare Access team and application tag that sign requests.
+  // Per-client values live here, in version control, so a deploy can never lose them.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "small-dawn-0a02.cloudflareaccess.com",
+    "ACCESS_AUD": "762341318b5a63148bf9875ab57bbf3cfe415d1166940862d72e8d684725b4a3"
+  },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
