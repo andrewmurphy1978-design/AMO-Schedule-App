@@ -383,3 +383,11 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .staff-dialog{display:grid;gap:.8rem;padding:1rem;overflow:auto;max-height:90vh}
 .dlg-head{display:flex;justify-content:space-between;align-items:center}
 .vtl-bar.vertical .role-icon{font-size:.85rem;line-height:1;margin:0}
+
+.pay-table{width:100%;border-collapse:collapse}
+.pay-table th,.pay-table td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--line,#e3dfd9)}
+.pay-table thead th{font-size:.8rem;color:var(--muted,#666)}
+.pay-table .pay-label{text-align:left;font-weight:600}
+.pay-num b,.pay-num small{display:block}
+.pay-num small{color:var(--muted,#666);font-weight:400}
+.pay-total{background:#faf3f2}

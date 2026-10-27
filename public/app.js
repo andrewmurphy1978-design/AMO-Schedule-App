@@ -224,17 +224,18 @@ function mergeRosters(rosters) {
   }
   return [...by.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
-function mergePayrolls(list) {
+function mergePayrolls(list, depts) {
+  const byDept = list.map((p, i) => (p ? { dept: depts[i], payroll: p } : null)).filter(Boolean);
   const ok = list.filter(Boolean);
   if (!ok.length) return null;
-  if (ok.length === 1) return ok[0];
+  if (ok.length === 1) return { ...ok[0], byDept };
   const days = ok[0].department.days.map((d, i) => ({
     date: d.date,
     cents: ok.reduce((n, p) => n + p.department.days[i].cents, 0),
     hours: ok.reduce((n, p) => n + p.department.days[i].hours, 0),
     by_hour: d.by_hour.map((_, h) => ok.reduce((n, p) => n + p.department.days[i].by_hour[h], 0)),
   }));
-  return { ...ok[0], department: { ...ok[0].department, days,
+  return { ...ok[0], byDept, department: { ...ok[0].department, days,
     total_cents: ok.reduce((n, p) => n + p.department.total_cents, 0),
     total_hours: ok.reduce((n, p) => n + p.department.total_hours, 0) } };
 }
@@ -263,7 +264,7 @@ async function renderSchedule() {
   const roster = mergeRosters(rosters);
   // Labour cost: only requested for admins; the server refuses everyone else.
   const payrollReq = state.me.me.is_admin
-    ? Promise.all(depts.map((d) => api(`/admin/payroll?${q(d)}`).catch(() => null))).then(mergePayrolls)
+    ? Promise.all(depts.map((d) => api(`/admin/payroll?${q(d)}`).catch(() => null))).then((list) => mergePayrolls(list, depts))
     : Promise.resolve(null);
   const [targets, sets, payroll] = await Promise.all([
     Promise.all(depts.map(async (d) => (await api(`/targets?restaurant=${sel.restaurant}&department=${d}`)).map((r) => ({ ...r, department_id: d })))).then((x) => x.flat()),
@@ -553,13 +554,25 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     h("button", { type: "button", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
       h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
 
+  // Summary only: hours and salary, one column per selected department plus a total column when several are shown.
   const payrollBox = payroll ? (() => {
-    const today = payroll.department.days.find((x) => x.date === sel.day);
+    const cols = payroll.byDept ?? [{ dept: sel.departments[0], payroll }];
+    const day = (p) => p.department.days.find((x) => x.date === sel.day);
+    const cell = (cents, hrsN, strong) => h(strong ? "th" : "td", { class: "pay-num" }, h("b", {}, money(cents, true)), h("small", {}, `${hrs(hrsN)} ${t("hoursShort")}`));
+    const rowsDef = [
+      ...(shown.length === 1 ? [[t("costDay"), (p) => { const d = day(p); return [d?.cents ?? 0, d?.hours ?? 0]; }]] : []),
+      [t("costWeek"), (p) => [p.department.total_cents, p.department.total_hours]],
+    ];
+    const unrated = cols.reduce((n, c) => n + (c.payroll.department.unrated_hours ?? 0), 0);
     return h("div", { class: "payroll" },
-      shown.length === 1 && today ? h("div", { class: "row" }, h("span", {}, `${t("costDay")} — ${t("costDept")}`), h("b", {}, `${money(today.cents, true)} · ${today.hours} ${t("hoursShort")}`)) : null,
-      h("div", { class: "row" }, h("span", {}, `${t("costWeek")} — ${t("costDept")}`), h("b", {}, `${money(payroll.department.total_cents, true)} · ${payroll.department.total_hours} ${t("hoursShort")}`)),
-      h("div", { class: "row" }, h("span", {}, `${t("costWeek")} — ${t("costRestaurant")}`), h("b", {}, `${money(payroll.restaurant.total_cents, true)} · ${payroll.restaurant.total_hours} ${t("hoursShort")}`)),
-      payroll.restaurant.unrated_hours > 0 ? h("div", { class: "warn" }, `${payroll.restaurant.unrated_hours} ${t("unratedHours")}`) : null,
+      h("table", { class: "pay-table" },
+        h("thead", {}, h("tr", {}, h("th"), cols.map((c) => h("th", {}, t(`dept.${c.dept}`))), cols.length > 1 ? h("th", { class: "pay-total" }, t("total")) : null)),
+        h("tbody", {}, rowsDef.map(([label, get]) => {
+          const vals = cols.map((c) => get(c.payroll));
+          const sum = vals.reduce((a, v) => [a[0] + v[0], a[1] + v[1]], [0, 0]);
+          return h("tr", {}, h("th", { class: "pay-label" }, label), vals.map((v) => cell(v[0], v[1])), cols.length > 1 ? h("td", { class: "pay-num pay-total" }, h("b", {}, money(sum[0], true)), h("small", {}, `${hrs(sum[1])} ${t("hoursShort")}`)) : null);
+        }))),
+      unrated > 0 ? h("div", { class: "warn" }, `${hrs(unrated)} ${t("unratedHours")}`) : null,
       h("button", { class: "btn", type: "button", onClick: () => { state.showHourlyCost = !state.showHourlyCost; try { localStorage.setItem("hourlyCost", state.showHourlyCost ? "1" : "0"); } catch { /* ignore */ } render(); } },
         state.showHourlyCost ? t("hideHourlyCost") : t("showHourlyCost")));
   })() : null;
