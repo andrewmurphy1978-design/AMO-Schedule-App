@@ -1236,7 +1236,7 @@ app.get("/api/schedule", async (c) => {
   const weekEndDay = new Date(`${bounds.start.slice(0, 10)}T00:00:00Z`); weekEndDay.setUTCDate(weekEndDay.getUTCDate() + 6);
   const offIds = [...ids].filter((id) => editable || id === me.id);
   const time_off = offIds.length ? (await c.env.DB.prepare(
-    `SELECT staff_id, start_date, end_date, start_time, end_time, status FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${offIds.map(() => "?").join(",")}) AND start_date <= ? AND end_date >= ?`,
+    `SELECT t.id, t.staff_id, s.first_name, s.last_name, s.name AS staff_name, t.start_date, t.end_date, t.start_time, t.end_time, t.note, t.status FROM time_off_requests t JOIN staff s ON s.id = t.staff_id WHERE t.status IN ('requested','approved') AND t.staff_id IN (${offIds.map(() => "?").join(",")}) AND t.start_date <= ? AND t.end_date >= ? ORDER BY t.start_date`,
   ).bind(...offIds, weekEndDay.toISOString().slice(0, 10), bounds.start.slice(0, 10)).all()).results : [];
   const days_off: Record<number, number[]> = {};
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, dow FROM staff_availability WHERE kind = 'day_off' AND staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; dow: number }>()).results) (days_off[r.staff_id] ??= []).push(r.dow);

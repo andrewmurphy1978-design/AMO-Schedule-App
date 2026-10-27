@@ -422,3 +422,5 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .dropzone{display:grid;gap:4px;justify-items:center;text-align:center;padding:28px 16px;border:2px dashed var(--line,#c9c4bc);border-radius:14px;background:#faf8f5;cursor:pointer;transition:background .15s,border-color .15s}
 .dropzone:hover,.dropzone:focus-visible,.dropzone.over{border-color:var(--brand,#da291c);background:#fdeceb;outline:none}
 .dz-icon{font-size:2rem}
+.vtl-head .off-chip{display:block;margin:2px auto 0;font-size:.62rem;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.week-off summary{cursor:pointer;font-weight:700}

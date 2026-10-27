@@ -71,7 +71,7 @@ const dict = {
     availabilityNote: "Ex. École", noUnavailable: "Aucune indisponibilité.", weekday: "Jour", from: "De", to: "À", validFrom: "Valide à partir du", validTo: "Jusqu’au",
     myAvailability: "Mes disponibilités", availability: "Disponibilités", maxWeeklyHours: "Maximum d’heures par semaine", noMaxHours: "Aucune limite", maxWeeklyHoursHelp: "Ex. 17 h pour un employé de moins de 16 ans. Jamais dépassé pour les remplacements; averti lors de la planification.",
     printSchedule: "Imprimer / PDF", printHint: "Dans la fenêtre d’impression, choisis « Enregistrer au format PDF ».",
-    close: "Fermer", dropHere: "Glisse tes talons de paie (PDF) ici", orClick: "ou clique pour choisir les fichiers", firstName: "Prénom", lastName: "Nom de famille", rolesTab: "Rôles", requestedTimeOff: "Congés demandés", addLeaveFor: "Ajouter un congé", managerOf: "Gestionnaire de ce département", invalidEmail: "Courriel invalide.", emailTaken: "Ce courriel est déjà utilisé par un autre employé.",
+    close: "Fermer", weekTimeOff: "Congés de la semaine", dropHere: "Glisse tes talons de paie (PDF) ici", orClick: "ou clique pour choisir les fichiers", firstName: "Prénom", lastName: "Nom de famille", rolesTab: "Rôles", requestedTimeOff: "Congés demandés", addLeaveFor: "Ajouter un congé", managerOf: "Gestionnaire de ce département", invalidEmail: "Courriel invalide.", emailTaken: "Ce courriel est déjà utilisé par un autre employé.",
     targets: "Cibles de personnel", targetsHelp: "Nombre d’employés souhaité à chaque heure. Laissez vide s’il n’y a pas de cible.",
     allDays: "Tous les jours", resetDay: "Retirer les valeurs propres à ce jour", dayOverride: "Valeurs propres à ce jour",
     closeTime: "Heure de fermeture", openTime: "Heure d’ouverture", choosePhoto: "Choisir une photo", removePhoto: "Retirer la photo", badImage: "Image non valide (JPEG, PNG ou WebP).", photo: "Photo", colour: "Couleur", autoColour: "Couleur automatique", openTimes: "Heure d’ouverture pour chaque jour de la semaine.", hoursTitle: "Heures d’ouverture", beforeOpen: "Avant l’ouverture / après la fermeture", closeSlot: "Fermeture", closeHelp: "La cible « Fermeture » s’applique à la dernière heure avant la fermeture.",
@@ -169,7 +169,7 @@ const dict = {
     availabilityNote: "E.g. School", noUnavailable: "No unavailability.", weekday: "Day", from: "From", to: "To", validFrom: "Valid from", validTo: "Until",
     myAvailability: "My availability", availability: "Availability", maxWeeklyHours: "Maximum hours per week", noMaxHours: "No limit", maxWeeklyHoursHelp: "E.g. 17 h for an employee under 16. Never exceeded for replacements; a warning when scheduling.",
     printSchedule: "Print / PDF", printHint: "In the print window, choose “Save as PDF”.",
-    close: "Close", dropHere: "Drag your pay slips (PDF) here", orClick: "or click to choose files", firstName: "First name", lastName: "Last name", rolesTab: "Roles", requestedTimeOff: "Time off requested", addLeaveFor: "Add time off", managerOf: "Manager of this department", invalidEmail: "Invalid email.", emailTaken: "This email is already used by another employee.",
+    close: "Close", weekTimeOff: "Time off this week", dropHere: "Drag your pay slips (PDF) here", orClick: "or click to choose files", firstName: "First name", lastName: "Last name", rolesTab: "Roles", requestedTimeOff: "Time off requested", addLeaveFor: "Add time off", managerOf: "Manager of this department", invalidEmail: "Invalid email.", emailTaken: "This email is already used by another employee.",
     targets: "Staffing targets", targetsHelp: "How many employees you want at each time. Leave blank for no target.",
     allDays: "Every day", resetDay: "Remove this day’s own values", dayOverride: "Values specific to this day",
     closeTime: "Closing time", openTime: "Opening time", choosePhoto: "Choose a picture", removePhoto: "Remove picture", badImage: "Invalid image (JPEG, PNG or WebP).", photo: "Picture", colour: "Colour", autoColour: "Automatic colour", openTimes: "Opening time for each day of the week.", hoursTitle: "Opening hours", beforeOpen: "Before opening / after closing", closeSlot: "Close", closeHelp: "The “Close” target applies to the last hour before closing.",
@@ -214,7 +214,7 @@ export const t = (key) => dict[lang][key] ?? dict.fr[key] ?? key;
 export const locale = () => (lang === "fr" ? "fr-CA" : "en-CA");
 // Role names come from the API as name_fr / name_en.
 // One emoji per role (matched on the English role name); unknown roles fall back to their department's icon.
-const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤", "manager": "🧑‍💼", "assistant manager": "📋", "office": "🗂️" };
+const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤", "manager": "🧑‍💼", "assistant manager": "📋", "office": "🗂️", "owner": "👑" };
 const DEPT_ICONS = { floor: "🍴", kitchen: "🍕", prep: "🔪", delivery: "🚗", admin: "🗂️" };
 export const deptIcon = (d) => DEPT_ICONS[d] ?? "•";
 export const roleIcon = (r) => ROLE_ICONS[(r?.name_en ?? "").toLowerCase()] ?? DEPT_ICONS[r?.department_id] ?? "•";

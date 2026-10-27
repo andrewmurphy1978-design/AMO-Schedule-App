@@ -179,6 +179,22 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 });
 
 // ---------- schedule ----------
+// Time off requested (C/D) or approved (C/A) for the week shown; managers can answer pending requests right here.
+function weekTimeOffPanel(data) {
+  const list = data.time_off ?? [];
+  if (!list.length) return null;
+  const when = (o) => (o.start_date === o.end_date ? fmt(o.start_date, { weekday: "short", day: "numeric", month: "short" }) : `${fmt(o.start_date, { weekday: "short", day: "numeric" })} → ${fmt(o.end_date, { weekday: "short", day: "numeric", month: "short" })}`) + (o.start_time ? ` · ${o.start_time}–${o.end_time}` : "");
+  const pending = list.filter((o) => o.status === "requested").length;
+  const answer = async (o, approve) => { try { await api(`/time-off/${o.id}/decide`, { method: "POST", body: { approve } }); toast(t("saved")); render(); } catch (e) { toast(errorText(e)); } };
+  return h("details", { class: "panel week-off", open: pending > 0 },
+    h("summary", {}, `${t("weekTimeOff")} (${list.length})${pending ? ` · ${pending} C/D` : ""}`),
+    list.map((o) => h("div", { class: "cov-row" },
+      h("div", {}, h("span", { class: `off-chip ${o.status}` }, o.status === "approved" ? "C/A" : "C/D"), ` `, h("b", {}, o.staff_name), ` · ${when(o)}`),
+      o.note ? h("div", { class: "meta" }, o.note) : null,
+      data.editable && o.status === "requested" ? h("div", { class: "actions" },
+        h("button", { class: "btn primary", type: "button", onClick: () => answer(o, true) }, t("approve")),
+        h("button", { class: "btn", type: "button", onClick: () => answer(o, false) }, t("deny"))) : null)));
+}
 const nowLocal = () => { const d = new Date(); return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 // Open replacement requests (managers/admins): who was asked, assign by hand, cancel.
@@ -406,7 +422,7 @@ async function renderSchedule() {
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
-  $app.replaceChildren(...[printHead, controls, status, data.editable ? coveragePanel(render) : null, daytabs, timeline, daily, grid, fab].filter(Boolean));
+  $app.replaceChildren(...[printHead, controls, status, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), daytabs, timeline, daily, grid, fab].filter(Boolean));
 }
 
 
@@ -544,7 +560,11 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const heads = perDay.map((d) => {
     const kids = [fmt(d.day, { weekday: "short" }), h("small", {}, fmt(d.day, { day: "numeric", month: "short" })),
       d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null,
-      d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null];
+      d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null,
+      // time off that day: C/D requested, C/A approved (first names, with the hours when only part of the day)
+      ...(data.time_off ?? []).filter((o) => o.start_date <= d.day && o.end_date >= d.day).map((o) =>
+        h("span", { class: `off-chip ${o.status}`, title: `${o.staff_name} — ${o.status === "approved" ? t("offApproved") : t("offRequested")}` },
+          `${o.status === "approved" ? "C/A" : "C/D"} ${o.first_name || o.staff_name}${o.start_time ? ` ${o.start_time.slice(0, 5)}–${o.end_time.slice(0, 5)}` : ""}`))];
     const cls = `vtl-head ${d.day === today ? "today" : ""}`;
     // Week view on desktop: clicking a day header zooms into that day.
     return desktop && !zoom && shown.length > 1
