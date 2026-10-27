@@ -24,3 +24,15 @@ export function shortNames(people) {
   for (const p of list) counts.set(key(p.first_name), (counts.get(key(p.first_name)) ?? 0) + 1);
   return new Map(list.map((p) => [p.id, counts.get(key(p.first_name)) > 1 && initial(p.last_name) ? `${p.first_name} ${initial(p.last_name)}.` : p.first_name || p.name]));
 }
+
+/**
+ * Role names are written "Masculine / feminine" ("Cuisinier / cuisinière", "Waiter / waitress"). For an employee whose sex is
+ * 'M' or 'F' only the matching form is returned, capitalised ("Cuisinière"); otherwise the full pair is kept.
+ */
+export function genderedRole(name, sex) {
+  if (sex !== "M" && sex !== "F") return name;
+  const parts = String(name ?? "").split(" / ");
+  if (parts.length !== 2) return name;
+  const pick = parts[sex === "M" ? 0 : 1].trim();
+  return pick.charAt(0).toUpperCase() + pick.slice(1);
+}

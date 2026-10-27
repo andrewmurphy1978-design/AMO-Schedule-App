@@ -1,5 +1,7 @@
 // Sick-call replacement flow: report -> notify managers -> offer to everyone eligible at once -> first "yes" wins
 // -> otherwise escalate to the managers. All state lives in D1 so a Cloudflare cron can finish what a request started.
+// @ts-ignore plain JS module shared with the browser
+import { genderedRole } from "../public/names.js";
 import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
 import type { Connections, ConnEnv } from "./connections.ts";
 import { chooseCandidates, byFewestHours, type Candidate } from "./eligibility.ts";
@@ -16,15 +18,15 @@ export class FlowError extends Error {
 
 interface ShiftRow {
   id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string; until_close: number; status: string;
-  department_id: string; name_fr: string; name_en: string; restaurant: string; staff_name: string;
+  department_id: string; name_fr: string; name_en: string; restaurant: string; staff_name: string; sex: string | null;
 }
 
 const shiftSql = `SELECT sh.id, sh.staff_id, sh.restaurant_id, sh.role_id, sh.start_at, sh.end_at, sh.until_close, sh.status,
-  ro.department_id, ro.name_fr, ro.name_en, rs.name AS restaurant, s.name AS staff_name
+  ro.department_id, ro.name_fr, ro.name_en, rs.name AS restaurant, s.name AS staff_name, s.sex AS sex
   FROM shifts sh JOIN roles ro ON ro.id = sh.role_id JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN staff s ON s.id = sh.staff_id`;
 
-const ctxOf = (r: { restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }, lang: Lang): Ctx => ({
-  restaurant: r.restaurant, role: lang === "fr" ? r.name_fr : r.name_en, when: formatWhen(r.start_at, r.end_at, !!r.until_close, lang),
+const ctxOf = (r: { restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }, lang: Lang, sex?: string | null): Ctx => ({
+  restaurant: r.restaurant, role: genderedRole(lang === "fr" ? r.name_fr : r.name_en, sex), when: formatWhen(r.start_at, r.end_at, !!r.until_close, lang),
 });
 
 function newToken(): string {
@@ -35,7 +37,7 @@ function newToken(): string {
 // ---------- who can be asked ----------
 export async function gatherCandidates(db: D1Database, req: { restaurant_id: number; role_id: number; start_at: string; end_at: string; sick_staff_id: number }, settings: { overtime_hours: number; replacement_allow_overtime: boolean }) {
   const people = (await db.prepare(
-    `SELECT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id
+    `SELECT s.id, s.name, s.sex, s.phone, s.email, s.lang, s.notify_channel FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id
      WHERE sr.restaurant_id = ? AND sr.role_id = ? AND s.id != ? AND s.active = 1`,
   ).bind(req.restaurant_id, req.role_id, req.sick_staff_id).all<StaffContact>()).results;
   if (!people.length) return { contacts: new Map<number, StaffContact>(), eligible: [] as Candidate[], excluded: [] as { staff_id: number; name: string; reason: string }[] };
@@ -92,7 +94,7 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
     const person = found.contacts.get(cand.staff_id)!;
     const token = newToken();
     const url = conn.appUrl ? `${conn.appUrl}/r/${token}` : "";
-    const outcome = await notifyStaff(db, conn, person, (lang, channel) => T.offer(lang, { ...ctxOf(shift, lang), url, sms: channel === "sms" }), "offer");
+    const outcome = await notifyStaff(db, conn, person, (lang, channel) => T.offer(lang, { ...ctxOf(shift, lang, (person as { sex?: string | null }).sex), url, sms: channel === "sms" }), "offer");
     if (outcome === "sent") {
       await db.prepare("INSERT INTO coverage_offers (request_id, staff_id, token, channel, sent_at) VALUES (?, ?, ?, ?, ?)")
         .bind(requestId, person.id, token, person.notify_channel === "email" ? "email" : "sms", Date.now()).run();
@@ -100,7 +102,7 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
     }
   }
   // Managers hear about it immediately (information only).
-  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.sickNotice(lang, { ...ctxOf(shift, lang), sick: shift.staff_name, offers: offersSent }), "sick_notice");
+  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.sickNotice(lang, { ...ctxOf(shift, lang, shift.sex), sick: shift.staff_name, offers: offersSent }), "sick_notice");
   // Nobody could even be asked: tell the managers to act right away.
   let escalated = false;
   if (offersSent === 0) escalated = await escalate(env, db, conn, requestId);
@@ -143,15 +145,15 @@ export async function fillRequest(env: FlowEnv, db: D1Database, conn: Connection
   ]);
   const shift = await db.prepare(`${shiftSql} WHERE sh.id = ?`).bind(req.shift_id).first<ShiftRow>();
   if (!shift) return "ok";
-  const winner = await db.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(staffId).first<StaffContact>();
+  const winner = await db.prepare("SELECT id, name, sex, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(staffId).first<StaffContact>();
   const sick = await db.prepare("SELECT name FROM staff WHERE id = ?").bind(req.sick_staff_id).first<{ name: string }>();
-  if (winner) await notifyStaff(db, conn, winner, (lang) => T.accepted(lang, ctxOf(shift, lang)), "filled");
+  if (winner) await notifyStaff(db, conn, winner, (lang) => T.accepted(lang, ctxOf(shift, lang, (winner as { sex?: string | null }).sex)), "filled");
   // Everyone else who was asked: "already filled".
   const losers = (await db.prepare(
     `SELECT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel FROM coverage_offers o JOIN staff s ON s.id = o.staff_id WHERE o.request_id = ? AND o.staff_id != ?`,
   ).bind(requestId, staffId).all<StaffContact>()).results;
   for (const p of losers) await notifyStaff(db, conn, p, (lang) => T.alreadyFilled(lang, ctxOf(shift, lang)), "closed");
-  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.managerFilled(lang, { ...ctxOf(shift, lang), sick: sick?.name ?? "", by: winner?.name ?? "" }), "filled");
+  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.managerFilled(lang, { ...ctxOf(shift, lang, shift.sex), sick: sick?.name ?? "", by: winner?.name ?? "" }), "filled");
   return "ok";
 }
 
@@ -164,7 +166,7 @@ export async function escalate(env: FlowEnv, db: D1Database, conn: Connections, 
   ).bind(requestId).first<ShiftRow>();
   if (!shift) return false;
   const settings = await loadSettingsFrom(db);
-  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.escalation(lang, { ...ctxOf(shift, lang), sick: shift.staff_name, minutes: settings.sick_timeout_minutes }), "escalation");
+  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.escalation(lang, { ...ctxOf(shift, lang, shift.sex), sick: shift.staff_name, minutes: settings.sick_timeout_minutes }), "escalation");
   return true;
 }
 

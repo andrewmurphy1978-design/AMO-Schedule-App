@@ -196,8 +196,8 @@ function weekTimeOffPanel(data) {
         h("button", { class: "btn", type: "button", onClick: () => answer(o, false) }, t("deny"))) : null)));
 }
 // A shift can cover several roles (cook + dishwasher): the main role first, then the extra ones.
-const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])];
-const shiftRoleLabel = (s) => shiftRoles(s).map(roleName).join(" + ");
+const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])].map((r) => ({ ...r, sex: s.sex }));
+const shiftRoleLabel = (s) => shiftRoles(s).map((r) => roleName(r)).join(" + ");
 const shiftRoleIcons = (s) => shiftRoles(s).map(roleIcon).join("");
 const nowLocal = () => { const d = new Date(); return `${ymd(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
@@ -672,14 +672,14 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const main = Number(roleSel.value);
     const others = state.roles.filter((r) => (person?.all_role_ids ?? person?.role_ids ?? []).includes(r.id) && r.id !== main);
     alsoBox.replaceChildren(...(others.length ? [h("span", { class: "meta" }, t("alsoCovers"))] : []), ...others.map((r) =>
-      h("label", { class: "check" }, h("input", { type: "checkbox", checked: alsoChecked.has(r.id), onChange: (e) => { e.target.checked ? alsoChecked.add(r.id) : alsoChecked.delete(r.id); } }), `${roleIcon(r)} ${roleName(r)}`)));
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: alsoChecked.has(r.id), onChange: (e) => { e.target.checked ? alsoChecked.add(r.id) : alsoChecked.delete(r.id); } }), `${roleIcon(r)} ${roleName(r, person?.sex)}`)));
   };
   const fillRoles = () => {
     const person = roster.find((r) => r.staff_id === Number(staffSel.value));
     const ids = person?.role_ids ?? [];
     const keep = Number(roleSel.value) || initial.role_id;
     roleSel.replaceChildren(...deptRoles.filter((r) => ids.includes(r.id)).map((r) =>
-      h("option", { value: r.id, selected: r.id === keep }, roleName(r))));
+      h("option", { value: r.id, selected: r.id === keep }, roleName(r, person?.sex))));
     drawAlso();
   };
   roleSel.addEventListener("change", () => { alsoChecked.delete(Number(roleSel.value)); drawAlso(); });
@@ -912,6 +912,7 @@ async function renderTimeOff() {
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
+  const sex = h("select", {}, [["", t("sexUnspecified")], ["M", t("sexMale")], ["F", t("sexFemale")]].map(([v, l]) => h("option", { value: v, selected: (s.sex ?? "") === v }, l)));
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: acc.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: acc.notify_channel === v }, l)));
   const save = async (e) => {
@@ -1711,7 +1712,7 @@ function staffCard(s, ov) {
   const details = h("form", { id: `staff-form-${s.id}`, class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
     try {
-      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
       const lim = await api(`/staff/${s.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxHours.value } }); s.max_weekly_hours = lim.max_weekly_hours;
@@ -1719,7 +1720,8 @@ function staffCard(s, ov) {
       toast(t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
-    h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last), h("label", { class: "field" }, h("span", {}, t("email")), email),
+    h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
+    h("label", { class: "field" }, h("span", {}, t("sexLabel")), sex, h("span", { class: "meta" }, t("sexHelp"))), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.active !== false, onChange: async (e) => {
@@ -1749,7 +1751,7 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("maxWeeklyHours")), maxHours, h("span", { class: "meta" }, t("maxWeeklyHoursHelp"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
-      h("label", { class: "role-rate" }, h("span", {}, `${roleIcon(x.ro)} ${roleName(x.ro)}`), x.input))) : null,
+      h("label", { class: "role-rate" }, h("span", {}, `${roleIcon(x.ro)} ${roleName(x.ro, s.sex)}`), x.input))) : null,
     photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches));
 
@@ -1777,7 +1779,7 @@ function staffCard(s, ov) {
                 removeRole(body, ro, input, () => { s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === ro.id)); });
               }
             });
-            return h("label", { class: "check" }, input, `${roleIcon(ro)} ${roleName(ro)}`);
+            return h("label", { class: "check" }, input, `${roleIcon(ro)} ${roleName(ro, s.sex)}`);
           }),
           (() => {
             const body = { staff_id: s.id, restaurant_id: r.id, department_id: d };

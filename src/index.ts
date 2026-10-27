@@ -9,7 +9,7 @@ import { normalizePhone } from "./phone.ts";
 // @ts-ignore plain JS module shared with the browser
 import { DEFAULT_BOUNDARIES, periodKeys, remapPeriods, validBoundaries } from "../public/coverage.js";
 // @ts-ignore plain JS module shared with the browser
-import { splitName, joinName } from "../public/names.js";
+import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
@@ -457,12 +457,12 @@ function namesFrom(b: { first_name?: string; last_name?: string; name?: string }
 }
 
 app.post("/api/staff", requireAdmin, async (c) => {
-  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; is_admin?: boolean }>();
+  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; is_admin?: boolean; sex?: string }>();
   const nm = namesFrom(b);
   if (!nm) return c.json({ error: "name_required" }, 400);
   try {
-    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0)
+    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin, sex) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null)
       .run();
     return c.json({ id: r.meta.last_row_id }, 201);
   } catch {
@@ -1048,7 +1048,7 @@ app.get("/api/coverage", async (c) => {
   const since = Date.now() - 7 * 86_400_000;
   const rows = await c.env.DB.prepare(
     `SELECT cr.id, cr.shift_id, cr.status, cr.restaurant_id, rs.name AS restaurant, cr.start_at, cr.end_at, cr.created_at, cr.escalated_at, cr.filled_at,
-            ro.department_id, ro.name_fr, ro.name_en, sh.until_close, sick.name AS sick_name, fb.name AS filled_by_name,
+            ro.department_id, ro.name_fr, ro.name_en, sh.until_close, sick.name AS sick_name, sick.sex AS sex, fb.name AS filled_by_name,
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id) AS offers,
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'declined') AS declined,
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'sent') AS waiting
@@ -1257,7 +1257,7 @@ app.get("/api/schedule", async (c) => {
   if (!(await canView(c.env.DB, me, restaurantId, department))) return c.json({ error: "forbidden" }, 403);
 
   const shifts = await c.env.DB.prepare(
-    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.first_name, s.last_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.department_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.first_name, s.last_name, s.sex, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.department_id, ro.name_fr, ro.name_en,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status, sh.replaced_staff_id,
             (SELECT name FROM staff WHERE id = sh.replaced_staff_id) AS replaced_name
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
@@ -1326,7 +1326,7 @@ app.get("/api/my-shifts", async (c) => {
   const bounds = weekBounds(c.req.query("week") ?? "");
   if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
   const r = await c.env.DB.prepare(
-    `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
@@ -1353,15 +1353,15 @@ app.get("/api/roster", async (c) => {
   if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
   if (!(await canManage(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
   const rows = await c.env.DB.prepare(
-    `SELECT s.id AS staff_id, s.name, s.first_name, s.last_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
+    `SELECT s.id AS staff_id, s.name, s.first_name, s.last_name, s.sex, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
      JOIN staff s ON s.id = sr.staff_id JOIN roles ro ON ro.id = sr.role_id
      WHERE sr.restaurant_id = ? AND ro.department_id = ? AND s.active = 1 ORDER BY s.name`,
   )
     .bind(restaurantId, department)
-    .all<{ staff_id: number; name: string; first_name: string; last_name: string; color: string | null; photo_v: number | null; role_id: number }>();
-  const byStaff = new Map<number, { staff_id: number; name: string; first_name: string; last_name: string; color: string | null; photo_v: number | null; role_ids: number[] }>();
+    .all<{ staff_id: number; name: string; first_name: string; last_name: string; sex: string | null; color: string | null; photo_v: number | null; role_id: number }>();
+  const byStaff = new Map<number, { staff_id: number; name: string; first_name: string; last_name: string; sex: string | null; color: string | null; photo_v: number | null; role_ids: number[] }>();
   for (const r of rows.results) {
-    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, first_name: r.first_name, last_name: r.last_name, color: r.color, photo_v: r.photo_v, role_ids: [] };
+    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, first_name: r.first_name, last_name: r.last_name, sex: r.sex, color: r.color, photo_v: r.photo_v, role_ids: [] };
     e.role_ids.push(r.role_id);
     byStaff.set(r.staff_id, e);
   }
@@ -1373,7 +1373,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, first_name, last_name, sex, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
@@ -1396,7 +1396,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
 app.put("/api/staff/:id", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string; color?: string | null }>();
+  const b = await c.req.json<{ first_name?: string; last_name?: string; name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string; color?: string | null; sex?: string | null }>();
   const nm = namesFrom(b);
   if (!nm) return c.json({ error: "name_required" }, 400);
   if (b.color != null && !/^#[0-9a-fA-F]{6}$/.test(b.color)) return c.json({ error: "invalid_color" }, 400);
@@ -1405,8 +1405,8 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   const phone = b.phone?.trim() ? normalizePhone(b.phone) : null;
   if (b.phone?.trim() && !phone) return c.json({ error: "invalid_phone" }, 400);
   try {
-    await c.env.DB.prepare("UPDATE staff SET name=?, first_name=?, last_name=?, email=?, phone=?, lang=?, notify_channel=?, color=? WHERE id=?")
-      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, id)
+    await c.env.DB.prepare("UPDATE staff SET name=?, first_name=?, last_name=?, email=?, phone=?, lang=?, notify_channel=?, color=?, sex=? WHERE id=?")
+      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, b.sex === "M" || b.sex === "F" ? b.sex : null, id)
       .run();
   } catch {
     return c.json({ error: "email_taken" }, 409);
@@ -1598,10 +1598,10 @@ app.get("/cal/:file", async (c) => {
   if (!who) return c.text("not found", 404);
   const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 16), to = new Date(Date.now() + 180 * 86_400_000).toISOString().slice(0, 16);
   const rows = await c.env.DB.prepare(
-    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, sh.notes, rs.name AS restaurant, ro.name_fr
+    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, sh.notes, rs.name AS restaurant, ro.name_fr, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
-  ).bind(who.id, from, to).all<{ id: number; start_at: string; end_at: string; until_close: number; notes: string | null; restaurant: string; name_fr: string }>();
+  ).bind(who.id, from, to).all<{ id: number; start_at: string; end_at: string; until_close: number; notes: string | null; restaurant: string; name_fr: string; sex: string | null }>();
   const stamp = (v: string) => v.replace(/[-:]/g, "") + "00";
   const fold = (v: string) => v.replace(/[\\;,]/g, (m) => "\\" + m).replace(/\n/g, "\\n");
   const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Mikes//Horaire//FR", "CALSCALE:GREGORIAN", "X-WR-CALNAME:Mikes - Horaire", `X-WR-TIMEZONE:${c.env.TIMEZONE ?? "America/Toronto"}`];
@@ -1609,7 +1609,7 @@ app.get("/cal/:file", async (c) => {
   for (const r of rows.results) {
     lines.push("BEGIN:VEVENT", `UID:shift-${r.id}@mikes`, `DTSTAMP:${now}`,
       `DTSTART;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.start_at)}`, `DTEND;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.end_at)}`,
-      `SUMMARY:${fold(`Mikes ${r.restaurant} - ${r.name_fr}`)}`, ...(r.notes ? [`DESCRIPTION:${fold(r.notes)}`] : []), "END:VEVENT");
+      `SUMMARY:${fold(`Mikes ${r.restaurant} - ${genderedRole(r.name_fr, r.sex)}`)}`, ...(r.notes ? [`DESCRIPTION:${fold(r.notes)}`] : []), "END:VEVENT");
   }
   lines.push("END:VCALENDAR");
   return c.body(lines.join("\r\n") + "\r\n", 200, { "content-type": "text/calendar; charset=utf-8", "cache-control": "private, max-age=300" });
@@ -1626,7 +1626,7 @@ app.post("/hooks/twilio", async (c) => {
   if (!conn.twilio || !(await verifyTwilioSignature(conn.twilio.token, url, params, c.req.header("X-Twilio-Signature")))) return c.text("forbidden", 403);
   const twiml = (text?: string) => c.body(`<?xml version="1.0" encoding="UTF-8"?><Response>${text ? `<Message>${esc(text)}</Message>` : ""}</Response>`, 200, { "content-type": "text/xml" });
   const from = normalizePhone(params.From);
-  const person = from ? await c.env.DB.prepare("SELECT id, name, lang FROM staff WHERE phone = ?").bind(from).first<{ id: number; name: string; lang: string }>() : null;
+  const person = from ? await c.env.DB.prepare("SELECT id, name, lang, sex FROM staff WHERE phone = ?").bind(from).first<{ id: number; name: string; lang: string; sex: string | null }>() : null;
   if (!person) return twiml();
   const lang: Lang = person.lang === "en" ? "en" : "fr";
   const word = (params.Body ?? "").trim().toLowerCase();
@@ -1652,7 +1652,7 @@ app.post("/hooks/twilio", async (c) => {
     try {
       await startSickCall(c.env, c.env.DB, shift.id, person.id);
       const row = await c.env.DB.prepare("SELECT sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(shift.id).first<{ start_at: string; end_at: string; until_close: number; restaurant: string; name_fr: string; name_en: string }>();
-      return twiml(row ? T.sickRecorded(lang, { restaurant: row.restaurant, role: lang === "fr" ? row.name_fr : row.name_en, when: formatWhen(row.start_at, row.end_at, !!row.until_close, lang) }).text : undefined);
+      return twiml(row ? T.sickRecorded(lang, { restaurant: row.restaurant, role: genderedRole(lang === "fr" ? row.name_fr : row.name_en, person.sex), when: formatWhen(row.start_at, row.end_at, !!row.until_close, lang) }).text : undefined);
     } catch (e) {
       if (e instanceof FlowError) return twiml(lang === "fr" ? "Mikes: ce quart est déjà signalé ou terminé." : "Mikes: that shift is already reported or over.");
       throw e;

@@ -21,3 +21,14 @@ test("short names: first name, plus the last-name initial only when the first na
   assert.equal(m.get(3), "Édouard"); assert.equal(m.get(4), "Eric");
   assert.equal(m.get(5), "Sam"); // no last name to use
 });
+
+test("gendered role names", async () => {
+  // @ts-ignore plain JS module shared with the browser
+  const { genderedRole } = await import("../public/names.js");
+  assert.equal(genderedRole("Cuisinier / cuisinière", "M"), "Cuisinier");
+  assert.equal(genderedRole("Cuisinier / cuisinière", "F"), "Cuisinière");
+  assert.equal(genderedRole("Cuisinier / cuisinière", null), "Cuisinier / cuisinière");
+  assert.equal(genderedRole("Waitress / waiter".split(" / ").reverse().join(" / "), "F"), "Waitress");
+  assert.equal(genderedRole("Chef", "F"), "Chef");
+  assert.equal(genderedRole("Aide-serveur / aide-serveuse", "F"), "Aide-serveuse");
+});
