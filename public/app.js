@@ -1630,7 +1630,7 @@ function hoursPanel(ov) {
 }
 
 // Untick a role: if shifts still use it, ask whether to move them to another role or delete them.
-async function removeRole(body, role, input, onRemoved) {
+async function removeRole(body, role, input, onRemoved, sex) {
   const dlg = document.getElementById("modal");
   const from = thisMonday();
   try {
@@ -1652,7 +1652,7 @@ async function removeRole(body, role, input, onRemoved) {
       date.node,
       alternatives.length
         ? alternatives.map((a) => h("button", { class: "btn primary", type: "button", onClick: () => act({ reassign_to_role_id: a.id }) },
-            `${t("moveShiftsTo")} ${roleName(a)} (${t(`dept.${a.department_id}`)})`))
+            `${t("moveShiftsTo")} ${roleName(a, sex)} (${t(`dept.${a.department_id}`)})`))
         : h("p", { class: "meta" }, t("addRoleFirst")),
       h("button", { class: "btn danger", type: "button", onClick: () => act({ delete_shifts: true }) }, t("deleteShifts")),
       h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel"))));
@@ -1683,11 +1683,11 @@ function roleChoiceDialog({ s, r, ro, others, input, roleInputs }) {
     } catch (e) { toast(errorText(e)); }
   };
   dlg.replaceChildren(h("div", { class: "modal-body" },
-    h("h2", {}, `${roleName(ro)} — ${r.name}`),
+    h("h2", {}, `${roleName(ro, s.sex)} — ${r.name}`),
     h("p", {}, t("roleChoiceBody")),
     date.node,
     others.map((old) => h("button", { class: "btn primary", type: "button", onClick: () => replace(old) },
-      `${t("replace")} ${roleName(oldRole(old))} → ${roleName(ro)}`)),
+      `${t("replace")} ${roleName(oldRole(old), s.sex)} → ${roleName(ro, s.sex)}`)),
     h("button", { class: "btn", type: "button", onClick: add }, t("addAlso")),
     h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel"))));
   dlg.addEventListener("close", () => { if (!decided) input.checked = false; }, { once: true });
@@ -1816,7 +1816,7 @@ function staffCard(s, ov) {
                 try { await api("/staff-roles", { method: "POST", body }); s.roles.push({ staff_id: s.id, restaurant_id: r.id, role_id: ro.id }); toast(t("saved")); }
                 catch (err) { input.checked = false; toast(errorText(err)); }
               } else {
-                removeRole(body, ro, input, () => { s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === ro.id)); });
+                removeRole(body, ro, input, () => { s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === ro.id)); }, s.sex);
               }
             });
             return h("label", { class: "check" }, input, `${roleIcon(ro)} ${roleName(ro, s.sex)}`);

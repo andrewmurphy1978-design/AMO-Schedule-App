@@ -951,7 +951,7 @@ app.get("/api/admin/staff/:id/shifts", requireAdmin, async (c) => {
   const date = c.req.query("date") ?? "";
   if (!id || !DATE_RE3.test(date)) return c.json({ error: "bad_request" }, 400);
   const r = await c.env.DB.prepare(
-    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+    `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND substr(sh.start_at, 1, 10) = ? ORDER BY sh.start_at`,
   ).bind(id, date).all();
   return c.json(r.results);
@@ -1552,9 +1552,9 @@ app.delete("/api/shifts/:id", async (c) => {
 // The reply link is protected by its long random token; the webhook by Twilio's request signature.
 const esc = (v: string) => v.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
-interface OfferView { id: number; request_id: number; staff_id: number; status: string; req_status: string; lang: string; restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }
+interface OfferView { sex: string | null; id: number; request_id: number; staff_id: number; status: string; req_status: string; lang: string; restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }
 const offerByToken = (db: D1Database, token: string) => db.prepare(
-  `SELECT o.id, o.request_id, o.staff_id, o.status, cr.status AS req_status, s.lang, rs.name AS restaurant, ro.name_fr, ro.name_en, cr.start_at, cr.end_at, sh.until_close
+  `SELECT o.id, o.request_id, o.staff_id, o.status, cr.status AS req_status, s.lang, s.sex, rs.name AS restaurant, ro.name_fr, ro.name_en, cr.start_at, cr.end_at, sh.until_close
    FROM coverage_offers o JOIN coverage_requests cr ON cr.id = o.request_id JOIN staff s ON s.id = o.staff_id
         JOIN restaurants rs ON rs.id = cr.restaurant_id JOIN roles ro ON ro.id = cr.role_id JOIN shifts sh ON sh.id = cr.shift_id
    WHERE o.token = ?`,
@@ -1569,7 +1569,7 @@ app.get("/r/:token", async (c) => {
     ? { title: "Remplacement demandé", yes: "Accepter", no: "Refuser", gone: "Ce lien n’est plus valide.", filled: "Le remplacement a déjà été comblé. Merci quand même!", done: "Merci, c’est noté.", accepted: "Confirmé! Le quart est à ton horaire.", declined: "Refusé. Merci de nous avoir répondu.", err: "Une erreur est survenue. Réessaie." }
     : { title: "Replacement needed", yes: "Accept", no: "Decline", gone: "This link is no longer valid.", filled: "The replacement has already been filled. Thanks anyway!", done: "Thanks, noted.", accepted: "Confirmed! The shift is on your schedule.", declined: "Declined. Thanks for answering.", err: "Something went wrong. Please try again." };
   const open = !!o && o.status === "sent" && o.req_status === "open";
-  const detail = o ? `${lang === "fr" ? o.name_fr : o.name_en} — ${o.restaurant}<br><b>${esc(formatWhen(o.start_at, o.end_at, !!o.until_close, lang))}</b>` : "";
+  const detail = o ? `${genderedRole(lang === "fr" ? o.name_fr : o.name_en, o.sex)} — ${o.restaurant}<br><b>${esc(formatWhen(o.start_at, o.end_at, !!o.until_close, lang))}</b>` : "";
   const html = `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Mikes</title>
 <style>body{font:18px/1.4 system-ui,sans-serif;margin:0;background:#f6f4f1;color:#1f1f23}header{background:#da291c;color:#fff;padding:14px 18px;font-weight:800;font-style:italic;font-size:1.5rem}main{max-width:480px;margin:0 auto;padding:22px 18px}
 .card{background:#fff;border-radius:14px;padding:18px;border:1px solid #e3dfd9}button{width:100%;min-height:52px;border-radius:12px;border:0;font:inherit;font-weight:700;margin-top:12px}.y{background:#da291c;color:#fff}.n{background:#fff;border:1px solid #c9c4bc}</style></head>
