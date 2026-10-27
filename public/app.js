@@ -40,6 +40,25 @@ function timeField(value = "00:00") {
   return el;
 }
 
+// Round picture, or a coloured circle with initials when there is no picture. photoV changes with every new upload.
+function avatar(id, name, color, photoV, size = 28) {
+  const c = staffColor(id, color);
+  const style = `--s:${size}px`;
+  if (photoV) return h("img", { class: "avatar", style, alt: name, loading: "lazy", src: `/api/staff/${id}/photo?v=${photoV}` });
+  const initials = name.replace(/\(.*?\)/g, "").trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
+  return h("span", { class: "avatar", style: `${style};background:${c};color:${textOn(c)}`, "aria-label": name }, initials);
+}
+
+// Crop to a centred square and shrink to 256px JPEG, so a phone photo (several MB) becomes about 20 KB.
+async function photoToDataUrl(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const side = Math.min(bmp.width, bmp.height), size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  canvas.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
 class ApiError extends Error {
   constructor(status, body) { super(body?.error ?? String(status)); this.status = status; this.body = body ?? {}; }
 }
@@ -195,7 +214,7 @@ async function renderSchedule() {
     h("h2", {}, fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })),
     dayShifts.length
       ? h("div", { class: "list" }, dayShifts.map((s) => {
-          const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, s.staff_name),
+          const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 26), s.staff_name),
             h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · "))];
           return data.editable ? h("button", { class: "card", type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: "card" }, card);
         }))
@@ -206,13 +225,15 @@ async function renderSchedule() {
   const people = new Map();
   for (const r of roster) people.set(r.staff_id, r.name);
   for (const s of data.shifts) people.set(s.staff_id, s.staff_name);
-  const staffColors = new Map(data.shifts.map((s) => [s.staff_id, s.staff_color]));
+  const meta = new Map();
+  for (const r of roster) meta.set(r.staff_id, { color: r.color, photo_v: r.photo_v });
+  for (const sh of data.shifts) meta.set(sh.staff_id, { color: sh.staff_color, photo_v: sh.photo_v });
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
   const grid = h("div", { class: "grid-wrap" }, h("table", { class: "grid" },
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
       h("th", { class: d === today ? "today" : "" }, fmt(d, { weekday: "short", day: "numeric", month: "short" }))))),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
-      h("tr", {}, h("td", { class: "name" }, h("span", { class: "dot", style: `background:${staffColor(id, staffColors.get(id))}` }), name), days.map((d) =>
+      h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 26), name), days.map((d) =>
         h("td", {},
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`];
@@ -297,7 +318,7 @@ function renderTimeline({ data, days, targets, sets, openEditor }) {
         title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
-      const body = wide ? [h("b", {}, x.s.staff_name), range] : `${x.s.staff_name} ${range}`;
+      const body = wide ? [h("b", { class: "bar-name" }, avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, 20), x.s.staff_name), range] : `${x.s.staff_name} ${range}`;
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     const shade = (from, to) => (to > from ? h("div", { class: "vtl-closed", title: t("beforeOpen"), style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
@@ -637,34 +658,76 @@ function targetsPanel(ov) {
   return box;
 }
 
+// Shared by the role dialogs: "from" date (default Monday of the current week). Earlier shifts keep their old role.
+const thisMonday = () => mondayOf(new Date());
+function fromField() {
+  const input = h("input", { type: "date", value: thisMonday() });
+  return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
+}
+
 // Untick a role: if shifts still use it, ask whether to move them to another role or delete them.
-async function removeRole(body, role, input) {
+async function removeRole(body, role, input, onRemoved) {
   const dlg = document.getElementById("modal");
-  const finish = (ok) => { if (!ok) input.checked = true; };
+  const from = thisMonday();
   try {
-    await api("/staff-roles", { method: "DELETE", body });
-    toast(t("saved"));
+    await api("/staff-roles", { method: "DELETE", body: { ...body, effective_from: from } });
+    onRemoved?.(); toast(t("saved"));
     return;
   } catch (e) {
-    if (e.body?.error !== "has_shifts") { finish(false); toast(errorText(e)); return; }
+    if (e.body?.error !== "has_shifts") { input.checked = true; toast(errorText(e)); return; }
     const { count, alternatives } = e.body;
+    const date = fromField();
     let decided = false;
     const act = async (extra) => {
-      try { await api("/staff-roles", { method: "DELETE", body: { ...body, ...extra } }); decided = true; dlg.close(); toast(t("saved")); }
+      try { await api("/staff-roles", { method: "DELETE", body: { ...body, effective_from: date.input.value, ...extra } }); decided = true; dlg.close(); onRemoved?.(); toast(t("saved")); }
       catch (err) { toast(errorText(err)); }
     };
     dlg.replaceChildren(h("div", { class: "modal-body" },
       h("h2", {}, t("hasShiftsTitle")),
       h("p", {}, `${count} ${t("hasShiftsBody")}`),
+      date.node,
       alternatives.length
         ? alternatives.map((a) => h("button", { class: "btn primary", type: "button", onClick: () => act({ reassign_to_role_id: a.id }) },
             `${t("moveShiftsTo")} ${roleName(a)} (${t(`dept.${a.department_id}`)})`))
         : h("p", { class: "meta" }, t("addRoleFirst")),
       h("button", { class: "btn danger", type: "button", onClick: () => act({ delete_shifts: true }) }, t("deleteShifts")),
       h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel"))));
-    dlg.addEventListener("close", () => finish(decided), { once: true });
+    dlg.addEventListener("close", () => { if (!decided) input.checked = true; }, { once: true });
     dlg.showModal();
   }
+}
+
+// Ticking a new role for someone who already holds another one at this restaurant: add it, or replace the old one.
+function roleChoiceDialog({ s, r, ro, others, input, roleInputs }) {
+  const dlg = document.getElementById("modal");
+  const date = fromField();
+  const oldRole = (x) => state.roles.find((q) => q.id === x.role_id);
+  let decided = false;
+  const done = () => { decided = true; dlg.close(); toast(t("saved")); };
+  const add = async () => {
+    try { await api("/staff-roles", { method: "POST", body: { staff_id: s.id, restaurant_id: r.id, role_id: ro.id } }); s.roles.push({ staff_id: s.id, restaurant_id: r.id, role_id: ro.id }); done(); }
+    catch (e) { toast(errorText(e)); }
+  };
+  const replace = async (old) => {
+    try {
+      await api("/staff-roles", { method: "POST", body: { staff_id: s.id, restaurant_id: r.id, role_id: ro.id } });
+      s.roles.push({ staff_id: s.id, restaurant_id: r.id, role_id: ro.id });
+      await api("/staff-roles", { method: "DELETE", body: { staff_id: s.id, restaurant_id: r.id, role_id: old.role_id, reassign_to_role_id: ro.id, effective_from: date.input.value } });
+      s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === old.role_id));
+      const box = roleInputs.get(`${r.id}:${old.role_id}`); if (box) box.checked = false;
+      done();
+    } catch (e) { toast(errorText(e)); }
+  };
+  dlg.replaceChildren(h("div", { class: "modal-body" },
+    h("h2", {}, `${roleName(ro)} — ${r.name}`),
+    h("p", {}, t("roleChoiceBody")),
+    date.node,
+    others.map((old) => h("button", { class: "btn primary", type: "button", onClick: () => replace(old) },
+      `${t("replace")} ${roleName(oldRole(old))} → ${roleName(ro)}`)),
+    h("button", { class: "btn", type: "button", onClick: add }, t("addAlso")),
+    h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel"))));
+  dlg.addEventListener("close", () => { if (!decided) input.checked = false; }, { once: true });
+  dlg.showModal();
 }
 
 function staffCard(s, ov) {
@@ -673,10 +736,33 @@ function staffCard(s, ov) {
   const phone = h("input", { type: "tel", value: s.phone ?? "" });
   const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
   const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
+  let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
+  let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
+  const refreshAvatars = () => {
+    const big = avatar(s.id, s.name, chosen ?? s.color, s.photo_v, 72), small = avatar(s.id, s.name, chosen ?? s.color, s.photo_v, 28);
+    bigAvatar.replaceWith(big); bigAvatar = big; summaryAvatar.replaceWith(small); summaryAvatar = small;
+  };
+  const fileInput = h("input", { type: "file", accept: "image/*", hidden: true });
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    try {
+      const data_url = await photoToDataUrl(file);
+      const r = await api(`/staff/${s.id}/photo`, { method: "PUT", body: { data_url } });
+      s.photo_v = r.photo_v; refreshAvatars(); toast(t("saved"));
+    } catch (e) { toast(e.body?.error === "invalid_image" ? t("badImage") : errorText(e)); }
+    fileInput.value = "";
+  });
+  const photoRow = h("div", { class: "photo-row" }, bigAvatar,
+    h("div", { class: "photo-actions" },
+      h("button", { class: "btn", type: "button", onClick: () => fileInput.click() }, t("choosePhoto")),
+      h("button", { class: "btn", type: "button", onClick: async () => {
+        try { await api(`/staff/${s.id}/photo`, { method: "DELETE" }); s.photo_v = null; refreshAvatars(); toast(t("saved")); } catch (e) { toast(errorText(e)); }
+      } }, t("removePhoto")), fileInput));
   let chosen = s.color ?? null; // null = automatic colour
   const dot = h("span", { class: "dot big", style: `background:${staffColor(s.id, chosen)}` });
   const picker = h("input", { type: "color", value: staffColor(s.id, chosen), "aria-label": t("colour") });
-  const setColor = (c) => { chosen = c; const shown = staffColor(s.id, c); dot.style.background = shown; picker.value = shown; summaryDot.style.background = shown; };
+  const setColor = (c) => { chosen = c; const shown = staffColor(s.id, c); dot.style.background = shown; picker.value = shown; summaryDot.style.background = shown; if (!s.photo_v) refreshAvatars(); };
   picker.addEventListener("input", () => setColor(picker.value));
   const swatches = h("div", { class: "swatches" }, SWATCHES.map((c) =>
     h("button", { type: "button", class: "swatch", style: `background:${c}`, "aria-label": c, onClick: () => setColor(c) })),
@@ -689,12 +775,14 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches),
     h("button", { class: "btn primary", type: "submit" }, t("save")));
 
   const toggle = (checked, onOn, onOff) => async (e) => {
     try { await (e.target.checked ? onOn() : onOff()); toast(t("saved")); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); }
   };
+  const roleInputs = new Map();
   const blocks = ov.restaurants.map((r) => h("div", { class: "resto-block" }, h("h3", {}, r.name),
     DEPTS.map((d) => {
       const dRoles = state.roles.filter((ro) => ro.department_id === d);
@@ -704,11 +792,15 @@ function staffCard(s, ov) {
             const body = { staff_id: s.id, restaurant_id: r.id, role_id: ro.id };
             const on = s.roles.some((x) => x.restaurant_id === r.id && x.role_id === ro.id);
             const input = h("input", { type: "checkbox", checked: on });
+            roleInputs.set(`${r.id}:${ro.id}`, input);
             input.addEventListener("change", async () => {
               if (input.checked) {
-                try { await api("/staff-roles", { method: "POST", body }); toast(t("saved")); } catch (err) { input.checked = false; toast(errorText(err)); }
+                const others = s.roles.filter((x) => x.restaurant_id === r.id && x.role_id !== ro.id);
+                if (others.length) { roleChoiceDialog({ s, r, ro, others, input, roleInputs }); return; }
+                try { await api("/staff-roles", { method: "POST", body }); s.roles.push({ staff_id: s.id, restaurant_id: r.id, role_id: ro.id }); toast(t("saved")); }
+                catch (err) { input.checked = false; toast(errorText(err)); }
               } else {
-                removeRole(body, ro, input);
+                removeRole(body, ro, input, () => { s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === ro.id)); });
               }
             });
             return h("label", { class: "check" }, input, roleName(ro));
@@ -722,7 +814,7 @@ function staffCard(s, ov) {
     })));
 
   return h("details", { class: "staff" },
-    h("summary", {}, h("span", {}, summaryDot, s.name), s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? "")),
+    h("summary", {}, h("span", { class: "who-row" }, summaryAvatar, s.name), s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? "")),
     h("div", { class: "staff-body" }, h("h3", {}, t("details")), details, h("h3", {}, t("assignments")), blocks));
 }
 

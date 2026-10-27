@@ -335,6 +335,62 @@ app.post("/api/staff", requireAdmin, async (c) => {
   }
 });
 
+// ---------- Employee pictures ----------
+// Visible to the person, admins, and anyone sharing a restaurant with them. Editable by the person, admins,
+// and managers of a restaurant where the person works.
+async function sharesRestaurant(db: D1Database, meId: number, staffId: number) {
+  const r = await db
+    .prepare(
+      `SELECT 1 FROM (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?1 UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1) a
+       JOIN (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?2 UNION SELECT restaurant_id FROM managers WHERE staff_id = ?2) b USING (restaurant_id) LIMIT 1`,
+    )
+    .bind(meId, staffId)
+    .first();
+  return !!r;
+}
+async function canEditPhoto(db: D1Database, me: Me, staffId: number) {
+  if (me.is_admin || me.id === staffId) return true;
+  const r = await db
+    .prepare("SELECT 1 FROM managers m JOIN staff_roles sr ON sr.restaurant_id = m.restaurant_id WHERE m.staff_id = ? AND sr.staff_id = ? LIMIT 1")
+    .bind(me.id, staffId)
+    .first();
+  return !!r;
+}
+
+app.get("/api/staff/:id/photo", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const me = c.get("me");
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(me.is_admin || me.id === id || (await sharesRestaurant(c.env.DB, me.id, id)))) return c.json({ error: "forbidden" }, 403);
+  const row = await c.env.DB.prepare("SELECT mime, data FROM staff_photos WHERE staff_id = ?").bind(id).first<{ mime: string; data: string }>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+  const bytes = Uint8Array.from(atob(row.data), (ch) => ch.charCodeAt(0));
+  // The client adds ?v=<updated_at>, so a new picture gets a new URL and the old one can be cached for good.
+  return new Response(bytes, { headers: { "content-type": row.mime, "cache-control": "private, max-age=31536000, immutable" } });
+});
+
+app.put("/api/staff/:id/photo", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await canEditPhoto(c.env.DB, c.get("me"), id))) return c.json({ error: "forbidden" }, 403);
+  const { data_url } = await c.req.json<{ data_url?: string }>();
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(data_url ?? "");
+  if (!m || m[2].length > 200_000) return c.json({ error: "invalid_image" }, 400);
+  const exists = await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(id).first();
+  if (!exists) return c.json({ error: "not_found" }, 404);
+  const now = Date.now();
+  await c.env.DB.prepare("INSERT OR REPLACE INTO staff_photos (staff_id, mime, data, updated_at) VALUES (?, ?, ?, ?)").bind(id, m[1], m[2], now).run();
+  return c.json({ ok: true, photo_v: now });
+});
+
+app.delete("/api/staff/:id/photo", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await canEditPhoto(c.env.DB, c.get("me"), id))) return c.json({ error: "forbidden" }, 403);
+  await c.env.DB.prepare("DELETE FROM staff_photos WHERE staff_id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
 // ---------- Roles held by staff ----------
 // Admin: any. Manager: only for departments they manage at that restaurant.
 app.post("/api/staff-roles", async (c) => {
@@ -357,16 +413,19 @@ app.post("/api/staff-roles", async (c) => {
 
 // Removing a role that still has shifts needs a decision: move them to another role the person holds
 // at that restaurant, or delete them. Without a decision the API answers 409 with the options.
+// effective_from ('YYYY-MM-DD') limits the move/delete to shifts starting on or after that day, so history stays as it was.
 app.delete("/api/staff-roles", async (c) => {
   const me = c.get("me");
   const db = c.env.DB;
-  const b = await c.req.json<{ staff_id: number; restaurant_id: number; role_id: number; reassign_to_role_id?: number; delete_shifts?: boolean }>();
+  const b = await c.req.json<{ staff_id: number; restaurant_id: number; role_id: number; reassign_to_role_id?: number; delete_shifts?: boolean; effective_from?: string }>();
+  if (b.effective_from !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(b.effective_from)) return c.json({ error: "invalid_times" }, 400);
+  const from = b.effective_from ?? "0000-00-00";
   const role = await db.prepare("SELECT department_id FROM roles WHERE id = ?").bind(b.role_id).first<{ department_id: string }>();
   if (!role) return c.json({ error: "role_not_found" }, 404);
   if (!(await canManage(db, me, b.restaurant_id, role.department_id))) return c.json({ error: "forbidden" }, 403);
 
-  const count = (await db.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?")
-    .bind(b.staff_id, b.restaurant_id, b.role_id).first<{ n: number }>())?.n ?? 0;
+  const count = (await db.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ? AND start_at >= ?")
+    .bind(b.staff_id, b.restaurant_id, b.role_id, from).first<{ n: number }>())?.n ?? 0;
   const stmts = [];
   if (count > 0) {
     if (b.reassign_to_role_id) {
@@ -379,10 +438,10 @@ app.delete("/api/staff-roles", async (c) => {
         .first<{ department_id: string }>();
       if (!target) return c.json({ error: "staff_does_not_hold_role_at_restaurant" }, 422);
       if (!(await canManage(db, me, b.restaurant_id, target.department_id))) return c.json({ error: "forbidden" }, 403);
-      stmts.push(db.prepare("UPDATE shifts SET role_id = ? WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?")
-        .bind(b.reassign_to_role_id, b.staff_id, b.restaurant_id, b.role_id));
+      stmts.push(db.prepare("UPDATE shifts SET role_id = ? WHERE staff_id = ? AND restaurant_id = ? AND role_id = ? AND start_at >= ?")
+        .bind(b.reassign_to_role_id, b.staff_id, b.restaurant_id, b.role_id, from));
     } else if (b.delete_shifts) {
-      stmts.push(db.prepare("DELETE FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(b.staff_id, b.restaurant_id, b.role_id));
+      stmts.push(db.prepare("DELETE FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ? AND start_at >= ?").bind(b.staff_id, b.restaurant_id, b.role_id, from));
     } else {
       const alternatives = await db
         .prepare(
@@ -432,7 +491,7 @@ app.get("/api/schedule", async (c) => {
   if (!(await canView(c.env.DB, me, restaurantId, department))) return c.json({ error: "forbidden" }, 403);
 
   const shifts = await c.env.DB.prepare(
-    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, sh.role_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.name_fr, ro.name_en,
             sh.start_at, sh.end_at, sh.until_close, sh.notes
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ?
@@ -467,15 +526,15 @@ app.get("/api/roster", async (c) => {
   if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
   if (!(await canManage(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
   const rows = await c.env.DB.prepare(
-    `SELECT s.id AS staff_id, s.name, sr.role_id FROM staff_roles sr
+    `SELECT s.id AS staff_id, s.name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sr.role_id FROM staff_roles sr
      JOIN staff s ON s.id = sr.staff_id JOIN roles ro ON ro.id = sr.role_id
      WHERE sr.restaurant_id = ? AND ro.department_id = ? ORDER BY s.name`,
   )
     .bind(restaurantId, department)
-    .all<{ staff_id: number; name: string; role_id: number }>();
-  const byStaff = new Map<number, { staff_id: number; name: string; role_ids: number[] }>();
+    .all<{ staff_id: number; name: string; color: string | null; photo_v: number | null; role_id: number }>();
+  const byStaff = new Map<number, { staff_id: number; name: string; color: string | null; photo_v: number | null; role_ids: number[] }>();
   for (const r of rows.results) {
-    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, role_ids: [] };
+    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, color: r.color, photo_v: r.photo_v, role_ids: [] };
     e.role_ids.push(r.role_id);
     byStaff.set(r.staff_id, e);
   }
@@ -485,7 +544,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),

@@ -227,3 +227,14 @@ button.vtl-bar { cursor: pointer; }
 
 .time24 { display: flex; align-items: center; gap: .3rem; }
 .time24 select { min-width: 0; flex: 1 1 0; padding-left: .4rem; padding-right: .2rem; text-align: center; font-variant-numeric: tabular-nums; }
+
+.avatar { --s: 28px; width: var(--s); height: var(--s); flex: 0 0 auto; border-radius: 50%; object-fit: cover; display: inline-grid; place-items: center;
+  font-size: calc(var(--s) * .4); font-weight: 700; line-height: 1; margin-right: 8px; vertical-align: middle; border: 2px solid var(--card); box-shadow: 0 0 0 1px var(--line); }
+.card .who { display: flex; align-items: center; }
+.grid td.name { display: table-cell; }
+.tl-bar-name, .bar-name { display: flex; align-items: center; }
+.bar-name .avatar { margin-right: 5px; border-color: rgba(255,255,255,.7); box-shadow: none; }
+.who-row { display: inline-flex; align-items: center; }
+.photo-row { display: flex; align-items: center; gap: 1rem; margin-bottom: .6rem; }
+.photo-row .avatar { margin: 0; }
+.photo-actions { display: flex; flex-wrap: wrap; gap: .4rem; }

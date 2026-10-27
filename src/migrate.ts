@@ -8,6 +8,7 @@ import m0005 from "../migrations/0005_target_sets.sql";
 import m0006 from "../migrations/0006_open_time.sql";
 import m0007 from "../migrations/0007_open_hours_by_day.sql";
 import m0008 from "../migrations/0008_staff_color.sql";
+import m0009 from "../migrations/0009_staff_photos.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -18,6 +19,7 @@ const MIGRATIONS: [string, string][] = [
   ["0006_open_time", m0006],
   ["0007_open_hours_by_day", m0007],
   ["0008_staff_color", m0008],
+  ["0009_staff_photos", m0009],
 ];
 
 const statements = (sql: string) =>
