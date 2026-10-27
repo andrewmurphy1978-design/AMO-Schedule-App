@@ -13,6 +13,7 @@ import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
 import { localNow } from "./week.ts";
+import { normalizeSin, hashSin, chooseMatch, extractPayslip, isPdf, bytesToBase64, MAX_PDF_BYTES } from "./payslip.ts";
 
 type Env = {
   DB: D1Database;
@@ -28,6 +29,8 @@ type Env = {
   // Public address of the app (used in links sent by SMS/email) and the restaurants' time zone.
   APP_URL?: string;
   TIMEZONE?: string;
+  // Optional secrets: key to read pay slip PDFs with Claude, and the key used to hash Social Insurance Numbers.
+  ANTHROPIC_API_KEY?: string; SIN_KEY?: string;
   // Optional: messaging credentials as environment secrets (otherwise they are saved from the Administration screen).
   TWILIO_ACCOUNT_SID?: string; TWILIO_AUTH_TOKEN?: string; TWILIO_FROM?: string; TWILIO_API_BASE?: string;
   SMTP_HOST?: string; SMTP_PORT?: string; SMTP_SECURE?: string; SMTP_USER?: string; SMTP_PASS?: string; SMTP_FROM?: string;
@@ -519,6 +522,115 @@ app.delete("/api/account/calendar-token", async (c) => {
   return c.json(await accountView(c));
 });
 
+// ---------- SIN and pay slips ----------
+// The SIN is stored only as a keyed hash plus its last 3 digits. The key is the SIN_KEY secret, or one generated once and kept in settings.
+async function sinKey(env: Env): Promise<string> {
+  if (env.SIN_KEY?.trim()) return env.SIN_KEY.trim();
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'sin_key'").first<{ value: string }>();
+  if (row) return row.value;
+  const k = newToken() + newToken();
+  await env.DB.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('sin_key', ?)").bind(k).run();
+  return (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sin_key'").first<{ value: string }>())!.value;
+}
+async function anthropicKey(env: Env): Promise<string | null> {
+  if (env.ANTHROPIC_API_KEY?.trim()) return env.ANTHROPIC_API_KEY.trim();
+  return (await env.DB.prepare("SELECT value FROM settings WHERE key = 'conn_anthropic_key'").first<{ value: string }>())?.value ?? null;
+}
+
+app.put("/api/staff/:id/sin", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const { sin } = await c.req.json<{ sin?: string | null }>();
+  if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  if (sin === null || sin === undefined || sin === "") {
+    await c.env.DB.prepare("DELETE FROM staff_sin WHERE staff_id = ?").bind(id).run();
+    return c.json({ ok: true, sin_last3: null });
+  }
+  const digits = normalizeSin(sin);
+  if (!digits) return c.json({ error: "invalid_sin" }, 400);
+  const hash = await hashSin(await sinKey(c.env), digits);
+  const clash = await c.env.DB.prepare("SELECT staff_id FROM staff_sin WHERE sin_hash = ? AND staff_id != ?").bind(hash, id).first();
+  if (clash) return c.json({ error: "sin_already_used" }, 409);
+  await c.env.DB.prepare("INSERT OR REPLACE INTO staff_sin (staff_id, sin_hash, last3) VALUES (?, ?, ?)").bind(id, hash, digits.slice(-3)).run();
+  return c.json({ ok: true, sin_last3: digits.slice(-3) });
+});
+
+app.get("/api/admin/payslip-setup", requireAdmin, async (c) => c.json({ ai_configured: !!(await anthropicKey(c.env)), max_bytes: MAX_PDF_BYTES }));
+app.put("/api/admin/payslip-setup", requireAdmin, async (c) => {
+  const { anthropic_key } = await c.req.json<{ anthropic_key?: string | null }>();
+  if (!anthropic_key) await c.env.DB.prepare("DELETE FROM settings WHERE key = 'conn_anthropic_key'").run();
+  else if (!/^sk-ant-[\w-]{20,}$/.test(anthropic_key.trim())) return c.json({ error: "invalid_key" }, 400);
+  else await c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('conn_anthropic_key', ?)").bind(anthropic_key.trim()).run();
+  return c.json({ ai_configured: !!(await anthropicKey(c.env)) });
+});
+
+// One PDF per request (the browser sends the files of a batch one after the other). The AI reads it and proposes an employee.
+app.post("/api/admin/payslips", requireAdmin, async (c) => {
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.length > MAX_PDF_BYTES) return c.json({ error: "file_too_large", max_bytes: MAX_PDF_BYTES }, 413);
+  if (!isPdf(bytes)) return c.json({ error: "not_a_pdf" }, 400);
+  const filename = decodeURIComponent(c.req.header("X-Filename") ?? "payslip.pdf").replace(/[^\w .()-]/g, "_").slice(0, 120);
+  const b64 = bytesToBase64(bytes);
+  const key = await anthropicKey(c.env);
+  const ex = key ? await extractPayslip(key, b64).catch(() => null) : null;
+  const people = (await c.env.DB.prepare("SELECT s.id, s.name, ss.sin_hash FROM staff s LEFT JOIN staff_sin ss ON ss.staff_id = s.id").all<{ id: number; name: string; sin_hash: string | null }>()).results;
+  const m = ex ? await chooseMatch(ex, people, await sinKey(c.env)) : { staff_id: null, kind: "none" as const };
+  const sinDigits = ex ? normalizeSin(ex.sin) : null;
+  const r = await c.env.DB.prepare(
+    `INSERT INTO payslips (filename, content_b64, size, status, period_label, pay_date, extracted_name, extracted_last3, suggested_staff_id, match_kind, uploaded_by, uploaded_at)
+     VALUES (?, ?, ?, 'review', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(filename, b64, bytes.length, ex?.period ?? null, ex?.pay_date ?? null, ex?.employee_name ?? null, sinDigits ? sinDigits.slice(-3) : null, m.staff_id, m.kind, c.get("me").id, Date.now()).run();
+  return c.json({ id: r.meta.last_row_id, read_by_ai: !!ex, match: m.kind }, 201);
+});
+
+app.get("/api/admin/payslips", requireAdmin, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT p.id, p.filename, p.size, p.period_label, p.pay_date, p.extracted_name, p.extracted_last3, p.match_kind, p.suggested_staff_id, sg.name AS suggested_name,
+            (SELECT last3 FROM staff_sin WHERE staff_id = p.suggested_staff_id) AS suggested_last3, p.uploaded_at
+     FROM payslips p LEFT JOIN staff sg ON sg.id = p.suggested_staff_id WHERE p.status = 'review' ORDER BY p.id`,
+  ).all();
+  return c.json(rows.results);
+});
+
+app.post("/api/admin/payslips/:id/assign", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { staff_id } = await c.req.json<{ staff_id?: number }>();
+  if (!id || !staff_id) return c.json({ error: "bad_request" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(staff_id).first())) return c.json({ error: "staff_not_found" }, 404);
+  const r = await c.env.DB.prepare("UPDATE payslips SET staff_id = ?, status = 'assigned', assigned_at = ? WHERE id = ? AND status = 'review'").bind(staff_id, Date.now(), id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+app.delete("/api/admin/payslips/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  await c.env.DB.prepare("DELETE FROM payslips WHERE id = ? AND status = 'review'").bind(id).run();
+  return c.json({ ok: true });
+});
+
+const pdfResponse = (c: Context<any>, filename: string, b64: string) => {
+  const bin = atob(b64); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return c.body(out, 200, { "content-type": "application/pdf", "content-disposition": `inline; filename="${filename.replace(/"/g, "")}"`, "cache-control": "private, no-store", "x-content-type-options": "nosniff" });
+};
+// Admin may open a slip only while it is still waiting for confirmation (to check where it belongs).
+app.get("/api/admin/payslips/:id/pdf", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const row = id ? await c.env.DB.prepare("SELECT filename, content_b64 FROM payslips WHERE id = ? AND status = 'review'").bind(id).first<{ filename: string; content_b64: string }>() : null;
+  return row ? pdfResponse(c, row.filename, row.content_b64) : c.json({ error: "not_found" }, 404);
+});
+
+// Employees: only their own, only once assigned.
+app.get("/api/payslips", async (c) => {
+  const rows = await c.env.DB.prepare("SELECT id, filename, period_label, pay_date, size FROM payslips WHERE staff_id = ? AND status = 'assigned' ORDER BY COALESCE(pay_date, '') DESC, id DESC").bind(c.get("me").id).all();
+  return c.json(rows.results);
+});
+app.get("/api/payslips/:id/pdf", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const row = id ? await c.env.DB.prepare("SELECT filename, content_b64 FROM payslips WHERE id = ? AND staff_id = ? AND status = 'assigned'").bind(id, c.get("me").id).first<{ filename: string; content_b64: string }>() : null;
+  return row ? pdfResponse(c, row.filename, row.content_b64) : c.json({ error: "not_found" }, 404);
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
@@ -843,7 +955,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3 FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),

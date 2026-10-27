@@ -354,3 +354,9 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 .tw-slot{white-space:nowrap;padding:0 8px;background:#faf8f5;font-size:.85rem}
 .tw td input{width:100%;min-width:44px;text-align:center;border:0;background:transparent;font:inherit;padding:8px 2px}
 .tw td input:focus{outline:2px solid #da291c;background:#fff}
+
+.slip{border:1px solid #e3dfd9;border-radius:12px;padding:12px;margin:10px 0;display:grid;gap:6px;background:#fff}
+.slip.sure{border-color:#9bd3a7}.slip.check{border-color:#f0c36d}.slip .ok-line{color:#237a35;font-weight:700}.slip .warn{color:#8a5a00;font-weight:700}
+.slip .actions{display:flex;gap:8px;flex-wrap:wrap}.slip .actions select{flex:1;min-width:160px}
+.log{display:grid;gap:6px}.log-row{display:flex;flex-direction:column;gap:2px;padding:8px;border:1px solid #eee;border-radius:10px;text-decoration:none;color:inherit}
+.check{display:flex;gap:8px;align-items:center}

@@ -626,6 +626,10 @@ async function renderAccount() {
     ] : [h("button", { class: "btn primary", type: "button", onClick: async () => drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url) }, t("createLink"))]));
   };
   drawCal(acc.calendar_url);
+  const slipsBox = h("div", {}, h("p", { class: "meta" }, t("loading")));
+  api("/payslips").then((rows) => slipsBox.replaceChildren(rows.length ? h("div", { class: "log" }, rows.map((r) =>
+    h("a", { class: "log-row slip-link", href: `/api/payslips/${r.id}/pdf`, target: "_blank", rel: "noopener" }, h("span", {}, r.pay_date ?? r.filename), h("span", { class: "meta" }, `${r.period_label ?? ""} · PDF`)))) : h("p", { class: "meta" }, t("noPayslips"))))
+    .catch(() => slipsBox.replaceChildren(h("p", { class: "meta" }, t("genericError"))));
   $app.replaceChildren(h("div", { class: "account" },
     h("h2", {}, t("account")),
     h("section", { class: "panel" }, h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
@@ -635,6 +639,7 @@ async function renderAccount() {
         h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
         h("button", { class: "btn primary", type: "submit" }, t("save")))),
     h("section", { class: "panel" }, h("h3", {}, t("calendarTitle")), h("p", { class: "meta" }, t("calendarHelp")), calBox),
+    h("section", { class: "panel" }, h("h3", {}, t("myPayslips")), slipsBox),
     h("section", { class: "panel" }, h("h3", {}, t("passwordTitle")), h("p", { class: "meta" }, t("passwordHelp")))));
 }
 
@@ -659,7 +664,128 @@ async function renderMine() {
 }
 
 // ---------- admin ----------
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"]];
+// ---------- Administration: messaging connections, replacement settings, message log ----------
+function messagingPanel() {
+  const box = h("section", { class: "panel" });
+  async function load() {
+    const c = await api("/connections");
+    const sid = h("input", { placeholder: "ACxxxxxxxx…", autocomplete: "off" });
+    const token = h("input", { type: "password", placeholder: c.sms.configured ? t("keepSaved") : "", autocomplete: "new-password" });
+    const from = h("input", { type: "tel", value: c.sms.from ?? "", placeholder: "+18195551234" });
+    const host = h("input", { value: c.email.host ?? "", placeholder: "smtp.gmail.com" });
+    const port = h("input", { type: "number", value: c.email.port ?? "", placeholder: "465" });
+    const secure = h("select", {}, [["implicit", "SSL/TLS (465)"], ["starttls", "STARTTLS (587)"], ["none", t("noEncryption")]].map(([v, l]) => h("option", { value: v, selected: (c.email.secure ?? "implicit") === v }, l)));
+    const user = h("input", { value: c.email.user ?? "", autocomplete: "off" });
+    const pass = h("input", { type: "password", placeholder: c.email.configured ? t("keepSaved") : "", autocomplete: "new-password" });
+    const mailFrom = h("input", { type: "email", value: c.email.from ?? "", placeholder: "horaire@example.com" });
+    const saveSms = async (e) => { e.preventDefault(); try { await api("/connections", { method: "PUT", body: { twilio: { sid: sid.value.trim() || undefined, token: token.value || undefined, from: from.value.trim() || undefined } } }); toast(t("saved")); load(); } catch (err) { toast(errorText(err)); } };
+    const saveMail = async (e) => { e.preventDefault(); try { await api("/connections", { method: "PUT", body: { smtp: { host: host.value.trim() || undefined, port: port.value ? Number(port.value) : undefined, secure: secure.value, user: user.value, pass: pass.value || undefined, from: mailFrom.value.trim() || undefined } } }); toast(t("saved")); load(); } catch (err) { toast(errorText(err)); } };
+    const testTo = h("input", { placeholder: t("testTo") });
+    const test = async (channel) => { try { const r = await api("/connections/test", { method: "POST", body: { channel, to: testTo.value } }); toast(r.ok ? t("testSent") : `${t("testFailed")}: ${r.error ?? ""}`); } catch (err) { toast(errorText(err)); } };
+    const badge = (ok) => h("span", { class: `badge ${ok ? "edit" : ""}` }, ok ? t("connected") : t("notConnected"));
+    box.replaceChildren(
+      h("h2", {}, t("adminMessaging")), h("p", { class: "meta" }, t("messagingHelp")),
+      h("h3", {}, "SMS (Twilio) ", badge(c.sms.configured)),
+      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: saveSms },
+        h("label", { class: "field" }, h("span", {}, "Account SID"), sid, c.sms.sid_hint ? h("span", { class: "meta" }, `${t("saved")}: ${c.sms.sid_hint}`) : null),
+        h("label", { class: "field" }, h("span", {}, "Auth Token"), token),
+        h("label", { class: "field" }, h("span", {}, t("twilioFrom")), from),
+        h("button", { class: "btn primary", type: "submit" }, t("save"))),
+      h("p", { class: "meta" }, `${t("twilioWebhook")}: ${(c.app_url ?? location.origin)}/hooks/twilio`),
+      h("h3", {}, `${t("emailCh")} (SMTP) `, badge(c.email.configured)),
+      h("p", { class: "meta" }, t("gmailHelp")),
+      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: saveMail },
+        h("label", { class: "field" }, h("span", {}, t("smtpServer")), host), h("label", { class: "field" }, h("span", {}, "Port"), port),
+        h("label", { class: "field" }, h("span", {}, t("smtpSecurity")), secure), h("label", { class: "field" }, h("span", {}, t("smtpUser")), user),
+        h("label", { class: "field" }, h("span", {}, t("smtpPass")), pass), h("label", { class: "field" }, h("span", {}, t("smtpFrom")), mailFrom),
+        h("button", { class: "btn primary", type: "submit" }, t("save"))),
+      h("h3", {}, t("sendTest")),
+      h("div", { class: "inline-form", style: "grid-template-columns:1fr" }, h("label", { class: "field" }, h("span", {}, t("testTo")), testTo),
+        h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => test("sms") }, t("testSms")), h("button", { class: "btn", type: "button", onClick: () => test("email") }, t("testEmail")))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
+function settingsPanel() {
+  const box = h("section", { class: "panel" });
+  async function load() {
+    const st = await api("/settings");
+    const ot = h("input", { type: "number", min: 1, max: 168, value: st.overtime_hours });
+    const to = h("input", { type: "number", min: 1, max: 1440, value: st.sick_timeout_minutes });
+    const allow = h("input", { type: "checkbox", checked: !!st.replacement_allow_overtime });
+    box.replaceChildren(h("h2", {}, t("sickSettings")),
+      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
+        e.preventDefault();
+        try { await api("/settings", { method: "PUT", body: { overtime_hours: Number(ot.value), sick_timeout_minutes: Number(to.value), replacement_allow_overtime: allow.checked } }); toast(t("saved")); } catch (err) { toast(errorText(err)); }
+      } },
+        h("label", { class: "field" }, h("span", {}, t("overtimeHours")), ot),
+        h("label", { class: "field" }, h("span", {}, t("sickTimeout")), to, h("span", { class: "meta" }, t("sickTimeoutHelp"))),
+        h("label", { class: "check" }, allow, h("span", {}, t("allowOvertimeReplacement"))),
+        h("button", { class: "btn primary", type: "submit" }, t("save"))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
+function messageLogPanel() {
+  const box = h("section", { class: "panel" });
+  api("/admin/notifications").then((rows) => {
+    box.replaceChildren(h("h2", {}, t("messageLog")), rows.length ? h("div", { class: "log" }, rows.map((r) =>
+      h("div", { class: "log-row" }, h("span", { class: "meta" }, `${new Date(r.created_at).toLocaleString(locale())} · ${r.channel.toUpperCase()} · ${r.kind}`),
+        h("span", {}, `${r.staff_name ?? r.to_addr} — ${r.status}${r.error ? ` (${r.error})` : ""}`)))) : h("div", { class: "empty" }, t("noMessages")));
+  }).catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
+// ---------- Administration: pay slips (batch upload, AI reading, confirmation) ----------
+function payslipsAdminPanel(ov) {
+  const box = h("section", { class: "panel" });
+  const status = h("p", { class: "meta", role: "status" });
+  async function load() {
+    const [setup, rows] = await Promise.all([api("/admin/payslip-setup"), api("/admin/payslips")]);
+    const files = h("input", { type: "file", accept: "application/pdf", multiple: true, onChange: async () => {
+      const list = [...files.files]; let done = 0;
+      for (const f of list) {
+        status.textContent = `${t("uploading")} ${done + 1}/${list.length} — ${f.name}`;
+        try {
+          const res = await fetch("/api/admin/payslips", { method: "POST", headers: { "content-type": "application/pdf", "X-Filename": encodeURIComponent(f.name) }, body: f });
+          if (!res.ok) { const b = await res.json().catch(() => ({})); toast(`${f.name}: ${b.error === "file_too_large" ? t("fileTooLarge") : b.error === "not_a_pdf" ? t("notPdf") : t("genericError")}`); }
+        } catch { toast(`${f.name}: ${t("genericError")}`); }
+        done++;
+      }
+      status.textContent = ""; files.value = ""; load();
+    } });
+    const key = h("input", { type: "password", placeholder: setup.ai_configured ? t("keepSaved") : "sk-ant-…", autocomplete: "new-password" });
+    const staffOpts = (sel) => [h("option", { value: "" }, t("chooseEmployee")), ...ov.staff.map((s) => h("option", { value: s.id, selected: s.id === sel }, s.name))];
+    const rowsUi = rows.map((r) => {
+      const pick = h("select", {}, staffOpts(r.suggested_staff_id));
+      const sinOk = r.match_kind === "sin";
+      return h("div", { class: `slip ${sinOk ? "sure" : "check"}` },
+        h("div", {}, h("a", { href: `/api/admin/payslips/${r.id}/pdf`, target: "_blank", rel: "noopener" }, r.filename),
+          h("div", { class: "meta" }, [r.period_label, r.pay_date, `${Math.round(r.size / 1024)} KB`].filter(Boolean).join(" · "))),
+        h("div", { class: "meta" }, `${t("readName")}: ${r.extracted_name ?? "—"}${r.extracted_last3 ? ` · SIN …${r.extracted_last3}` : ""}`),
+        h("div", { class: sinOk ? "ok-line" : "warn" }, sinOk ? `✔ ${t("matchedBySin")} (${r.suggested_name}, …${r.suggested_last3})` : r.match_kind === "name" ? `⚠ ${t("matchedByName")}` : `⚠ ${t("noMatch")}`),
+        h("div", { class: "actions" }, pick,
+          h("button", { class: "btn primary", type: "button", onClick: async () => { if (!pick.value) return toast(t("chooseEmployee")); try { await api(`/admin/payslips/${r.id}/assign`, { method: "POST", body: { staff_id: Number(pick.value) } }); load(); } catch (e) { toast(errorText(e)); } } }, t("confirm")),
+          h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmDeleteSlip"))) { await api(`/admin/payslips/${r.id}`, { method: "DELETE" }); load(); } } }, t("delete"))));
+    });
+    const sure = rows.filter((r) => r.match_kind === "sin");
+    box.replaceChildren(
+      h("h2", {}, t("adminPayslips")), h("p", { class: "meta" }, t("payslipsHelp")),
+      h("p", {}, h("span", { class: `badge ${setup.ai_configured ? "edit" : ""}` }, setup.ai_configured ? t("aiReady") : t("aiMissing"))),
+      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => { e.preventDefault(); try { await api("/admin/payslip-setup", { method: "PUT", body: { anthropic_key: key.value || null } }); toast(t("saved")); load(); } catch (err) { toast(err.body?.error === "invalid_key" ? t("genericError") : errorText(err)); } } },
+        h("label", { class: "field" }, h("span", {}, t("anthropicKey")), key, h("span", { class: "meta" }, t("anthropicHelp"))), h("button", { class: "btn", type: "submit" }, t("save"))),
+      h("label", { class: "field" }, h("span", {}, t("uploadPayslips")), files, h("span", { class: "meta" }, t("payslipLimit"))), status,
+      sure.length > 1 ? h("button", { class: "btn primary", type: "button", onClick: async () => { for (const r of sure) await api(`/admin/payslips/${r.id}/assign`, { method: "POST", body: { staff_id: r.suggested_staff_id } }).catch(() => {}); load(); } }, `${t("confirmAllSin")} (${sure.length})`) : null,
+      h("h3", {}, `${t("toConfirm")} (${rows.length})`), rows.length ? rowsUi : h("div", { class: "empty" }, t("nothingToConfirm")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
+const ADMIN_SECTIONS_MARK = 0;
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -691,6 +817,8 @@ async function renderAdmin() {
     restaurants: () => [restaurantsPanel, hoursPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffList],
+    messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
+    payslips: () => [payslipsAdminPanel(ov)],
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, ADMIN_SECTIONS.map(([id, label]) =>
     h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
@@ -1081,6 +1209,7 @@ function staffCard(s, ov) {
     const cents = s.role_rates?.[rid];
     return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("sameAsGeneral"), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
   }).filter((x) => x.ro);
+  const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
   const refreshAvatars = () => {
@@ -1118,13 +1247,16 @@ function staffCard(s, ov) {
     try {
       await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
-      s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates; toast(t("saved"));
-    } catch (err) { toast(err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
+      s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
+      if (sinInput.value.trim()) { const r = await api(`/staff/${s.id}/sin`, { method: "PUT", body: { sin: sinInput.value } }); s.sin_last3 = r.sin_last3; sinInput.value = ""; sinInput.placeholder = `••• ••• ${r.sin_last3}`; }
+      toast(t("saved"));
+    } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
     h("label", { class: "field" }, h("span", {}, t("name")), name), h("label", { class: "field" }, h("span", {}, t("email")), email),
     h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
+    h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
       h("label", { class: "role-rate" }, h("span", {}, roleName(x.ro)), x.input))) : null,
     photoRow,
