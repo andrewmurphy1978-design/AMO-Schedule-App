@@ -36,3 +36,12 @@ or stay hosted on andrewmurphy.online. One client may own several restaurants.
 - Cloudflare Access application protecting the hostname; set secrets ACCESS_TEAM_DOMAIN, ACCESS_AUD, ADMIN_EMAIL.
 - Never set DEV_MODE outside `.dev.vars`.
 - Deploy command: `npm run deploy` (applies D1 migrations, then `wrangler deploy`).
+
+## Future: native iPhone / Android app
+The web UI is a thin client over `/api/*`; a native app (e.g. Capacitor wrapping this UI, or React Native)
+reuses the same API and database. Before that: add token-based login suited to native apps (Cloudflare Access
+is browser-oriented), and push notifications (APNs/FCM) alongside SMS/email. Keep all business rules in the API.
+
+## Brand
+Colours/wordmark follow toujoursmikes.ca (red `#da291c`, condensed bold headings). To use the official logo,
+add `public/logo.png` (or .svg and update `index.html`); the text wordmark is the fallback.

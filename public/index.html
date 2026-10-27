@@ -2,13 +2,29 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AMO Horaire</title>
-  <script src="i18n.js" defer></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#da291c">
+  <title>Mikes · Horaire</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&display=swap">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
 </head>
 <body>
-  <button id="lang-toggle" data-i18n="lang">English</button>
-  <h1 data-i18n="heading">AMO Horaire</h1>
-  <p data-i18n="status">Déploiement réussi 🎉</p>
+  <div class="strip">
+    <span id="brand-sub"></span>
+    <button id="lang-toggle" class="chip" type="button"></button>
+  </div>
+  <header class="topbar">
+    <div class="brand">
+      <!-- Drop the official logo at public/logo.png (or logo.svg + update src) to replace the text wordmark. -->
+      <img id="logo" src="logo.png" alt="Toujours Mikes" height="52" onerror="this.hidden=true;document.getElementById('wordmark').hidden=false">
+      <span id="wordmark" class="wordmark" hidden>Mikes</span>
+    </div>
+  </header>
+  <nav class="tabs" id="main-tabs" aria-label="Navigation"></nav>
+  <main id="app" aria-live="polite"></main>
+  <footer class="footer" id="footer"></footer>
+  <dialog id="modal"></dialog>
 </body>
 </html>

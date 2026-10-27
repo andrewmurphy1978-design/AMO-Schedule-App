@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { ensureMigrated } from "./migrate.ts";
 import { fetchAccessKeys, verifyAccessJwt } from "./access.ts";
 import { findOverlaps, SHIFT_TIME_RE } from "./conflicts.ts";
 import { weekBounds } from "./week.ts";
@@ -45,6 +46,7 @@ async function identify(c: Context<any>): Promise<string | null> {
 }
 
 app.use("/api/*", async (c, next) => {
+  await ensureMigrated(c.env.DB);
   const email = await identify(c);
   if (!email) return c.json({ error: "unauthenticated" }, 401);
   let row = await c.env.DB.prepare("SELECT id, name, email, is_admin FROM staff WHERE lower(email) = ?")
@@ -263,6 +265,65 @@ app.get("/api/my-shifts", async (c) => {
     .bind(c.get("me").id, bounds.start, bounds.end)
     .all();
   return c.json({ week: c.req.query("week"), shifts: r.results });
+});
+
+// ---------- Roster & admin overview ----------
+// Staff who can be scheduled on a given restaurant+department (managers/admin only).
+app.get("/api/roster", async (c) => {
+  const restaurantId = intParam(c.req.query("restaurant"));
+  const department = c.req.query("department");
+  if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
+  if (!(await canManage(c.env.DB, c.get("me"), restaurantId, department))) return c.json({ error: "forbidden" }, 403);
+  const rows = await c.env.DB.prepare(
+    `SELECT s.id AS staff_id, s.name, sr.role_id FROM staff_roles sr
+     JOIN staff s ON s.id = sr.staff_id JOIN roles ro ON ro.id = sr.role_id
+     WHERE sr.restaurant_id = ? AND ro.department_id = ? ORDER BY s.name`,
+  )
+    .bind(restaurantId, department)
+    .all<{ staff_id: number; name: string; role_id: number }>();
+  const byStaff = new Map<number, { staff_id: number; name: string; role_ids: number[] }>();
+  for (const r of rows.results) {
+    const e = byStaff.get(r.staff_id) ?? { staff_id: r.staff_id, name: r.name, role_ids: [] };
+    e.role_ids.push(r.role_id);
+    byStaff.set(r.staff_id, e);
+  }
+  return c.json([...byStaff.values()]);
+});
+
+app.get("/api/admin/overview", requireAdmin, async (c) => {
+  const db = c.env.DB;
+  const [staff, roles, managers, restaurants] = await Promise.all([
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel FROM staff ORDER BY name").all(),
+    db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
+    db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
+    db.prepare("SELECT id, name FROM restaurants ORDER BY name").all(),
+  ]);
+  return c.json({
+    restaurants: restaurants.results,
+    staff: (staff.results as any[]).map((s) => ({
+      ...s,
+      is_admin: s.is_admin === 1,
+      roles: roles.results.filter((r) => r.staff_id === s.id),
+      managers: managers.results.filter((m) => m.staff_id === s.id),
+    })),
+  });
+});
+
+app.put("/api/staff/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const b = await c.req.json<{ name?: string; email?: string; phone?: string; lang?: string; notify_channel?: string }>();
+  if (!b.name?.trim()) return c.json({ error: "name_required" }, 400);
+  const lang = b.lang === "en" ? "en" : "fr";
+  const channel = b.notify_channel === "email" ? "email" : "sms";
+  try {
+    await c.env.DB.prepare("UPDATE staff SET name=?, email=?, phone=?, lang=?, notify_channel=? WHERE id=?")
+      .bind(b.name.trim(), b.email?.trim().toLowerCase() || null, b.phone?.trim() || null, lang, channel, id)
+      .run();
+  } catch {
+    return c.json({ error: "email_taken" }, 409);
+  }
+  return c.json({ ok: true });
 });
 
 // ---------- Shifts (edit) ----------
