@@ -186,11 +186,20 @@ app.put("/api/roles/:id/pre-open", requireAdmin, async (c) => {
 // Make someone an administrator (or remove it). The last administrator and yourself cannot be removed.
 app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
-  const { is_admin } = await c.req.json<{ is_admin?: boolean }>();
+  const { is_admin, email } = await c.req.json<{ is_admin?: boolean; email?: string }>();
   if (!id || typeof is_admin !== "boolean") return c.json({ error: "bad_request" }, 400);
   const person = await c.env.DB.prepare("SELECT email FROM staff WHERE id = ?").bind(id).first<{ email: string | null }>();
   if (!person) return c.json({ error: "not_found" }, 404);
-  if (is_admin && !person.email) return c.json({ error: "email_required" }, 422); // they sign in with their email
+  // The email typed on the card (not saved yet) can be sent along: they sign in with it.
+  const typed = email?.trim().toLowerCase();
+  if (is_admin && typed && typed !== person.email) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed)) return c.json({ error: "invalid_email" }, 400);
+    const taken = await c.env.DB.prepare("SELECT 1 FROM staff WHERE lower(email) = ? AND id != ?").bind(typed, id).first();
+    if (taken) return c.json({ error: "email_taken" }, 409);
+    await c.env.DB.prepare("UPDATE staff SET email = ? WHERE id = ?").bind(typed, id).run();
+    person.email = typed;
+  }
+  if (is_admin && !person.email) return c.json({ error: "email_required" }, 422);
   if (!is_admin) {
     if (id === c.get("me").id) return c.json({ error: "cannot_remove_self" }, 409);
     const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND id != ?").bind(id).first<{ n: number }>();

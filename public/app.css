@@ -391,3 +391,4 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .pay-num b,.pay-num small{display:block}
 .pay-num small{color:var(--muted,#666);font-weight:400}
 .pay-total{background:#faf3f2}
+.alert:empty{display:none}

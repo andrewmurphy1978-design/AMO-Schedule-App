@@ -1442,6 +1442,7 @@ function staffCard(s, ov) {
     const cents = s.role_rates?.[rid];
     return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: (() => { const dr = ov.default_rates?.roles?.[rid] ?? ov.default_rates?.general_cents; return dr != null ? `${t("defaultWord")} ${(dr / 100).toFixed(2)}` : t("sameAsGeneral"); })(), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
   }).filter((x) => x.ro);
+  const adminMsg = h("div", { class: "alert", role: "alert" });
   const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
@@ -1490,9 +1491,18 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.is_admin, onChange: async (e) => {
       const want = e.target.checked;
-      try { await api(`/staff/${s.id}/admin`, { method: "PUT", body: { is_admin: want } }); s.is_admin = want; toast(t("saved")); }
-      catch (err) { e.target.checked = !want; toast({ email_required: t("adminNeedsEmail"), cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err)); }
+      adminMsg.textContent = "";
+      try {
+        await api(`/staff/${s.id}/admin`, { method: "PUT", body: { is_admin: want, email: email.value } });
+        s.is_admin = want; s.email = email.value.trim().toLowerCase() || s.email; toast(t("saved"));
+      } catch (err) {
+        e.target.checked = !want;
+        // shown inside the dialog: a toast would be hidden behind it
+        adminMsg.textContent = { email_required: t("adminNeedsEmail"), invalid_email: t("invalidEmail"), email_taken: t("emailTaken"), cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err);
+        if (err.body?.error === "email_required") email.focus();
+      }
     } }), h("span", {}, t("isAdminLabel"))),
+    adminMsg,
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
