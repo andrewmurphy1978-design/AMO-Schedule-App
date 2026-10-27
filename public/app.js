@@ -1,6 +1,6 @@
 import { splitName, joinName, shortNames } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
-import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
+import { DEFAULT_BOUNDARIES, periodKeys, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
@@ -444,7 +444,14 @@ async function zoomTo(day) {
 }
 
 // ---------- coverage timeline (vertical) ----------
-const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^0/, ""));
+// Target periods of a restaurant: Open-8:00, 8:00-9:00 ... 20:00-Close (editable per restaurant).
+const boundsOf = (restaurantId, list = state.restaurants) => list?.find((r) => r.id === restaurantId)?.period_bounds ?? DEFAULT_BOUNDARIES;
+const hm = (x) => x.replace(/^0/, "");
+function periodLabel(boundaries, key) {
+  const keys = periodKeys(boundaries), i = keys.indexOf(key);
+  const next = i >= 0 && i + 1 < keys.length ? hm(keys[i + 1]) : t("closeSlot");
+  return `${key === "open" ? t("openSlot") : hm(key)}–${next}`;
+}
 const mqDesktop = window.matchMedia("(min-width: 900px)");
 mqDesktop.addEventListener("change", () => { if (state.me) render(); });
 
@@ -492,7 +499,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     }
     const openMin = toMin(openOf(sel.restaurant, (parseYmd(day).getDay() + 6) % 7));
     const closeMin = toMin(closeOf(sel.restaurant, dowOf(day)));
-    const wins = targetWindows(dayTargets, closeMin);
+    const wins = targetWindows(dayTargets, openMin, closeMin, boundsOf(sel.restaurant));
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
       .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
     const cost = payroll?.department.days.find((x) => x.date === day) ?? null;
@@ -744,24 +751,24 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     try { await api(`/shifts/${shift.id}`, { method: "DELETE" }); dlg.close(); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert" }, errorText(e))); }
   };
 
-  const form = h("form", { class: "modal-body", method: "dialog", onSubmit: (e) => { e.preventDefault(); save(false); } },
-    h("h2", {}, shift ? t("editShift") : t("addShift")),
+  // Sticky header: title and every button (the form fields scroll underneath). Save submits the form through the form= attribute.
+  const actions = h("div", { class: "dlg-actions wrap" },
+    shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn sm", type: "button", title: t("reportSick"), onClick: async () => { if (confirm(t("confirmSickFor"))) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST" }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
+    shift && state.me.me.is_admin ? h("button", { class: "btn sm", type: "button", onClick: async () => {
+      const list = await api("/admin/overview").then((o) => o.staff).catch(() => []);
+      dlg.close(); incidentDialog({ staffList: list, staffId: shift.staff_id, date: dayOf(shift.start_at), shift });
+    } }, t("recordIncident")) : null,
+    shift ? h("button", { class: "btn sm danger", type: "button", onClick: del }, t("delete")) : null,
+    h("button", { class: "btn sm", type: "button", onClick: () => dlg.close() }, t("cancel")),
+    h("button", { class: "btn sm primary", type: "submit", form: "shift-form" }, t("save")));
+  const form = h("form", { id: "shift-form", class: "modal-body shift-dialog", method: "dialog", onSubmit: (e) => { e.preventDefault(); save(false); } },
+    h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, shift ? t("editShift") : t("addShift")), actions), alertBox),
     h("label", { class: "field" }, h("span", {}, t("employee")), staffSel),
     h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox,
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),
     h("label", { class: "check" }, untilClose, t("untilClose")),
-    h("label", { class: "field" }, h("span", {}, t("notes")), notes),
-    alertBox,
-    h("div", { class: "actions" },
-      shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmSickFor"))) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST" }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
-      shift && state.me.me.is_admin ? h("button", { class: "btn", type: "button", onClick: async () => {
-        const list = await api("/admin/overview").then((o) => o.staff).catch(() => []);
-        dlg.close(); incidentDialog({ staffList: list, staffId: shift.staff_id, date: dayOf(shift.start_at), shift });
-      } }, t("recordIncident")) : null,
-      shift ? h("button", { class: "btn danger", type: "button", onClick: del }, t("delete")) : null,
-      h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")),
-      h("button", { class: "btn primary", type: "submit" }, t("save"))));
+    h("label", { class: "field" }, h("span", {}, t("notes")), notes));
   dlg.replaceChildren(form);
   dlg.showModal();
 }
@@ -1192,7 +1199,7 @@ async function renderAdmin() {
   const showInactive = inactiveCount ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!state.showInactive, onChange: (e) => { state.showInactive = e.target.checked; render(); } }), h("span", {}, `${t("showInactive")} (${inactiveCount})`)) : null;
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), periodsPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, showInactive, h("div", { class: state.showInactive ? "" : "hide-inactive" }, staffList)],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -1332,6 +1339,7 @@ function weeklyTargetsPanel(ov) {
       info[i].hol.map((x) => h("div", { class: `hol ${x.statutory ? "stat" : "spec"}`, title: x.statutory ? t("statutoryHoliday") : t("busyDay") }, `${x.statutory ? "🏛 " : "★ "}${lang === "fr" ? x.fr : x.en}`)),
       info[i].labels.length ? h("div", { class: "periods" }, info[i].labels.join(", ")) : null));
 
+    const bounds = boundsOf(st.restaurant, ov.restaurants), SLOTS = periodKeys(bounds), slotLabel = (k) => periodLabel(bounds, k);
     const body = SLOTS.map((slot) => h("tr", {},
       h("th", { class: "tw-slot" }, slotLabel(slot)),
       days.map((day, i) => {
@@ -1416,12 +1424,13 @@ function targetsPanel(ov) {
     const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
     const reload = () => load();
 
-    const slotInputs = SLOTS.map((slot) => {
+    const bounds2 = boundsOf(st.restaurant, ov.restaurants), SLOTS2 = periodKeys(bounds2), slotLabel2 = (k) => periodLabel(bounds2, k);
+    const slotInputs = SLOTS2.map((slot) => {
       const mine = own.find((r) => r.slot === slot)?.count;
       const dflt = fallback[slot];
       const input = h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: mine ?? "", placeholder: dflt !== undefined ? String(dflt) : "" });
       inputs[slot] = input;
-      return h("label", { class: "field" }, h("span", {}, slotLabel(slot)), input);
+      return h("label", { class: "field" }, h("span", {}, slotLabel2(slot)), input);
     });
     const saveTargets = async (slots) => {
       try { await api("/targets", { method: "PUT", body: { restaurant_id: st.restaurant, department_id: st.department, set_id: st.setId, dow: st.dow, slots } }); toast(t("saved")); reload(); }
@@ -1457,7 +1466,7 @@ function targetsPanel(ov) {
         st.dow !== -1 ? h("button", { class: "btn danger", type: "button", onClick: () => saveTargets({}) }, t("resetDay")) : null,
         h("button", { class: "btn primary", type: "button", onClick: () => {
           const slots = {};
-          for (const slot of SLOTS) if (inputs[slot].value !== "") slots[slot] = Number(inputs[slot].value);
+          for (const slot of SLOTS2) if (inputs[slot].value !== "") slots[slot] = Number(inputs[slot].value);
           saveTargets(slots);
         } }, t("save"))),
     ].filter(Boolean));
@@ -1471,6 +1480,41 @@ const thisMonday = () => mondayOf(new Date());
 function fromField() {
   const input = h("input", { type: "date", value: thisMonday() });
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
+}
+
+// The time periods of the staffing targets, per restaurant (Open-8:00, 8:00-9:00 ... 20:00-Close).
+function periodsPanel(ov) {
+  const st = { restaurant: ov.restaurants[0]?.id };
+  const box = h("section", { class: "panel" });
+  function draw() {
+    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
+    if (!resto) { box.replaceChildren(); return; }
+    let list = [...(resto.period_bounds ?? DEFAULT_BOUNDARIES)];
+    const paint = () => {
+      const fields = list.map((b, i) => { const f = timeField(b); f.addEventListener("change", () => { list[i] = f.value; showPreview(); }); return f; });
+      const preview = h("p", { class: "meta" });
+      const showPreview = () => { preview.textContent = periodKeys(list).map((k) => periodLabel(list, k)).join("  ·  "); };
+      showPreview();
+      box.replaceChildren(h("h2", {}, t("periodsTitle")), h("p", { class: "meta" }, t("periodsHelp")),
+        h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+        h("div", { class: "hours-table" }, h("div", { class: "hours-row" }, h("strong", {}, t("openSlot")), h("span", { class: "meta" }, t("firstPeriod"))),
+          fields.map((f, i) => h("div", { class: "hours-row" }, h("strong", {}, t("periodStarts")), f,
+            list.length > 1 ? h("button", { class: "btn danger", type: "button", onClick: () => { list.splice(i, 1); paint(); } }, t("delete")) : null))),
+        preview,
+        h("div", { class: "actions" },
+          list.length < 10 ? h("button", { class: "btn", type: "button", onClick: () => { const last = list[list.length - 1]; const m = Math.min(1380, toMin(last) + 60); list.push(fromMin(m)); paint(); } }, `+ ${t("addPeriod")}`) : null,
+          h("button", { class: "btn", type: "button", onClick: () => { list = [...DEFAULT_BOUNDARIES]; paint(); } }, t("defaultPeriods")),
+          h("button", { class: "btn primary", type: "button", onClick: async () => {
+            try {
+              await api(`/restaurants/${st.restaurant}/periods`, { method: "PUT", body: { boundaries: list } });
+              state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
+            } catch (e) { toast(e.body?.error === "invalid_periods" ? t("periodsInvalid") : errorText(e)); }
+          } }, t("save"))));
+    };
+    paint();
+  }
+  draw();
+  return box;
 }
 
 // Default hourly rates used when an employee has no rate of their own (Québec minimum wages).

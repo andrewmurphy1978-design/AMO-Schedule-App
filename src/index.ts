@@ -7,6 +7,8 @@ import { computeCosts, parseRate } from "./payroll.ts";
 import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
 import { normalizePhone } from "./phone.ts";
 // @ts-ignore plain JS module shared with the browser
+import { DEFAULT_BOUNDARIES, periodKeys, remapPeriods, validBoundaries } from "../public/coverage.js";
+// @ts-ignore plain JS module shared with the browser
 import { splitName, joinName } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
@@ -130,10 +132,15 @@ const requireAdmin = async (c: any, next: any) => {
 // Adds open_by_dow and close_by_dow (7 "HH:MM" values each, Monday..Sunday) to restaurant rows.
 async function withOpenHours<T extends { id: number; open_time: string; close_time: string }>(db: D1Database, rows: T[]) {
   const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null }>();
+  const bounds = new Map<number, string[]>();
+  for (const p of (await db.prepare("SELECT restaurant_id, boundaries FROM restaurant_periods").all<{ restaurant_id: number; boundaries: string }>()).results) {
+    try { const b = JSON.parse(p.boundaries); if (validBoundaries(b)) bounds.set(p.restaurant_id, b); } catch { /* default */ }
+  }
   return rows.map((r) => {
     const day = (d: number) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d);
     return {
       ...r,
+      period_bounds: bounds.get(r.id) ?? DEFAULT_BOUNDARIES,
       open_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.open_time ?? r.open_time),
       close_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.close_time ?? r.close_time),
     };
@@ -257,7 +264,11 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
 });
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-const SLOTS = ["06:30", "08:00", "09:00", "11:00", "14:00", "17:00", "close"];
+// Staffing-target period boundaries of a restaurant (see public/coverage.js).
+async function boundariesOf(db: D1Database, restaurantId: number): Promise<string[]> {
+  const r = await db.prepare("SELECT boundaries FROM restaurant_periods WHERE restaurant_id = ?").bind(restaurantId).first<{ boundaries: string }>();
+  try { const b = r ? JSON.parse(r.boundaries) : null; return validBoundaries(b) ? b : DEFAULT_BOUNDARIES; } catch { return DEFAULT_BOUNDARIES; }
+}
 
 // Opening and closing time per weekday (open_times / close_times = 7 values each, Monday..Sunday).
 // Legacy fields open_time / close_time set the same value for every day. Until-close shifts follow the closing time of their day.
@@ -312,7 +323,8 @@ app.put("/api/targets", async (c) => {
     if (!set) return c.json({ error: "set_not_found" }, 404);
   }
   const entries = Object.entries(b.slots ?? {});
-  for (const [slot, n] of entries) if (!SLOTS.includes(slot) || !Number.isInteger(n) || n < 0 || n > 99) return c.json({ error: "invalid_target" }, 400);
+  const validSlots: string[] = periodKeys(await boundariesOf(c.env.DB, b.restaurant_id));
+  for (const [slot, n] of entries) if (!validSlots.includes(slot) || !Number.isInteger(n) || n < 0 || n > 99) return c.json({ error: "invalid_target" }, 400);
   const db = c.env.DB;
   try {
     await db.batch([
@@ -324,6 +336,31 @@ app.put("/api/targets", async (c) => {
     return c.json({ error: "invalid_reference" }, 400);
   }
   return c.json({ ok: true });
+});
+
+// Change the staffing-target periods of one restaurant (admin). Existing targets are carried over to the new periods.
+app.put("/api/restaurants/:id/periods", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { boundaries } = await c.req.json<{ boundaries?: string[] }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!validBoundaries(boundaries)) return c.json({ error: "invalid_periods" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  const old = await boundariesOf(c.env.DB, id);
+  const rows = (await c.env.DB.prepare("SELECT department_id, set_id, dow, slot, count FROM staffing_targets WHERE restaurant_id = ?").bind(id).all<{ department_id: string; set_id: number; dow: number; slot: string; count: number }>()).results;
+  const groups = new Map<string, { department_id: string; set_id: number; dow: number; values: Record<string, number> }>();
+  for (const r of rows) {
+    const k = `${r.department_id}|${r.set_id}|${r.dow}`;
+    const g = groups.get(k) ?? { department_id: r.department_id, set_id: r.set_id, dow: r.dow, values: {} };
+    g.values[r.slot] = r.count; groups.set(k, g);
+  }
+  const stmts: D1PreparedStatement[] = [
+    c.env.DB.prepare("INSERT OR REPLACE INTO restaurant_periods (restaurant_id, boundaries) VALUES (?, ?)").bind(id, JSON.stringify(boundaries)),
+    c.env.DB.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ?").bind(id),
+  ];
+  for (const g of groups.values()) for (const [slot, n] of Object.entries(remapPeriods(old, boundaries, g.values) as Record<string, number>))
+    stmts.push(c.env.DB.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, set_id, dow, slot, count) VALUES (?, ?, ?, ?, ?, ?)").bind(id, g.department_id, g.set_id, g.dow, slot, n));
+  await c.env.DB.batch(stmts);
+  return c.json({ ok: true, boundaries });
 });
 
 // ---------- Seasons and special days ----------

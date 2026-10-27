@@ -1,8 +1,10 @@
 // Pure helpers for the staffing timeline. No DOM access, so they are unit-tested in Node.
 
-export const SLOTS = ["06:30", "08:00", "09:00", "11:00", "14:00", "17:00", "close"];
-// The 'close' target applies to the last hour before closing.
-export const CLOSE_WINDOW_MIN = 60;
+// Staffing-target periods. A restaurant has a list of boundaries (default below): the first period runs from opening to the first
+// boundary, each boundary starts the next period, and the last period runs to closing. A period is identified by its key:
+// "open" for the first one, otherwise its start time ("08:00", "12:00"...). Open-8:00, 8:00-9:00, 9:00-11:00, 11:00-12:00,
+// 12:00-14:00, 14:00-17:00, 17:00-20:00, 20:00-Close with the default boundaries.
+export const DEFAULT_BOUNDARIES = ["08:00", "09:00", "11:00", "12:00", "14:00", "17:00", "20:00"];
 
 export const toMin = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 export const fromMin = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
@@ -25,18 +27,43 @@ export function resolveTargets(rows, dow) {
   return out;
 }
 
-/** Windows [from, to) each carrying a target, from the resolved slot values. */
-export function targetWindows(targets, closeMin) {
-  const times = SLOTS.slice(0, -1).map(toMin);
-  const closeFrom = Math.max(closeMin - CLOSE_WINDOW_MIN, times[times.length - 1]);
-  const wins = [];
-  for (let i = 0; i < times.length; i++) {
-    const to = i + 1 < times.length ? times[i + 1] : closeFrom;
-    if (targets[SLOTS[i]] !== undefined && to > times[i]) wins.push({ from: times[i], to, count: targets[SLOTS[i]] });
-  }
-  if (targets.close !== undefined && closeMin > closeFrom) wins.push({ from: closeFrom, to: closeMin, count: targets.close });
-  return wins;
+/** Period keys of a boundary list: "open" then each boundary. */
+export const periodKeys = (boundaries = DEFAULT_BOUNDARIES) => ["open", ...boundaries];
+
+/** Periods of a day as [{ key, from, to }] in minutes, clipped to opening hours (periods that fall outside are dropped). */
+export function periodWindows(boundaries, openMin, closeMin) {
+  const keys = periodKeys(boundaries);
+  const out = [];
+  keys.forEach((key, i) => {
+    const from = Math.max(openMin, key === "open" ? openMin : toMin(key));
+    const to = Math.min(closeMin, i + 1 < keys.length ? toMin(keys[i + 1]) : closeMin);
+    if (to > from) out.push({ key, from, to });
+  });
+  return out;
 }
+
+/** Windows [from, to) each carrying a target, from the resolved period values. */
+export function targetWindows(targets, openMin, closeMin, boundaries = DEFAULT_BOUNDARIES) {
+  return periodWindows(boundaries, openMin, closeMin).filter((w) => targets[w.key] !== undefined).map((w) => ({ from: w.from, to: w.to, count: targets[w.key] }));
+}
+
+/**
+ * Re-key a {period: count} map when a restaurant changes its boundaries: each new period takes the value of the old period
+ * that covered its start time. Periods the old map did not cover stay empty.
+ */
+export function remapPeriods(oldBoundaries, newBoundaries, values) {
+  const oldKeys = periodKeys(oldBoundaries);
+  const out = {};
+  for (const key of periodKeys(newBoundaries)) {
+    let source = "open";
+    if (key !== "open") for (const k of oldKeys) if (k !== "open" && toMin(k) <= toMin(key)) source = k;
+    if (values[source] !== undefined) out[key] = values[source];
+  }
+  return out;
+}
+
+/** Valid boundary list: 1 to 10 times "HH:MM", strictly increasing. */
+export const validBoundaries = (b) => Array.isArray(b) && b.length >= 1 && b.length <= 10 && b.every((x) => /^([01]\d|2[0-3]):[0-5]\d$/.test(x)) && b.every((x, i) => i === 0 || b[i - 1] < x);
 
 export const targetAt = (wins, t) => wins.find((w) => t >= w.from && t < w.to)?.count;
 
