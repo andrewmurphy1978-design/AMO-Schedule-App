@@ -191,5 +191,9 @@ export function setLang(l) {
 export const t = (key) => dict[lang][key] ?? dict.fr[key] ?? key;
 export const locale = () => (lang === "fr" ? "fr-CA" : "en-CA");
 // Role names come from the API as name_fr / name_en.
+// One emoji per role (matched on the English role name); unknown roles fall back to their department's icon.
+const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤" };
+const DEPT_ICONS = { floor: "🍴", kitchen: "🍕", prep: "🔪", delivery: "🚗" };
+export const roleIcon = (r) => ROLE_ICONS[(r?.name_en ?? "").toLowerCase()] ?? DEPT_ICONS[r?.department_id] ?? "•";
 export const roleName = (r) => (lang === "fr" ? r.name_fr : r.name_en);
 document.documentElement.lang = lang;

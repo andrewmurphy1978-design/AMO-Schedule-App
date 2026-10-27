@@ -371,3 +371,6 @@ button.vtl-head.zoomable:hover::after { opacity: 1; }
 
 .badge.inc-no_call_no_show{background:#fde8e6;color:#b4160b}.badge.inc-late_arrival{background:#fff4d6;color:#8a5a00}.badge.inc-early_departure{background:#e7eefc;color:#1c4fa0}
 .log-row.inc{gap:4px}
+
+.role-icon{font-size:.95em;margin-left:4px;filter:drop-shadow(0 0 1px rgba(255,255,255,.7));flex:none}
+.vtl-bar.vertical .role-icon{margin:0 0 2px}

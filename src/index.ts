@@ -1011,7 +1011,7 @@ app.get("/api/schedule", async (c) => {
   if (!(await canView(c.env.DB, me, restaurantId, department))) return c.json({ error: "forbidden" }, 403);
 
   const shifts = await c.env.DB.prepare(
-    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.name_fr, ro.name_en,
+    `SELECT sh.id, sh.staff_id, s.name AS staff_name, s.color AS staff_color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, sh.role_id, ro.department_id, ro.name_fr, ro.name_en,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status, sh.replaced_staff_id,
             (SELECT name FROM staff WHERE id = sh.replaced_staff_id) AS replaced_name
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id

@@ -1,4 +1,4 @@
-import { t, getLang, setLang, locale, roleName } from "./i18n.js";
+import { t, getLang, setLang, locale, roleName, roleIcon } from "./i18n.js";
 import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
@@ -315,7 +315,7 @@ async function renderSchedule() {
       ? h("div", { class: "list" }, dayShifts.map((s) => {
           const sickDay = s.status === "sick_open";
           const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 40), s.staff_name),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")),
+            h("span", { class: "meta" }, [`${roleIcon(s)} ${roleName(s)}`, s.notes].filter(Boolean).join(" · ")),
             sickDay ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
             s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
           const cls = `card ${sickDay ? "sick" : ""}`;
@@ -369,7 +369,7 @@ async function renderSchedule() {
           offAt(id, d) ? offChip(offAt(id, d)) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleIcon(s)} ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -383,7 +383,7 @@ async function renderSchedule() {
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
-  $app.replaceChildren(...[controls, status, data.editable ? coveragePanel(render) : null, daytabs, daily, timeline, grid, fab].filter(Boolean));
+  $app.replaceChildren(...[controls, status, data.editable ? coveragePanel(render) : null, daytabs, timeline, daily, grid, fab].filter(Boolean));
 }
 
 
@@ -481,17 +481,19 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
         class: `vtl-bar ${wide ? "" : "vertical"} ${x.s.status === "sick_open" ? "sick" : ""}`,
-        title: `${x.s.staff_name} · ${range} · ${roleName(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
+        title: `${roleIcon(x.s)} ${x.s.staff_name} · ${range} · ${roleName(x.s)}${x.s.status === "sick_open" ? ` · ${t("sickOpen")}` : ""}`,
         style: `top:${y(x.from)}px;height:${height}px;left:${(x.lane / lanes) * 100}%;width:${100 / lanes}%;background:${fill};color:${textOn(color)}`,
       };
       // Picture size follows the room available in this lane; skip it on very short bars.
       const size = Math.max(14, Math.min(zoom ? 44 : 30, Math.floor(laneArea / lanes) - 6));
       const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
+      // Role icon (plate = dishwasher, pizza = cook, car = delivery, knife = prep…); the full name is in the tooltip.
+      const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, roleIcon({ ...x.s, department_id: x.s.department_id }));
       const body = zoom
-        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
+        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), `${range} · ${roleName(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
-        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name), range]
-        : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`)];
+        ? [h("b", { class: "bar-name" }, pic, x.s.staff_name, icon), range]
+        : [pic, h("span", { class: "bar-text" }, `${x.s.staff_name} ${range}`), icon];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
     });
     const shade = (from, to) => (to > from ? h("div", { class: "vtl-closed", title: t("beforeOpen"), style: `top:${y(from)}px;height:${y(to) - y(from)}px` }) : null);
@@ -1416,7 +1418,7 @@ function staffCard(s, ov) {
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
-      h("label", { class: "role-rate" }, h("span", {}, roleName(x.ro)), x.input))) : null,
+      h("label", { class: "role-rate" }, h("span", {}, `${roleIcon(x.ro)} ${roleName(x.ro)}`), x.input))) : null,
     photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches),
     h("button", { class: "btn primary", type: "submit" }, t("save")));
@@ -1445,7 +1447,7 @@ function staffCard(s, ov) {
                 removeRole(body, ro, input, () => { s.roles = s.roles.filter((x) => !(x.restaurant_id === r.id && x.role_id === ro.id)); });
               }
             });
-            return h("label", { class: "check" }, input, roleName(ro));
+            return h("label", { class: "check" }, input, `${roleIcon(ro)} ${roleName(ro)}`);
           }),
           (() => {
             const body = { staff_id: s.id, restaurant_id: r.id, department_id: d };
