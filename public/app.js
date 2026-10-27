@@ -1,7 +1,7 @@
 import { t, getLang, setLang, locale, roleName } from "./i18n.js";
 import { SLOTS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, SPECIAL_PRESETS, SEASON_PRESETS } from "./rules.js";
-import { staffColor, textOn, SWATCHES } from "./colors.js";
+import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
 // ---------- helpers ----------
 function h(tag, attrs = {}, ...kids) {
@@ -147,6 +147,7 @@ function renderChrome() {
 async function render() {
   renderChrome();
   try {
+    setStaffOrder(await api("/staff-order").catch(() => []));
     // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
     if (state.view !== "admin") {
       [state.me, state.restaurants] = await Promise.all([api("/me"), api("/restaurants")]);

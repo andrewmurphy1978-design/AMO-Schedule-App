@@ -140,6 +140,9 @@ async function loadSettings(db: D1Database): Promise<Settings> {
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
 
 // ---------- Me ----------
+// Ids of all employees (no names): the browser ranks them to give everyone a distinct automatic colour.
+app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT id FROM staff ORDER BY id").all<{ id: number }>()).results.map((r) => r.id)));
+
 app.get("/api/me", async (c) => {
   const me = c.get("me");
   const db = c.env.DB;

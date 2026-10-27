@@ -15,22 +15,21 @@ export const contrast = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) 
 
 
 /**
- * Automatic colours come first from a hand-picked palette that mixes hue AND lightness (dark, vivid and light
- * colours) and is ordered so that consecutive ids are far apart on the colour wheel. Beyond the palette,
- * golden-angle hues are used, lightness alternating, always readable with white or dark text.
+ * Automatic colours: a palette chosen by farthest-point sampling in Lab colour space, so any two entries are
+ * clearly different (dark, vivid and light, each readable with white or dark text). Each employee gets the colour
+ * at their rank among all employees (see setStaffOrder), so nobody on the same schedule shares a colour until
+ * there are more employees than palette entries.
  */
-export const PALETTE = [
-  "#c92a2a", "#1971c2", "#237a35", "#9c36b5", "#e8590c", "#0b7285", "#c2255c", "#5f3dc4",
-  "#ffd43b", "#364fc7", "#69db7c", "#7f4f24", "#66d9e8", "#a61e4d", "#527f0b", "#da77f2",
-  "#087f5b", "#ffa8a8", "#862e9c", "#74c0fc", "#8f6a00", "#495057",
-];
+export const PALETTE = ["#c22929", "#1ded1d", "#1d1ded", "#1dc3ed", "#edc31d", "#141b5d", "#145d1b", "#f155d2", "#ddaca6", "#39efb8", "#51291f", "#8e8ef6", "#daea9a", "#085568", "#a0650d", "#840b54", "#89bd0f", "#650da0", "#f47198", "#a6ddcd", "#1d5bed", "#0da039", "#a6acdd", "#829438", "#ea9ae2", "#0da083", "#ed701d", "#f4b371", "#0f77bd", "#ae1ded"];
+let order = new Map();
+/** Remember every employee id (sorted) so the colour follows a stable rank instead of the raw id. */
+export function setStaffOrder(ids) { order = new Map([...ids].sort((a, b) => a - b).map((id, i) => [id, i])); }
 export function defaultColor(id) {
-  if (id >= 1 && id <= PALETTE.length) return PALETTE[id - 1];
-  const n = id - PALETTE.length;
+  const rank = order.has(id) ? order.get(id) : id - 1;
+  if (rank >= 0 && rank < PALETTE.length) return PALETTE[rank];
+  const n = rank - PALETTE.length;
   const hue = (n * 137.508 + 20) % 360;
-  if (n % 2 === 0) { // light variant (dark text)
-    return hslToHex(hue, 70, 72);
-  }
+  if (n % 2 === 0) return hslToHex(hue, 70, 72);
   for (let l = 42; l >= 20; l--) {
     const hex = hslToHex(hue, 62, l);
     if (contrast(hex, "#ffffff") >= 4.6) return hex;
