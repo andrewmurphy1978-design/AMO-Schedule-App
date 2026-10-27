@@ -110,7 +110,7 @@ function errorText(e) {
 // ---------- state ----------
 const state = {
   me: null, restaurants: [], roles: [], view: "schedule",
-  sel: { restaurant: null, department: null, week: mondayOf(new Date()), day: ymd(new Date()) },
+  sel: { restaurant: null, department: null, departments: [], week: mondayOf(new Date()), day: ymd(new Date()) },
 };
 
 const DEPTS = ["floor", "kitchen", "prep", "delivery"];
@@ -166,13 +166,50 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 });
 
 // ---------- schedule ----------
+function mergeSchedules(datas, restaurantId, depts) {
+  if (datas.length === 1) return datas[0];
+  const seen = new Set();
+  const shifts = datas.flatMap((d) => d.shifts).filter((x) => !seen.has(x.id) && seen.add(x.id))
+    .sort((a, b) => (a.start_at < b.start_at ? -1 : a.start_at > b.start_at ? 1 : a.staff_name.localeCompare(b.staff_name)));
+  const hours = Object.assign({}, ...datas.map((d) => d.hours));
+  // "Working elsewhere" must not list shifts that are visible on this very screen.
+  const key = new Set();
+  const elsewhere = datas.flatMap((d) => d.elsewhere ?? [])
+    .filter((e) => !(e.restaurant_id === restaurantId && depts.includes(e.department_id)))
+    .filter((e) => { const k = `${e.staff_id}|${e.start_at}|${e.end_at}`; return !key.has(k) && key.add(k); });
+  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere };
+}
+function mergeRosters(rosters) {
+  const by = new Map();
+  for (const r of rosters.flat()) {
+    const e = by.get(r.staff_id);
+    if (e) e.role_ids = [...new Set([...e.role_ids, ...r.role_ids])]; else by.set(r.staff_id, { ...r, role_ids: [...r.role_ids] });
+  }
+  return [...by.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+function mergePayrolls(list) {
+  const ok = list.filter(Boolean);
+  if (!ok.length) return null;
+  if (ok.length === 1) return ok[0];
+  const days = ok[0].department.days.map((d, i) => ({
+    date: d.date,
+    cents: ok.reduce((n, p) => n + p.department.days[i].cents, 0),
+    hours: ok.reduce((n, p) => n + p.department.days[i].hours, 0),
+    by_hour: d.by_hour.map((_, h) => ok.reduce((n, p) => n + p.department.days[i].by_hour[h], 0)),
+  }));
+  return { ...ok[0], department: { ...ok[0].department, days,
+    total_cents: ok.reduce((n, p) => n + p.department.total_cents, 0),
+    total_hours: ok.reduce((n, p) => n + p.department.total_hours, 0) } };
+}
 function pickDefaults() {
   const sel = state.sel;
   const options = state.restaurants.filter((r) => allowedDepartments(r.id).length);
   if (!options.length) return false;
   if (!options.some((r) => r.id === sel.restaurant)) sel.restaurant = options[0].id;
   const depts = allowedDepartments(sel.restaurant);
-  if (!depts.includes(sel.department)) sel.department = depts[0];
+  sel.departments = (sel.departments ?? []).filter((d) => depts.includes(d));
+  if (!sel.departments.length) sel.departments = [depts.includes(sel.department) ? sel.department : depts[0]];
+  sel.department = sel.departments[0];
   return options;
 }
 
@@ -180,15 +217,19 @@ async function renderSchedule() {
   const options = pickDefaults();
   if (!options) { $app.replaceChildren(h("div", { class: "empty" }, t("noSchedules"))); return; }
   const sel = state.sel;
-  const q = `restaurant=${sel.restaurant}&department=${sel.department}&week=${sel.week}`;
-  const data = await api(`/schedule?${q}`);
-  const roster = data.editable ? await api(`/roster?restaurant=${sel.restaurant}&department=${sel.department}`) : [];
+  // Several departments can be shown together (e.g. Kitchen + Dish/Prep): fetch each one and merge.
+  const depts = sel.departments;
+  const q = (d) => `restaurant=${sel.restaurant}&department=${d}&week=${sel.week}`;
+  const datas = await Promise.all(depts.map((d) => api(`/schedule?${q(d)}`)));
+  const data = mergeSchedules(datas, sel.restaurant, depts);
+  const rosters = await Promise.all(depts.map(async (d, i) => (datas[i].editable ? api(`/roster?restaurant=${sel.restaurant}&department=${d}`) : [])));
+  const roster = mergeRosters(rosters);
   // Labour cost: only requested for admins; the server refuses everyone else.
   const payrollReq = state.me.me.is_admin
-    ? api(`/admin/payroll?restaurant=${sel.restaurant}&department=${sel.department}&week=${sel.week}`).catch(() => null)
+    ? Promise.all(depts.map((d) => api(`/admin/payroll?${q(d)}`).catch(() => null))).then(mergePayrolls)
     : Promise.resolve(null);
   const [targets, sets, payroll] = await Promise.all([
-    api(`/targets?restaurant=${sel.restaurant}&department=${sel.department}`),
+    Promise.all(depts.map(async (d) => (await api(`/targets?restaurant=${sel.restaurant}&department=${d}`)).map((r) => ({ ...r, department_id: d })))).then((x) => x.flat()),
     api(`/target-sets?restaurant=${sel.restaurant}`),
     payrollReq,
   ]);
@@ -203,7 +244,13 @@ async function renderSchedule() {
         options.map((r) => h("option", { value: r.id, selected: r.id === sel.restaurant }, r.name)))),
     h("div", { class: "field" }, h("span", {}, t("department")),
       h("div", { class: "seg" }, allowedDepartments(sel.restaurant).map((d) =>
-        h("button", { type: "button", "aria-pressed": String(d === sel.department), onClick: () => { sel.department = d; render(); } }, t(`dept.${d}`))))),
+        h("button", { type: "button", "aria-pressed": String(sel.departments.includes(d)), onClick: () => {
+          // Toggle: tap several to show them together; at least one stays selected.
+          const on = sel.departments.includes(d);
+          if (on && sel.departments.length === 1) return;
+          sel.departments = on ? sel.departments.filter((x) => x !== d) : DEPTS.filter((x) => x === d || sel.departments.includes(x));
+          sel.department = sel.departments[0]; render();
+        } }, t(`dept.${d}`))))),
     h("div", { class: "field" }, h("span", {}, t("week")),
       h("div", { class: "weeknav" },
         h("button", { class: "icon-btn", type: "button", "aria-label": t("prev"), onClick: () => { sel.week = addDays(sel.week, -7); sel.day = sel.week; render(); } }, "‹"),
@@ -328,7 +375,13 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const shown = zoom ? [state.zoomDay] : desktop ? days : [sel.day];
 
   const perDay = shown.map((day) => {
-    const { targets: dayTargets, labels } = resolveForDate(targets, sets, day);
+    // Each department resolves its own layers (base/season/special day); the counts are then added together.
+    const dayTargets = {}; let labels = [];
+    for (const d of sel.departments) {
+      const r = resolveForDate(targets.filter((x) => x.department_id === d), sets, day);
+      for (const [slot, n] of Object.entries(r.targets)) dayTargets[slot] = (dayTargets[slot] ?? 0) + n;
+      labels = r.labels;
+    }
     const openMin = toMin(openOf(sel.restaurant, (parseYmd(day).getDay() + 6) % 7));
     const closeMin = toMin(closeOf(sel.restaurant, dowOf(day)));
     const wins = targetWindows(dayTargets, closeMin);
@@ -469,7 +522,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const dlg = document.getElementById("modal");
   const sel = state.sel;
   const rolesById = new Map(state.roles.map((r) => [r.id, r]));
-  const deptRoles = state.roles.filter((r) => r.department_id === sel.department);
+  const deptRoles = state.roles.filter((r) => sel.departments.includes(r.department_id));
   const initial = shift
     ? { staff_id: shift.staff_id, role_id: shift.role_id, date: dayOf(shift.start_at), start: hhmm(shift.start_at), end: hhmm(shift.end_at), notes: shift.notes ?? "", until_close: !!shift.until_close }
     : { staff_id: prefill.staff_id ?? roster[0]?.staff_id, role_id: null, date: prefill.date ?? sel.day, start: "11:00", end: "17:00", notes: "", until_close: false };
