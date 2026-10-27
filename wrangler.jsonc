@@ -1,5 +1,13 @@
 {
   "name": "amo-schedule-app",
+  "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./public" }
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "amo-schedule-db", "migrations_dir": "migrations" }
+  ]
 }
