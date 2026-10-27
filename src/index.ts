@@ -53,6 +53,14 @@ app.use("/api/*", async (c, next) => {
     .bind(email)
     .first<{ id: number; name: string; email: string; is_admin: number }>();
   if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
+    // An admin record created without an email (e.g. by an import) is claimed by the first ADMIN_EMAIL login.
+    row = await c.env.DB.prepare(
+      "UPDATE staff SET email = ? WHERE id = (SELECT id FROM staff WHERE is_admin = 1 AND email IS NULL ORDER BY id LIMIT 1) RETURNING id, name, email, is_admin",
+    )
+      .bind(email)
+      .first<{ id: number; name: string; email: string; is_admin: number }>();
+  }
+  if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
     const r = await c.env.DB.prepare("INSERT INTO staff (name, email, is_admin) VALUES (?, ?, 1)")
       .bind(email.split("@")[0], email)
       .run();
@@ -241,7 +249,7 @@ app.get("/api/schedule", async (c) => {
 
   const shifts = await c.env.DB.prepare(
     `SELECT sh.id, sh.staff_id, s.name AS staff_name, sh.role_id, ro.name_fr, ro.name_en,
-            sh.start_at, sh.end_at, sh.notes
+            sh.start_at, sh.end_at, sh.until_close, sh.notes
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ?
      ORDER BY sh.start_at, s.name`,
@@ -258,7 +266,7 @@ app.get("/api/my-shifts", async (c) => {
   if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
   const r = await c.env.DB.prepare(
     `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en,
-            sh.start_at, sh.end_at, sh.notes
+            sh.start_at, sh.end_at, sh.until_close, sh.notes
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
   )
@@ -334,6 +342,7 @@ interface ShiftInput {
   start_at: string;
   end_at: string;
   notes?: string;
+  until_close?: boolean;
   force?: boolean;
 }
 
@@ -371,9 +380,9 @@ app.post("/api/shifts", async (c) => {
   const problem = await validateShift(c, b);
   if (problem) return c.json(problem.body, problem.status as 400);
   const r = await c.env.DB.prepare(
-    "INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes, until_close) VALUES (?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null)
+    .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0)
     .run();
   return c.json({ id: r.meta.last_row_id }, 201);
 });
@@ -394,9 +403,9 @@ app.put("/api/shifts/:id", async (c) => {
   const problem = await validateShift(c, b, id);
   if (problem) return c.json(problem.body, problem.status as 400);
   await c.env.DB.prepare(
-    "UPDATE shifts SET staff_id=?, restaurant_id=?, role_id=?, start_at=?, end_at=?, notes=? WHERE id=?",
+    "UPDATE shifts SET staff_id=?, restaurant_id=?, role_id=?, start_at=?, end_at=?, notes=?, until_close=? WHERE id=?",
   )
-    .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, id)
+    .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0, id)
     .run();
   return c.json({ ok: true });
 });

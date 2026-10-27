@@ -35,6 +35,10 @@ const parseYmd = (s) => { const [y, m, d] = s.split("-").map(Number); return new
 const addDays = (s, n) => { const d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d); };
 const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return ymd(x); };
 const hhmm = (iso) => iso.slice(11, 16);
+// Until-close shifts show "F" instead of an end time. end_at is a provisional closing time
+// until per-restaurant closing hours exist.
+const DEFAULT_CLOSE = "22:00";
+const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
 const dayOf = (iso) => iso.slice(0, 10);
 const fmt = (s, opts) => new Intl.DateTimeFormat(locale(), opts).format(parseYmd(s));
 const weekLabel = (mon) => {
@@ -155,7 +159,7 @@ async function renderSchedule() {
     h("h2", {}, fmt(sel.day, { weekday: "long", day: "numeric", month: "long" })),
     dayShifts.length
       ? h("div", { class: "list" }, dayShifts.map((s) => {
-          const card = [h("span", { class: "time" }, `${hhmm(s.start_at)} – ${hhmm(s.end_at)}`), h("span", { class: "who" }, s.staff_name),
+          const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, s.staff_name),
             h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · "))];
           return data.editable ? h("button", { class: "card", type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: "card" }, card);
         }))
@@ -174,7 +178,7 @@ async function renderSchedule() {
       h("tr", {}, h("td", { class: "name" }, name), days.map((d) =>
         h("td", {},
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
-            const body = [h("b", {}, `${hhmm(s.start_at)}–${hhmm(s.end_at)}`), ` ${roleName(s)}`];
+            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleName(s)}`];
             return data.editable ? h("button", { class: "shift-chip", type: "button", onClick: () => openEditor(s) }, body) : h("div", { class: "shift-chip" }, body);
           }),
           data.editable ? h("button", { class: "add-cell", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: d, staff_id: id }) }, "+") : null))))
@@ -190,8 +194,8 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const rolesById = new Map(state.roles.map((r) => [r.id, r]));
   const deptRoles = state.roles.filter((r) => r.department_id === sel.department);
   const initial = shift
-    ? { staff_id: shift.staff_id, role_id: shift.role_id, date: dayOf(shift.start_at), start: hhmm(shift.start_at), end: hhmm(shift.end_at), notes: shift.notes ?? "" }
-    : { staff_id: prefill.staff_id ?? roster[0]?.staff_id, role_id: null, date: prefill.date ?? sel.day, start: "11:00", end: "17:00", notes: "" };
+    ? { staff_id: shift.staff_id, role_id: shift.role_id, date: dayOf(shift.start_at), start: hhmm(shift.start_at), end: hhmm(shift.end_at), notes: shift.notes ?? "", until_close: !!shift.until_close }
+    : { staff_id: prefill.staff_id ?? roster[0]?.staff_id, role_id: null, date: prefill.date ?? sel.day, start: "11:00", end: "17:00", notes: "", until_close: false };
 
   const staffSel = h("select", { required: true }, roster.map((r) => h("option", { value: r.staff_id, selected: r.staff_id === initial.staff_id }, r.name)));
   const roleSel = h("select", { required: true });
@@ -208,16 +212,21 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const start = h("input", { type: "time", value: initial.start, required: true });
   const end = h("input", { type: "time", value: initial.end, required: true });
   const notes = h("textarea", { value: initial.notes, maxLength: 200 });
+  const untilClose = h("input", { type: "checkbox", checked: initial.until_close });
   const alertBox = h("div");
   const nextDay = h("span", { class: "meta" });
-  const syncNext = () => { nextDay.textContent = end.value && start.value && end.value <= start.value ? t("nextDay") : ""; };
-  start.addEventListener("input", syncNext); end.addEventListener("input", syncNext); syncNext();
+  const syncNext = () => {
+    end.disabled = untilClose.checked;
+    nextDay.textContent = !untilClose.checked && end.value && start.value && end.value <= start.value ? t("nextDay") : "";
+  };
+  start.addEventListener("input", syncNext); end.addEventListener("input", syncNext); untilClose.addEventListener("change", syncNext); syncNext();
 
   const payload = (force) => {
-    const endDate = end.value <= start.value ? addDays(date.value, 1) : date.value;
+    const endTime = untilClose.checked ? DEFAULT_CLOSE : end.value;
+    const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
-      start_at: `${date.value}T${start.value}`, end_at: `${endDate}T${end.value}`, notes: notes.value || undefined, force: force || undefined,
+      start_at: `${date.value}T${start.value}`, end_at: `${endDate}T${endTime}`, until_close: untilClose.checked, notes: notes.value || undefined, force: force || undefined,
     };
   };
   const save = async (force) => {
@@ -243,6 +252,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     h("label", { class: "field" }, h("span", {}, t("role")), roleSel),
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),
+    h("label", { class: "check" }, untilClose, t("untilClose")),
     h("label", { class: "field" }, h("span", {}, t("notes")), notes),
     alertBox,
     h("div", { class: "actions" },
@@ -265,7 +275,7 @@ async function renderMine() {
   const body = days.length
     ? days.map((d) => h("section", {}, h("h2", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
         h("div", { class: "list", style: "margin-bottom:1rem" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
-          h("div", { class: "card" }, h("span", { class: "time" }, `${hhmm(s.start_at)} – ${hhmm(s.end_at)}`),
+          h("div", { class: "card" }, h("span", { class: "time" }, range(s)),
             h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
             h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")))))))
     : [h("div", { class: "empty" }, t("noShiftsWeek"))];

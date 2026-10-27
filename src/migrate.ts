@@ -2,10 +2,12 @@
 // `wrangler deploy` (Cloudflare's automatic git deploy) is enough — no terminal step.
 import m0001 from "../migrations/0001_init.sql";
 import m0002 from "../migrations/0002_staff_prefs.sql";
+import m0003 from "../migrations/0003_until_close.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
   ["0002_staff_prefs", m0002],
+  ["0003_until_close", m0003],
 ];
 
 const statements = (sql: string) =>
