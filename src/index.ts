@@ -255,18 +255,48 @@ app.post("/api/staff-roles", async (c) => {
   return c.json({ ok: true }, 201);
 });
 
+// Removing a role that still has shifts needs a decision: move them to another role the person holds
+// at that restaurant, or delete them. Without a decision the API answers 409 with the options.
 app.delete("/api/staff-roles", async (c) => {
   const me = c.get("me");
-  const b = await c.req.json<{ staff_id: number; restaurant_id: number; role_id: number }>();
-  const role = await c.env.DB.prepare("SELECT department_id FROM roles WHERE id = ?")
-    .bind(b.role_id)
-    .first<{ department_id: string }>();
+  const db = c.env.DB;
+  const b = await c.req.json<{ staff_id: number; restaurant_id: number; role_id: number; reassign_to_role_id?: number; delete_shifts?: boolean }>();
+  const role = await db.prepare("SELECT department_id FROM roles WHERE id = ?").bind(b.role_id).first<{ department_id: string }>();
   if (!role) return c.json({ error: "role_not_found" }, 404);
-  if (!(await canManage(c.env.DB, me, b.restaurant_id, role.department_id))) return c.json({ error: "forbidden" }, 403);
-  await c.env.DB.prepare("DELETE FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?")
-    .bind(b.staff_id, b.restaurant_id, b.role_id)
-    .run();
-  return c.json({ ok: true });
+  if (!(await canManage(db, me, b.restaurant_id, role.department_id))) return c.json({ error: "forbidden" }, 403);
+
+  const count = (await db.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?")
+    .bind(b.staff_id, b.restaurant_id, b.role_id).first<{ n: number }>())?.n ?? 0;
+  const stmts = [];
+  if (count > 0) {
+    if (b.reassign_to_role_id) {
+      const target = await db
+        .prepare(
+          `SELECT ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id
+           WHERE sr.staff_id = ? AND sr.restaurant_id = ? AND sr.role_id = ? AND sr.role_id != ?`,
+        )
+        .bind(b.staff_id, b.restaurant_id, b.reassign_to_role_id, b.role_id)
+        .first<{ department_id: string }>();
+      if (!target) return c.json({ error: "staff_does_not_hold_role_at_restaurant" }, 422);
+      if (!(await canManage(db, me, b.restaurant_id, target.department_id))) return c.json({ error: "forbidden" }, 403);
+      stmts.push(db.prepare("UPDATE shifts SET role_id = ? WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?")
+        .bind(b.reassign_to_role_id, b.staff_id, b.restaurant_id, b.role_id));
+    } else if (b.delete_shifts) {
+      stmts.push(db.prepare("DELETE FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(b.staff_id, b.restaurant_id, b.role_id));
+    } else {
+      const alternatives = await db
+        .prepare(
+          `SELECT ro.id, ro.department_id, ro.name_fr, ro.name_en FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id
+           WHERE sr.staff_id = ? AND sr.restaurant_id = ? AND sr.role_id != ?`,
+        )
+        .bind(b.staff_id, b.restaurant_id, b.role_id)
+        .all();
+      return c.json({ error: "has_shifts", count, alternatives: alternatives.results }, 409);
+    }
+  }
+  stmts.push(db.prepare("DELETE FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(b.staff_id, b.restaurant_id, b.role_id));
+  await db.batch(stmts);
+  return c.json({ ok: true, moved_or_deleted: count });
 });
 
 // ---------- Managers (admin) ----------

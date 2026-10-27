@@ -96,6 +96,11 @@ function renderChrome() {
 async function render() {
   renderChrome();
   try {
+    // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
+    if (state.view !== "admin") {
+      [state.me, state.restaurants] = await Promise.all([api("/me"), api("/restaurants")]);
+      renderChrome();
+    }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
     else await renderAdmin();
@@ -442,6 +447,36 @@ function targetsPanel(ov) {
   return box;
 }
 
+// Untick a role: if shifts still use it, ask whether to move them to another role or delete them.
+async function removeRole(body, role, input) {
+  const dlg = document.getElementById("modal");
+  const finish = (ok) => { if (!ok) input.checked = true; };
+  try {
+    await api("/staff-roles", { method: "DELETE", body });
+    toast(t("saved"));
+    return;
+  } catch (e) {
+    if (e.body?.error !== "has_shifts") { finish(false); toast(errorText(e)); return; }
+    const { count, alternatives } = e.body;
+    let decided = false;
+    const act = async (extra) => {
+      try { await api("/staff-roles", { method: "DELETE", body: { ...body, ...extra } }); decided = true; dlg.close(); toast(t("saved")); }
+      catch (err) { toast(errorText(err)); }
+    };
+    dlg.replaceChildren(h("div", { class: "modal-body" },
+      h("h2", {}, t("hasShiftsTitle")),
+      h("p", {}, `${count} ${t("hasShiftsBody")}`),
+      alternatives.length
+        ? alternatives.map((a) => h("button", { class: "btn primary", type: "button", onClick: () => act({ reassign_to_role_id: a.id }) },
+            `${t("moveShiftsTo")} ${roleName(a)} (${t(`dept.${a.department_id}`)})`))
+        : h("p", { class: "meta" }, t("addRoleFirst")),
+      h("button", { class: "btn danger", type: "button", onClick: () => act({ delete_shifts: true }) }, t("deleteShifts")),
+      h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel"))));
+    dlg.addEventListener("close", () => finish(decided), { once: true });
+    dlg.showModal();
+  }
+}
+
 function staffCard(s, ov) {
   const name = h("input", { value: s.name, required: true });
   const email = h("input", { type: "email", value: s.email ?? "" });
@@ -467,8 +502,15 @@ function staffCard(s, ov) {
           dRoles.map((ro) => {
             const body = { staff_id: s.id, restaurant_id: r.id, role_id: ro.id };
             const on = s.roles.some((x) => x.restaurant_id === r.id && x.role_id === ro.id);
-            return h("label", { class: "check" }, h("input", { type: "checkbox", checked: on, onChange: toggle(on,
-              () => api("/staff-roles", { method: "POST", body }), () => api("/staff-roles", { method: "DELETE", body })) }), roleName(ro));
+            const input = h("input", { type: "checkbox", checked: on });
+            input.addEventListener("change", async () => {
+              if (input.checked) {
+                try { await api("/staff-roles", { method: "POST", body }); toast(t("saved")); } catch (err) { input.checked = false; toast(errorText(err)); }
+              } else {
+                removeRole(body, ro, input);
+              }
+            });
+            return h("label", { class: "check" }, input, roleName(ro));
           }),
           (() => {
             const body = { staff_id: s.id, restaurant_id: r.id, department_id: d };
