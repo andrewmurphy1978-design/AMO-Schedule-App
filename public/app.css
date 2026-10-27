@@ -431,3 +431,9 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .staff-row .inactive-badge{display:none;background:#eee;color:#666}
 .staff-row.inactive{opacity:.6}.staff-row.inactive .inactive-badge{display:inline-block}
 .hide-inactive .staff-row.inactive{display:none}
+
+.grid td.name{min-width:0 !important;width:1%}
+.grid td.name .avatar{margin-right:6px;vertical-align:middle}
+.grid td.name .name2{display:inline-flex;flex-direction:column;vertical-align:middle;line-height:1.15;white-space:normal}
+.grid td.name .n2{font-weight:400;font-size:.85em;color:var(--muted,#666)}
+.grid td.name .name2{max-width:110px;overflow-wrap:anywhere}

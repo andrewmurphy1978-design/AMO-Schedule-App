@@ -377,6 +377,10 @@ async function renderSchedule() {
   const meta = new Map();
   for (const r of roster) meta.set(r.staff_id, { color: r.color, photo_v: r.photo_v });
   for (const sh of data.shifts) meta.set(sh.staff_id, { color: sh.staff_color, photo_v: sh.photo_v });
+  // First name on one line, last name on the next: a narrower name column.
+  const parts = new Map();
+  for (const r of roster) parts.set(r.staff_id, r.first_name ? { first: r.first_name, last: r.last_name } : splitName(r.name));
+  for (const sh of data.shifts) parts.set(sh.staff_id, sh.first_name ? { first: sh.first_name, last: sh.last_name } : splitName(sh.staff_name));
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
   const limit = data.limits?.overtime_hours ?? 40;
   const offAt = (id, d) => (data.time_off ?? []).find((o) => o.staff_id === id && o.start_date <= d && o.end_date >= d);
@@ -402,7 +406,8 @@ async function renderSchedule() {
         h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
           fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
-      h("tr", { class: data.shifts.some((s) => s.staff_id === id) || (data.elsewhere ?? []).some((e) => e.staff_id === id) ? "" : "noshift" }, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
+      h("tr", { class: data.shifts.some((s) => s.staff_id === id) || (data.elsewhere ?? []).some((e) => e.staff_id === id) ? "" : "noshift" }, h("td", { class: "name", title: name }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36),
+        h("span", { class: "name2" }, h("span", { class: "n1" }, parts.get(id)?.first ?? name), parts.get(id)?.last ? h("span", { class: "n2" }, parts.get(id).last) : null)), days.map((d) =>
         h("td", {},
           offAt(id, d) ? offChip(offAt(id, d)) : null,
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
