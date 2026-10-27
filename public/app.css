@@ -444,3 +444,18 @@ dialog.wide{width:min(640px,calc(100vw - 24px));max-height:92vh}
 .btn.sm{min-height:36px;padding:.3rem .7rem;font-size:.9rem}
 .shift-dialog .dlg-head{flex-wrap:wrap}
 .shift-dialog .dlg-actions{width:100%;justify-content:flex-end;gap:.4rem}
+
+/* Dates stay visible while scrolling the schedule: the coverage view and the table scroll inside the window
+   (vertically as well as sideways), and their header rows stick to the top of that scrolling area. */
+.vtl-scroll { max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); overflow: auto; }
+@media (min-width: 900px) { .grid-wrap { max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); overflow: auto; } }
+table.grid { overflow: visible; border-collapse: separate; border-spacing: 0; }
+.grid thead th { position: sticky; top: 0; z-index: 4; background: var(--bg); box-shadow: 0 1px 0 var(--line); }
+.grid thead th.today { background: var(--brand); }
+.grid thead th:first-child { left: 0; z-index: 5; }
+.grid td.name { z-index: 2; }
+@media print { .vtl-scroll, .grid-wrap { max-height: none !important; overflow: visible !important; } .grid thead th { position: static; box-shadow: none; } }
+button.vtl-head.zoomable { position: sticky; top: 0; }
+.vtl-scroll, .grid-wrap { scroll-margin-top: 56px; }
+.vtl-scroll { max-height: calc(100vh - 60px); max-height: calc(100dvh - 60px); }
+@media (min-width: 900px) { .grid-wrap { max-height: calc(100vh - 60px); max-height: calc(100dvh - 60px); } }
