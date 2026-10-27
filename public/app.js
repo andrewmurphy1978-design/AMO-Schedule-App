@@ -245,7 +245,7 @@ function pickDefaults() {
   if (!options.some((r) => r.id === sel.restaurant)) sel.restaurant = options[0].id;
   const depts = allowedDepartments(sel.restaurant);
   sel.departments = (sel.departments ?? []).filter((d) => depts.includes(d));
-  if (!sel.departments.length) sel.departments = [depts.includes(sel.department) ? sel.department : depts[0]];
+  if (!sel.departments.length) sel.departments = [depts.includes(sel.department) ? sel.department : depts.includes("kitchen") ? "kitchen" : depts[0]];
   sel.department = sel.departments[0];
   return options;
 }
