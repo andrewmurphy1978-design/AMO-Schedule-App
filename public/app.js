@@ -242,7 +242,10 @@ async function renderSchedule() {
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
   const grid = h("div", { class: "grid-wrap" }, h("table", { class: "grid" },
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
-      h("th", { class: d === today ? "today" : "" }, fmt(d, { weekday: "short", day: "numeric", month: "short" }))))),
+      h("th", { class: d === today ? "today" : "" },
+        // Clicking a day here zooms the coverage view below on that day and scrolls to it.
+        h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
+          fmt(d, { weekday: "short", day: "numeric", month: "short" })))))),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
@@ -259,6 +262,14 @@ async function renderSchedule() {
   $app.replaceChildren(...[controls, status, daytabs, daily, timeline, grid, fab].filter(Boolean));
 }
 
+
+// Zoom the coverage view on one day (desktop) or just select it (phone), then bring it into view.
+async function zoomTo(day) {
+  state.sel.day = day;
+  if (mqDesktop.matches) state.zoomDay = day;
+  await render();
+  document.querySelector("section.timeline")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 // ---------- coverage timeline (vertical) ----------
 const slotLabel = (slot) => (slot === "close" ? t("closeSlot") : slot.replace(/^0/, ""));
@@ -407,7 +418,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
 
   return h("section", { class: "timeline" },
     h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(shown[0], { weekday: "long", day: "numeric", month: "long" })}`),
-    shown.length > 1 && desktop ? h("p", { class: "meta" }, t("zoomHint")) : null,
+    shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     zoomBar,
     dayTabs,
     payrollBox,

@@ -312,3 +312,12 @@ button.vtl-head.today:hover { background: var(--brand-dark); }
 .vtl.zoomed .vtl-bar { font-size: .9rem; line-height: 1.25; padding: 6px 10px; gap: 2px; display: flex; flex-direction: column; align-items: flex-start; }
 .vtl.zoomed .vtl-bar em { opacity: .9; font-size: .8rem; }
 .vtl.zoomed .vtl-hour { font-size: .85rem; }
+
+/* make "click a day to zoom" obvious */
+button.vtl-head.zoomable { position: relative; }
+button.vtl-head.zoomable::after { content: "⤢"; position: absolute; top: 4px; right: 6px; font-size: .85rem; opacity: .55; }
+button.vtl-head.zoomable:hover::after { opacity: 1; }
+.zoom-hint { margin: .2rem 0 .6rem; padding: .45rem .7rem; border-radius: 8px; background: color-mix(in srgb, var(--brand) 10%, var(--card)); font-size: .9rem; }
+.th-zoom { border: 0; background: none; font: inherit; font-weight: 700; color: inherit; cursor: zoom-in; padding: 4px 6px; border-radius: 6px; text-decoration: underline dotted; text-underline-offset: 3px; }
+.th-zoom:hover { background: color-mix(in srgb, var(--brand) 14%, transparent); }
+.grid th.today .th-zoom:hover { background: rgba(255,255,255,.2); }
