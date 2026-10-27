@@ -357,7 +357,9 @@ async function boot() {
     state.me = await api("/me");
   } catch (e) {
     renderChrome();
-    $app.replaceChildren(h("div", { class: "empty" }, h("h2", {}, t("noAccessTitle")), t("noAccessBody")));
+    const detail = e.body?.email ? `${t("signedInAs")} ${e.body.email}` : e.body?.reason ?? String(e.message ?? "");
+    $app.replaceChildren(h("div", { class: "empty" }, h("h2", {}, t("noAccessTitle")), t("noAccessBody"),
+      h("p", { class: "meta" }, detail)));
     return;
   }
   [state.restaurants, state.roles] = await Promise.all([api("/restaurants"), api("/roles")]);

@@ -31,24 +31,27 @@ const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 // ---------- Auth ----------
 // Production identity comes from the signed Cloudflare Access JWT. If Access is not configured
 // the API refuses every request (fail closed) rather than trusting a forgeable header.
-async function identify(c: Context<any>): Promise<string | null> {
+async function identify(c: Context<any>): Promise<{ email?: string; reason?: string }> {
   if (c.env.DEV_MODE === "true") {
-    return (c.req.header("X-Dev-User") ?? c.env.DEV_USER_EMAIL ?? "").toLowerCase() || null;
+    const e = (c.req.header("X-Dev-User") ?? c.env.DEV_USER_EMAIL ?? "").toLowerCase();
+    return e ? { email: e } : { reason: "no_dev_user" };
   }
   const { ACCESS_TEAM_DOMAIN: team, ACCESS_AUD: aud } = c.env;
+  if (!team || !aud) return { reason: "access_not_configured" };
   const token = c.req.header("Cf-Access-Jwt-Assertion");
-  if (!team || !aud || !token) return null;
+  if (!token) return { reason: "no_jwt" };
   try {
-    return await verifyAccessJwt(token, { keys: await fetchAccessKeys(team), aud, issuer: `https://${team}` });
+    const email = await verifyAccessJwt(token, { keys: await fetchAccessKeys(team), aud, issuer: `https://${team}` });
+    return email ? { email } : { reason: "jwt_invalid" };
   } catch {
-    return null;
+    return { reason: "keys_unavailable" };
   }
 }
 
 app.use("/api/*", async (c, next) => {
   await ensureMigrated(c.env.DB);
-  const email = await identify(c);
-  if (!email) return c.json({ error: "unauthenticated" }, 401);
+  const { email, reason } = await identify(c);
+  if (!email) return c.json({ error: "unauthenticated", reason }, 401);
   let row = await c.env.DB.prepare("SELECT id, name, email, is_admin FROM staff WHERE lower(email) = ?")
     .bind(email)
     .first<{ id: number; name: string; email: string; is_admin: number }>();
@@ -66,7 +69,7 @@ app.use("/api/*", async (c, next) => {
       .run();
     row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1 };
   }
-  if (!row) return c.json({ error: "unknown_user" }, 403);
+  if (!row) return c.json({ error: "unknown_user", email }, 403);
   c.set("me", { ...row, is_admin: row.is_admin === 1 });
   await next();
 });
