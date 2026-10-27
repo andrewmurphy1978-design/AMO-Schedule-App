@@ -12,7 +12,8 @@ import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
-import { localNow } from "./week.ts";
+import { localNow, mondayOfDate } from "./week.ts";
+import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
 import { normalizeSin, hashSin, chooseMatch, extractPayslip, isPdf, bytesToBase64, MAX_PDF_BYTES } from "./payslip.ts";
 
 type Env = {
@@ -707,30 +708,53 @@ async function canDecideFor(db: D1Database, me: Me, staffId: number) {
   return me.is_admin || (me.id !== staffId && (await approversOf(db, staffId)).includes(me.id));
 }
 
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 app.post("/api/time-off", async (c) => {
   const me = c.get("me");
-  const b = await c.req.json<{ start_date?: string; end_date?: string; note?: string }>();
+  const b = await c.req.json<{ staff_id?: number; start_date?: string; end_date?: string; start_time?: string; end_time?: string; note?: string }>();
   const start = b.start_date ?? "", end = b.end_date || start;
   if (!DATE_RE3.test(start) || !DATE_RE3.test(end) || start > end) return c.json({ error: "invalid_dates" }, 400);
-  if (end < localNow(c.env.TIMEZONE).slice(0, 10)) return c.json({ error: "in_the_past" }, 400);
-  const dup = await c.env.DB.prepare("SELECT 1 FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?").bind(me.id, end, start).first();
-  if (dup) return c.json({ error: "already_requested" }, 409);
+  // Optional part of the day (same hours on every day of the range).
+  const st = b.start_time || null, et = b.end_time || null;
+  if ((st && !HHMM_RE.test(st)) || (et && !HHMM_RE.test(et)) || (!!st !== !!et) || (st && et && st >= et)) return c.json({ error: "invalid_times" }, 400);
+  // A manager or admin can enter time off for an employee: it is approved at once.
+  const forOther = !!b.staff_id && b.staff_id !== me.id;
+  const staffId = forOther ? b.staff_id! : me.id;
+  if (forOther && !(await canDecideFor(c.env.DB, me, staffId))) return c.json({ error: "forbidden" }, 403);
+  if (!forOther && end < localNow(c.env.TIMEZONE).slice(0, 10)) return c.json({ error: "in_the_past" }, 400);
+  const target = await c.env.DB.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(staffId).first<any>();
+  if (!target) return c.json({ error: "not_found" }, 404);
+  const same = (await c.env.DB.prepare("SELECT start_time, end_time FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?").bind(staffId, end, start).all<{ start_time: string | null; end_time: string | null }>()).results;
+  if (same.some((o) => !o.start_time || !st || (o.start_time < et! && st < o.end_time!))) return c.json({ error: "already_requested" }, 409);
   const note = b.note?.trim().slice(0, 300) || null;
-  const r = await c.env.DB.prepare("INSERT INTO time_off_requests (staff_id, start_date, end_date, note, created_at) VALUES (?, ?, ?, ?, ?)").bind(me.id, start, end, note, Date.now()).run();
-  // Tell the managers (best effort: a messaging problem never blocks the request).
+  const r = await c.env.DB.prepare("INSERT INTO time_off_requests (staff_id, start_date, end_date, start_time, end_time, note, status, decided_by, decided_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(staffId, start, end, st, et, note, forOther ? "approved" : "requested", forOther ? me.id : null, forOther ? Date.now() : null, Date.now()).run();
   try {
     const conn = await loadConnections(c.env, c.env.DB);
-    const ids = (await approversOf(c.env.DB, me.id)).filter((id) => id !== me.id);
-    if (ids.length) {
-      const people = (await c.env.DB.prepare(`SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<any>()).results;
-      for (const p of people) await notifyStaff(c.env.DB, conn, p, (l) => T.timeOffRequest(l, { name: me.name, from: start, to: end, note }), "time_off_request");
+    if (forOther) await notifyStaff(c.env.DB, conn, target, (l) => T.timeOffDecision(l, { approved: true, from: start, to: end, note }), "time_off_decision");
+    else {
+      const ids = (await approversOf(c.env.DB, me.id)).filter((id) => id !== me.id);
+      if (ids.length) {
+        const people = (await c.env.DB.prepare(`SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<any>()).results;
+        for (const p of people) await notifyStaff(c.env.DB, conn, p, (l) => T.timeOffRequest(l, { name: me.name, from: start, to: end, note }), "time_off_request");
+      }
     }
-  } catch { /* ignore */ }
-  return c.json({ id: r.meta.last_row_id }, 201);
+  } catch { /* messaging problems never block the request */ }
+  return c.json({ id: r.meta.last_row_id, status: forOther ? "approved" : "requested" }, 201);
+});
+
+// People a manager/admin may enter time off for.
+app.get("/api/time-off/people", async (c) => {
+  const me = c.get("me");
+  const rows = (await c.env.DB.prepare("SELECT id, name FROM staff ORDER BY name").all<{ id: number; name: string }>()).results;
+  if (me.is_admin) return c.json(rows);
+  const out = [];
+  for (const r of rows) if (r.id !== me.id && (await approversOf(c.env.DB, r.id)).includes(me.id)) out.push(r);
+  return c.json(out);
 });
 
 app.get("/api/time-off/mine", async (c) => {
-  const r = await c.env.DB.prepare("SELECT id, start_date, end_date, note, status, decision_note FROM time_off_requests WHERE staff_id = ? AND end_date >= date('now','-60 day') ORDER BY start_date DESC").bind(c.get("me").id).all();
+  const r = await c.env.DB.prepare("SELECT id, start_date, end_date, start_time, end_time, note, status, decision_note FROM time_off_requests WHERE staff_id = ? AND end_date >= date('now','-60 day') ORDER BY start_date DESC").bind(c.get("me").id).all();
   return c.json(r.results);
 });
 
@@ -745,7 +769,7 @@ app.post("/api/time-off/:id/cancel", async (c) => {
 app.get("/api/time-off/review", async (c) => {
   const me = c.get("me");
   const rows = (await c.env.DB.prepare(
-    `SELECT t.id, t.staff_id, s.name AS staff_name, t.start_date, t.end_date, t.note, t.status, t.decision_note
+    `SELECT t.id, t.staff_id, s.name AS staff_name, t.start_date, t.end_date, t.start_time, t.end_time, t.note, t.status, t.decision_note
      FROM time_off_requests t JOIN staff s ON s.id = t.staff_id
      WHERE t.status != 'cancelled' AND (t.status = 'requested' OR t.end_date >= date('now','-14 day')) AND t.end_date >= date('now','-14 day')
      ORDER BY (t.status = 'requested') DESC, t.start_date LIMIT 200`,
@@ -834,6 +858,72 @@ app.get("/api/admin/staff/:id/shifts", requireAdmin, async (c) => {
      WHERE sh.staff_id = ? AND substr(sh.start_at, 1, 10) = ? ORDER BY sh.start_at`,
   ).bind(id, date).all();
   return c.json(r.results);
+});
+
+// ---------- Weekly unavailability (school schedule…) and personal hour limits ----------
+// Employees enter their own; a manager of that employee, or an admin, can enter them too.
+async function canEditPerson(c: Context<any>, staffId: number) {
+  const me = c.get("me") as Me;
+  return me.id === staffId || (await canDecideFor((c.env as Env).DB, me, staffId));
+}
+
+app.get("/api/availability", async (c) => {
+  const staffId = intParam(c.req.query("staff")) ?? c.get("me").id;
+  if (!(await canEditPerson(c, staffId))) return c.json({ error: "forbidden" }, 403);
+  const r = await c.env.DB.prepare("SELECT id, dow, start_time, end_time, note, kind, replacement_ok, valid_from, valid_to FROM staff_availability WHERE staff_id = ? ORDER BY dow, start_time").bind(staffId).all();
+  return c.json(r.results);
+});
+
+app.post("/api/availability", async (c) => {
+  const b = await c.req.json<{ staff_id?: number; dow?: number; kind?: string; start_time?: string; end_time?: string; note?: string; valid_from?: string; valid_to?: string }>();
+  const staffId = b.staff_id ?? c.get("me").id;
+  if (!(await canEditPerson(c, staffId))) return c.json({ error: "forbidden" }, 403);
+  if (!Number.isInteger(b.dow) || b.dow! < 0 || b.dow! > 6) return c.json({ error: "invalid_day" }, 400);
+  const dayOff = b.kind === "day_off"; // fixed weekly day off: the whole day
+  if (dayOff) { b.start_time = "00:00"; b.end_time = "23:59"; }
+  if (!HHMM_RE.test(b.start_time ?? "") || !HHMM_RE.test(b.end_time ?? "") || b.start_time! >= b.end_time!) return c.json({ error: "invalid_times" }, 400);
+  if (dayOff && (await c.env.DB.prepare("SELECT 1 FROM staff_availability WHERE staff_id = ? AND dow = ? AND kind = 'day_off'").bind(staffId, b.dow).first())) return c.json({ error: "already_set" }, 409);
+  const from = b.valid_from || null, to = b.valid_to || null;
+  if ((from && !DATE_RE3.test(from)) || (to && !DATE_RE3.test(to)) || (from && to && from > to)) return c.json({ error: "invalid_dates" }, 400);
+  const r = await c.env.DB.prepare("INSERT INTO staff_availability (staff_id, dow, start_time, end_time, note, kind, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(staffId, b.dow, b.start_time, b.end_time, b.note?.trim().slice(0, 120) || null, dayOff ? "day_off" : "unavailable", from, to).run();
+  return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+// On a fixed day off: tick/untick "available for replacements".
+app.put("/api/availability/:id", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { replacement_ok } = await c.req.json<{ replacement_ok?: boolean }>();
+  const row = id ? await c.env.DB.prepare("SELECT staff_id FROM staff_availability WHERE id = ?").bind(id).first<{ staff_id: number }>() : null;
+  if (!row || typeof replacement_ok !== "boolean") return c.json({ error: "not_found" }, 404);
+  if (!(await canEditPerson(c, row.staff_id))) return c.json({ error: "forbidden" }, 403);
+  await c.env.DB.prepare("UPDATE staff_availability SET replacement_ok = ? WHERE id = ? AND kind = 'day_off'").bind(replacement_ok ? 1 : 0, id).run();
+  return c.json({ ok: true });
+});
+
+app.delete("/api/availability/:id", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const row = id ? await c.env.DB.prepare("SELECT staff_id FROM staff_availability WHERE id = ?").bind(id).first<{ staff_id: number }>() : null;
+  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!(await canEditPerson(c, row.staff_id))) return c.json({ error: "forbidden" }, 403);
+  await c.env.DB.prepare("DELETE FROM staff_availability WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+// Maximum hours per week for one employee (admin only): shown in the totals, warned on save, never exceeded by replacements.
+app.put("/api/staff/:id/limit", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { max_weekly_hours } = await c.req.json<{ max_weekly_hours?: number | string | null }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  if (max_weekly_hours === null || max_weekly_hours === undefined || max_weekly_hours === "") {
+    await c.env.DB.prepare("DELETE FROM staff_limits WHERE staff_id = ?").bind(id).run();
+    return c.json({ ok: true, max_weekly_hours: null });
+  }
+  const n = Number(String(max_weekly_hours).replace(",", "."));
+  if (!Number.isFinite(n) || n <= 0 || n > 168) return c.json({ error: "invalid_hours" }, 400);
+  await c.env.DB.prepare("INSERT OR REPLACE INTO staff_limits (staff_id, max_weekly_hours) VALUES (?, ?)").bind(id, n).run();
+  return c.json({ ok: true, max_weekly_hours: n });
 });
 
 // ---------- Sick calls and replacements ----------
@@ -1117,9 +1207,13 @@ app.get("/api/schedule", async (c) => {
   const weekEndDay = new Date(`${bounds.start.slice(0, 10)}T00:00:00Z`); weekEndDay.setUTCDate(weekEndDay.getUTCDate() + 6);
   const offIds = [...ids].filter((id) => editable || id === me.id);
   const time_off = offIds.length ? (await c.env.DB.prepare(
-    `SELECT staff_id, start_date, end_date, status FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${offIds.map(() => "?").join(",")}) AND start_date <= ? AND end_date >= ?`,
+    `SELECT staff_id, start_date, end_date, start_time, end_time, status FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${offIds.map(() => "?").join(",")}) AND start_date <= ? AND end_date >= ?`,
   ).bind(...offIds, weekEndDay.toISOString().slice(0, 10), bounds.start.slice(0, 10)).all()).results : [];
-  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, limits: { overtime_hours: settings.overtime_hours } });
+  const days_off: Record<number, number[]> = {};
+  if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, dow FROM staff_availability WHERE kind = 'day_off' AND staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; dow: number }>()).results) (days_off[r.staff_id] ??= []).push(r.dow);
+  const personal: Record<number, number> = {};
+  if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; max_weekly_hours: number }>()).results) personal[r.staff_id] = r.max_weekly_hours;
+  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, days_off, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
 });
 
 // The caller's own shifts across every restaurant and department.
@@ -1137,7 +1231,9 @@ app.get("/api/my-shifts", async (c) => {
   const rows = r.results as { start_at: string; end_at: string; status: string }[];
   const minutes = (a: string, b: string) => (Date.parse(`${b}:00Z`) - Date.parse(`${a}:00Z`)) / 60000;
   const total_hours = Math.round((rows.filter((x) => x.status === "ok").reduce((n, x) => n + minutes(x.start_at, x.end_at), 0) / 60) * 100) / 100;
-  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: (await loadSettings(c.env.DB)).overtime_hours } });
+  const mine = await c.env.DB.prepare("SELECT max_weekly_hours FROM staff_limits WHERE staff_id = ?").bind(c.get("me").id).first<{ max_weekly_hours: number }>();
+  const general = (await loadSettings(c.env.DB)).overtime_hours;
+  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
 });
 
 // ---------- Roster & admin overview ----------
@@ -1166,7 +1262,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3 FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, email, phone, is_admin, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
@@ -1243,10 +1339,26 @@ async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
   const clashes = findOverlaps(b, others.results);
   if (clashes.length && !b.force)
     return { status: 409, body: { error: "overlap", conflicts: clashes.map(({ restaurant, start_at, end_at }) => ({ restaurant, start_at, end_at })) } };
-  // Requested or approved time off on that day: warn (the manager can still save anyway).
-  const off = await db.prepare("SELECT start_date, end_date, status FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?")
-    .bind(b.staff_id, b.end_at.slice(0, 10), b.start_at.slice(0, 10)).first<{ start_date: string; end_date: string; status: string }>();
-  if (off && !b.force) return { status: 409, body: { error: "time_off", time_off: off } };
+  if (b.force) return null;
+  // Requested or approved time off (whole or part of a day): warn, the manager can still save anyway.
+  const offs = (await db.prepare("SELECT start_date, end_date, start_time, end_time, status FROM time_off_requests WHERE staff_id = ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?")
+    .bind(b.staff_id, b.end_at.slice(0, 10), b.start_at.slice(0, 10)).all<{ start_date: string; end_date: string; start_time: string | null; end_time: string | null; status: string }>()).results;
+  const off = offs.find((o) => overlapsTimeOff(o, b.start_at, b.end_at));
+  if (off) return { status: 409, body: { error: "time_off", time_off: off } };
+  // Weekly unavailability (school schedule, other job…).
+  const rules = (await db.prepare("SELECT dow, start_time, end_time, valid_from, valid_to, note FROM staff_availability WHERE staff_id = ?").bind(b.staff_id).all<Unavailable>()).results;
+  const blocked = findUnavailable(rules, b.start_at, b.end_at);
+  if (blocked) return { status: 409, body: { error: "unavailable", rule: blocked } };
+  // Personal weekly maximum (e.g. 17 h for an employee under 16).
+  const lim = await db.prepare("SELECT max_weekly_hours FROM staff_limits WHERE staff_id = ?").bind(b.staff_id).first<{ max_weekly_hours: number }>();
+  if (lim) {
+    const wk = weekBounds(mondayOfDate(b.start_at.slice(0, 10)))!;
+    const used = await db.prepare("SELECT coalesce(sum((julianday(end_at) - julianday(start_at)) * 24), 0) AS h FROM shifts WHERE staff_id = ? AND status = 'ok' AND id != ? AND start_at >= ? AND start_at < ?")
+      .bind(b.staff_id, ignoreShiftId ?? -1, wk.start, wk.end).first<{ h: number }>();
+    const mine = (Date.parse(`${b.end_at}:00Z`) - Date.parse(`${b.start_at}:00Z`)) / 3_600_000;
+    const total = (used?.h ?? 0) + mine;
+    if (total > lim.max_weekly_hours + 1e-9) return { status: 409, body: { error: "max_hours", max: lim.max_weekly_hours, would_be: Math.round(total * 100) / 100 } };
+  }
   return null;
 }
 

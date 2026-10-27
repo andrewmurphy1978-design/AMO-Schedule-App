@@ -1,5 +1,6 @@
 // Sick-call replacement flow: report -> notify managers -> offer to everyone eligible at once -> first "yes" wins
 // -> otherwise escalate to the managers. All state lives in D1 so a Cloudflare cron can finish what a request started.
+import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
 import type { Connections, ConnEnv } from "./connections.ts";
 import { chooseCandidates, byFewestHours, type Candidate } from "./eligibility.ts";
 import { loadConnections, notifyManagers, notifyStaff, type StaffContact } from "./notify.ts";
@@ -52,7 +53,17 @@ export async function gatherCandidates(db: D1Database, req: { restaurant_id: num
     `SELECT staff_id, start_at, end_at FROM shifts WHERE status = 'ok' AND staff_id IN (${marks}) AND start_at >= ? AND start_at < ?`,
   ).bind(...people.map((p) => p.id), `${d0.toISOString().slice(0, 10)}T00:00`, `${d1.toISOString().slice(0, 10)}T00:00`).all<{ staff_id: number; start_at: string; end_at: string }>()).results)
     near.set(r.staff_id, [...(near.get(r.staff_id) ?? []), { start_at: r.start_at, end_at: r.end_at }]);
-  const cands: Candidate[] = people.map((p) => ({ staff_id: p.id, name: p.name, has_phone: !!p.phone, has_email: !!p.email, week_hours: hours.get(p.id) ?? 0, shifts: near.get(p.id) ?? [] }));
+  // Personal weekly maximums, time off and weekly unavailability (school) of each candidate.
+  const limits = new Map<number, number>();
+  for (const r of (await db.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${marks})`).bind(...people.map((p) => p.id)).all<{ staff_id: number; max_weekly_hours: number }>()).results) limits.set(r.staff_id, r.max_weekly_hours);
+  const offs = (await db.prepare(
+    `SELECT staff_id, start_date, end_date, start_time, end_time FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${marks}) AND start_date <= ? AND end_date >= ?`,
+  ).bind(...people.map((p) => p.id), req.end_at.slice(0, 10), req.start_at.slice(0, 10)).all<{ staff_id: number; start_date: string; end_date: string; start_time: string | null; end_time: string | null }>()).results;
+  const rules = (await db.prepare(`SELECT staff_id, dow, start_time, end_time, valid_from, valid_to FROM staff_availability WHERE staff_id IN (${marks}) AND NOT (kind = 'day_off' AND replacement_ok = 1)`).bind(...people.map((p) => p.id)).all<{ staff_id: number } & Unavailable>()).results; // a fixed day off still counts as available for replacements when the employee ticked it
+  const blockedOf = (id: number): "time_off" | "unavailable" | undefined =>
+    offs.some((o) => o.staff_id === id && overlapsTimeOff(o, req.start_at, req.end_at)) ? "time_off"
+      : findUnavailable(rules.filter((r) => r.staff_id === id), req.start_at, req.end_at) ? "unavailable" : undefined;
+  const cands: Candidate[] = people.map((p) => ({ staff_id: p.id, name: p.name, has_phone: !!p.phone, has_email: !!p.email, week_hours: hours.get(p.id) ?? 0, shifts: near.get(p.id) ?? [], max_hours: limits.get(p.id) ?? null, blocked: blockedOf(p.id) }));
   const r = chooseCandidates(req, req.sick_staff_id, cands, { overtime_hours: settings.overtime_hours, allow_overtime: settings.replacement_allow_overtime });
   return { contacts: new Map(people.map((p) => [p.id, p])), eligible: r.eligible.sort(byFewestHours), excluded: r.excluded };
 }

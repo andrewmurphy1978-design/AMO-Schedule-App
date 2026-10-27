@@ -18,6 +18,7 @@ import m0015 from "../migrations/0015_time_off.sql";
 import m0016 from "../migrations/0016_incidents.sql";
 import m0017 from "../migrations/0017_pre_open.sql";
 import m0018 from "../migrations/0018_default_wages.sql";
+import m0019 from "../migrations/0019_availability_limits.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -38,6 +39,7 @@ const MIGRATIONS: [string, string][] = [
   ["0016_incidents", m0016],
   ["0017_pre_open", m0017],
   ["0018_default_wages", m0018],
+  ["0019_availability_limits", m0019],
 ];
 
 const statements = (sql: string) =>

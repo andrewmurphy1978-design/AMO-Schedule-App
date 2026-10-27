@@ -113,7 +113,7 @@ const state = {
   sel: { restaurant: null, department: null, departments: [], week: mondayOf(new Date()), day: ymd(new Date()) },
 };
 
-const DEPTS = ["floor", "kitchen", "prep", "delivery"];
+const DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
@@ -214,7 +214,9 @@ function mergeSchedules(datas, restaurantId, depts) {
     .filter((e) => { const k = `${e.staff_id}|${e.start_at}|${e.end_at}`; return !key.has(k) && key.add(k); });
   const offSeen = new Set();
   const time_off = datas.flatMap((d) => d.time_off ?? []).filter((o) => { const k = `${o.staff_id}|${o.start_date}|${o.end_date}|${o.status}`; return !offSeen.has(k) && offSeen.add(k); });
-  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off };
+  const by_staff = Object.assign({}, ...datas.map((d) => d.limits?.by_staff ?? {}));
+  const days_off = Object.assign({}, ...datas.map((d) => d.days_off ?? {}));
+  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off, days_off, limits: { ...datas[0].limits, by_staff } };
 }
 function mergeRosters(rosters) {
   const by = new Map();
@@ -296,7 +298,13 @@ async function renderSchedule() {
         h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); sel.day = sel.week; render(); } }, "›"))),
     h("div", { class: "field" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", onClick: () => { sel.week = mondayOf(new Date()); sel.day = ymd(new Date()); render(); } }, t("today"))),
+    h("div", { class: "field" }, h("span", {}, " "),
+      h("button", { class: "btn", type: "button", title: t("printHint"), onClick: () => window.print() }, `🖨 ${t("printSchedule")}`)),
   );
+  // Only shown on paper: a title above the week table so the printed/PDF schedule can be posted in the restaurant.
+  const printHead = h("div", { class: "print-head" },
+    h("img", { src: "logo.png", alt: "Mikes", height: 48, onerror: (e) => e.target.remove() }),
+    h("div", {}, h("h1", {}, `${options.find((r) => r.id === sel.restaurant)?.name ?? ""} — ${sel.departments.map((d) => t(`dept.${d}`)).join(" · ")}`), h("p", {}, weekLabel(sel.week))));
 
   const status = h("p", {}, h("span", { class: `badge ${data.editable ? "edit" : ""}` }, data.editable ? t("canEdit") : t("viewOnly")));
   const byDay = (d) => data.shifts.filter((s) => dayOf(s.start_at) === d);
@@ -325,14 +333,14 @@ async function renderSchedule() {
       : h("div", { class: "empty" }, t("noShifts")),
     // Requested (C/D) and approved (C/A) time off that day.
     offToday.length ? h("div", { class: "off-list" }, h("h3", {}, t("timeOff")),
-      offToday.map((o) => h("div", { class: "elsewhere" }, h("span", { class: `off-chip ${o.status}` }, o.status === "approved" ? "C/A" : "C/D"), ` ${nameById.get(o.staff_id) ?? ""}`))) : null,
+      offToday.map((o) => h("div", { class: "elsewhere" }, h("span", { class: `off-chip ${o.status}` }, o.status === "approved" ? "C/A" : "C/D"), ` ${nameById.get(o.staff_id) ?? ""}${o.start_time ? ` · ${o.start_time}–${o.end_time}` : ""}`))) : null,
     // People on this schedule who work somewhere else that day (managers only).
     elsewhereToday.length ? h("div", { class: "elsewhere-list" }, h("h3", {}, t("elsewhereToday")),
       elsewhereToday.map((e) => h("div", { class: "elsewhere" }, h("b", {}, `↗ ${nameById.get(e.staff_id) ?? ""} · ${hhmm(e.start_at)}–${hhmm(e.end_at)}`), ` ${e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant}`))) : null,
     // Weekly hours per person (phones; on desktop they are the last column of the grid).
     data.hours && Object.keys(data.hours).length ? h("details", { class: "hours-panel" }, h("summary", {}, t("weekHours")),
       Object.entries(data.hours).map(([id, hh]) => [Number(id), hh]).sort((a, b) => (nameById.get(a[0]) ?? "").localeCompare(nameById.get(b[0]) ?? "", locale())).map(([id, hh]) =>
-        h("div", { class: `hours-line ${hh.all > (data.limits?.overtime_hours ?? 40) ? "over" : ""}` }, h("span", {}, nameById.get(id) ?? ""),
+        h("div", { class: `hours-line ${hh.all > Math.min(data.limits?.by_staff?.[id] ?? 1e9, data.limits?.overtime_hours ?? 40) ? "over" : ""}` }, h("span", {}, nameById.get(id) ?? ""),
           h("b", {}, `${hrs(hh.here)} ${t("hoursShort")}`, hh.all - hh.here > 0.01 ? ` (${hrs(hh.all)} ${t("hoursShort")} ${t("allPlaces")})` : "", hh.all > (data.limits?.overtime_hours ?? 40) ? " ⚠" : "")))) : null);
   const fab = data.editable ? h("button", { class: "fab", type: "button", "aria-label": t("addShift"), onClick: () => openEditor(null, { date: sel.day }) }, "+") : null;
 
@@ -346,14 +354,17 @@ async function renderSchedule() {
   const rows = [...people.entries()].sort((a, b) => a[1].localeCompare(b[1], locale()));
   const limit = data.limits?.overtime_hours ?? 40;
   const offAt = (id, d) => (data.time_off ?? []).find((o) => o.staff_id === id && o.start_date <= d && o.end_date >= d);
-  const offChip = (o) => h("div", { class: `off-chip ${o.status}`, title: o.status === "approved" ? t("offApproved") : t("offRequested") }, o.status === "approved" ? "C/A" : "C/D");
+  const offChip = (o) => h("div", { class: `off-chip ${o.status}`, title: o.status === "approved" ? t("offApproved") : t("offRequested") }, `${o.status === "approved" ? "C/A" : "C/D"}${o.start_time ? ` ${o.start_time.replace(/^0/, "").replace(":00", "")}–${o.end_time.replace(/^0/, "").replace(":00", "")}` : ""}`);
   const elsewhereAt = (id, d) => (data.elsewhere ?? []).filter((e) => e.staff_id === id && dayOf(e.start_at) === d);
   const place = (e) => (e.restaurant_id === sel.restaurant ? `${e.restaurant} · ${t(`dept.${e.department_id}`)}` : e.restaurant);
   const totalCell = (id) => {
     const hh = data.hours?.[id];
     if (!hh) return h("td", { class: "total" }, "");
-    const over = hh.all > limit;
+    const personal = data.limits?.by_staff?.[id];
+    const cap = personal != null ? Math.min(personal, limit) : limit;
+    const over = hh.all > cap;
     return h("td", { class: `total ${over ? "over" : ""}`, title: over ? t("overtimeWarn") : "" },
+      personal != null ? h("small", {}, `${t("maxShort")} ${hrs(personal)} ${t("hoursShort")}`) : null,
       h("strong", {}, `${hrs(hh.here)} ${t("hoursShort")}`),
       hh.all - hh.here > 0.01 ? h("small", {}, `${hrs(hh.all)} ${t("hoursShort")} ${t("allPlaces")}`) : null,
       over ? h("small", { class: "warn" }, `⚠ ${t("overtimeWarn")}`) : null);
@@ -363,11 +374,12 @@ async function renderSchedule() {
       h("th", { class: d === today ? "today" : "" },
         // Clicking a day here zooms the coverage view below on that day and scrolls to it.
         h("button", { type: "button", class: "th-zoom", title: t("zoomDay"), "aria-label": `${t("zoomDay")}: ${fmt(d, { weekday: "long", day: "numeric", month: "long" })}`, onClick: () => zoomTo(d) },
-          fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", {}, t("total")) : null)),
+          fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", {}, h("td", { class: "name" }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36), name), days.map((d) =>
         h("td", {},
           offAt(id, d) ? offChip(offAt(id, d)) : null,
+          (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
             const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${roleIcon(s)} ${roleName(s)}`, sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
@@ -384,7 +396,7 @@ async function renderSchedule() {
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
-  $app.replaceChildren(...[controls, status, data.editable ? coveragePanel(render) : null, daytabs, timeline, daily, grid, fab].filter(Boolean));
+  $app.replaceChildren(...[printHead, controls, status, data.editable ? coveragePanel(render) : null, daytabs, timeline, daily, grid, fab].filter(Boolean));
 }
 
 
@@ -656,10 +668,19 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
         alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("overlapTitle")), h("div", {}, t("overlapBody")),
           h("ul", {}, e.body.conflicts.map((c) => h("li", {}, `${c.restaurant} · ${c.start_at.slice(0, 10)} ${hhmm(c.start_at)}–${hhmm(c.end_at)}`))),
           h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
+      } else if (e.body?.error === "unavailable") {
+        const r = e.body.rule;
+        alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("unavailableTitle")),
+          h("div", {}, r.kind === "day_off" ? `${weekdayName(r.dow)} — ${t("fixedDayOff")}` : `${weekdayName(r.dow)} ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
+          h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
+      } else if (e.body?.error === "max_hours") {
+        alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("maxHoursTitle")),
+          h("div", {}, `${t("maxShort")} ${hrs(e.body.max)} ${t("hoursShort")} — ${t("wouldBe")} ${hrs(e.body.would_be)} ${t("hoursShort")}`),
+          h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
       } else if (e.body?.error === "time_off") {
         const o = e.body.time_off;
         alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, h("strong", {}, t("timeOffTitle")),
-          h("div", {}, `${o.status === "approved" ? t("offApproved") : t("offRequested")} : ${o.start_date} → ${o.end_date}`),
+          h("div", {}, `${o.status === "approved" ? t("offApproved") : t("offRequested")} : ${o.start_date} → ${o.end_date}${o.start_time ? ` (${o.start_time}–${o.end_time})` : ""}`),
           h("button", { class: "btn", type: "button", onClick: () => save(true) }, t("saveAnyway"))));
       } else alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e)));
     }
@@ -693,21 +714,79 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 
 // ---------- my shifts ----------
 // ---------- time off ----------
+// Weekly fixed day(s) off and recurring unavailable times (school, other job…), for one employee.
+function availabilityEditor(staffId) {
+  const box = h("div", { class: "availability" });
+  async function load() {
+    const rows = await api(`/availability?staff=${staffId}`);
+    const dayOffs = new Map(rows.filter((r) => r.kind === "day_off").map((r) => [r.dow, r]));
+    const days = h("div", { class: "seg", role: "group", "aria-label": t("fixedDaysOff") }, Array.from({ length: 7 }, (_, i) =>
+      h("button", { type: "button", "aria-pressed": String(dayOffs.has(i)), onClick: async () => {
+        try {
+          if (dayOffs.has(i)) await api(`/availability/${dayOffs.get(i).id}`, { method: "DELETE" });
+          else await api("/availability", { method: "POST", body: { staff_id: staffId, dow: i, kind: "day_off" } });
+          load();
+        } catch (e) { toast(errorText(e)); }
+      } }, fmt(addDays("2026-10-26", i), { weekday: "short" }))));
+    const dow = h("select", {}, Array.from({ length: 7 }, (_, i) => h("option", { value: i }, weekdayName(i))));
+    const st = timeField("08:00"), en = timeField("15:30");
+    const note = h("input", { maxLength: 120, placeholder: t("availabilityNote") });
+    const vf = h("input", { type: "date" }), vt = h("input", { type: "date" });
+    const list = rows.filter((r) => r.kind !== "day_off");
+    box.replaceChildren(
+      h("h4", {}, t("fixedDaysOff")), h("p", { class: "meta" }, t("fixedDaysOffHelp")), days,
+      // On each fixed day off: can this person still be asked to cover a sick colleague that day?
+      [...dayOffs.entries()].sort((a, b) => a[0] - b[0]).map(([i, r]) => h("label", { class: "check" },
+        h("input", { type: "checkbox", checked: !!r.replacement_ok, onChange: async (e) => { try { await api(`/availability/${r.id}`, { method: "PUT", body: { replacement_ok: e.target.checked } }); toast(t("saved")); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); } } }),
+        h("span", {}, `${weekdayName(i)} : ${t("replacementOk")}`))),
+      h("h4", {}, t("unavailableTimes")), h("p", { class: "meta" }, t("unavailableHelp")),
+      list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row" },
+        h("span", {}, h("b", {}, weekdayName(r.dow)), ` ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
+        r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ?? "…"} → ${r.valid_to ?? "…"}`) : null,
+        h("button", { class: "btn danger", type: "button", onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, t("delete"))))) : h("p", { class: "meta" }, t("noUnavailable")),
+      h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
+        h("label", { class: "field" }, h("span", {}, t("weekday")), dow),
+        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
+        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("validFrom")), vf), h("label", { class: "field" }, h("span", {}, t("validTo")), vt)),
+        h("label", { class: "field" }, h("span", {}, t("note")), note),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try { await api("/availability", { method: "POST", body: { staff_id: staffId, dow: Number(dow.value), start_time: st.value, end_time: en.value, note: note.value, valid_from: vf.value || undefined, valid_to: vt.value || undefined } }); load(); }
+          catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
+        } }, t("add"))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 async function renderTimeOff() {
   const today = ymd(new Date());
   const [mine, review] = await Promise.all([api("/time-off/mine"), api("/time-off/review")]);
-  const from = h("input", { type: "date", required: true, min: today, value: today });
-  const to = h("input", { type: "date", min: today, value: today });
+  const from = h("input", { type: "date", required: true, value: today });
+  const to = h("input", { type: "date", value: today });
   from.addEventListener("change", () => { if (to.value < from.value) to.value = from.value; to.min = from.value; });
+  to.min = today;
   const note = h("input", { maxLength: 300, placeholder: t("optional") });
   const statusText = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
-  const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short" })}`);
+  const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short" })}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
+  // Managers and admins can also enter time off for an employee (approved at once).
+  const people = state.me.me.is_admin || state.me.managed.length ? await api("/time-off/people").catch(() => []) : [];
+  const forWho = people.length ? h("select", {}, h("option", { value: "" }, t("myself")), people.map((p) => h("option", { value: p.id }, p.name))) : null;
+  const allDay = h("input", { type: "checkbox", checked: true });
+  const tStart = timeField("14:00"), tEnd = timeField("21:00");
+  const timeBox = h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), tStart), h("label", { class: "field" }, h("span", {}, t("end")), tEnd));
+  allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
   const form = h("form", { class: "panel inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
-    try { await api("/time-off", { method: "POST", body: { start_date: from.value, end_date: to.value || from.value, note: note.value } }); toast(t("requestSent")); render(); }
-    catch (err) { toast(err.body?.error === "already_requested" ? t("alreadyRequested") : errorText(err)); }
+    try {
+      const body = { start_date: from.value, end_date: to.value || from.value, note: note.value };
+      if (!allDay.checked) { body.start_time = tStart.value; body.end_time = tEnd.value; }
+      if (forWho?.value) body.staff_id = Number(forWho.value);
+      await api("/time-off", { method: "POST", body }); toast(forWho?.value ? t("saved") : t("requestSent")); render();
+    } catch (err) { toast(err.body?.error === "already_requested" ? t("alreadyRequested") : err.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(err)); }
   } }, h("h2", {}, t("requestTimeOff")),
+    forWho ? h("label", { class: "field" }, h("span", {}, t("forEmployee")), forWho, h("span", { class: "meta" }, t("forEmployeeHelp"))) : null,
     h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to),
+    h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))), timeBox,
     h("label", { class: "field" }, h("span", {}, t("note")), note), h("button", { class: "btn primary", type: "submit" }, t("sendRequest")));
   const myList = h("section", { class: "panel" }, h("h2", {}, t("myTimeOff")), mine.length ? mine.map((r) =>
     h("div", { class: "cov-row" }, h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
@@ -767,6 +846,7 @@ async function renderAccount() {
         h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
         h("button", { class: "btn primary", type: "submit" }, t("save")))),
     h("section", { class: "panel" }, h("h3", {}, t("calendarTitle")), h("p", { class: "meta" }, t("calendarHelp")), calBox),
+    h("section", { class: "panel" }, h("h3", {}, t("myAvailability")), availabilityEditor(state.me.me.id)),
     h("section", { class: "panel" }, h("h3", {}, t("myPayslips")), slipsBox),
     h("section", { class: "panel" }, h("h3", {}, t("passwordTitle")), h("p", { class: "meta" }, t("passwordHelp")))));
 }
@@ -1443,6 +1523,7 @@ function staffCard(s, ov) {
     return { rid, ro, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: (() => { const dr = ov.default_rates?.roles?.[rid] ?? ov.default_rates?.general_cents; return dr != null ? `${t("defaultWord")} ${(dr / 100).toFixed(2)}` : t("sameAsGeneral"); })(), value: cents != null ? (cents / 100).toFixed(2) : "" }) };
   }).filter((x) => x.ro);
   const adminMsg = h("div", { class: "alert", role: "alert" });
+  const maxHours = h("input", { type: "number", min: 1, max: 168, step: "0.5", inputMode: "decimal", placeholder: t("noMaxHours"), value: s.max_weekly_hours ?? "" });
   const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
@@ -1476,12 +1557,13 @@ function staffCard(s, ov) {
     h("button", { type: "button", class: "swatch", style: `background:${c}`, "aria-label": c, onClick: () => setColor(c) })),
     h("button", { type: "button", class: "btn", onClick: () => setColor(null) }, t("autoColour")));
   const summaryDot = h("span", { class: "dot", style: `background:${staffColor(s.id, chosen)}` });
-  const details = h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
+  const details = h("form", { id: `staff-form-${s.id}`, class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
     try {
       await api(`/staff/${s.id}`, { method: "PUT", body: { name: name.value, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
+      const lim = await api(`/staff/${s.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxHours.value } }); s.max_weekly_hours = lim.max_weekly_hours;
       if (sinInput.value.trim()) { const r = await api(`/staff/${s.id}/sin`, { method: "PUT", body: { sin: sinInput.value } }); s.sin_last3 = r.sin_last3; sinInput.value = ""; sinInput.placeholder = `••• ••• ${r.sin_last3}`; }
       toast(t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
@@ -1504,12 +1586,12 @@ function staffCard(s, ov) {
     } }), h("span", {}, t("isAdminLabel"))),
     adminMsg,
     h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
+    h("label", { class: "field" }, h("span", {}, t("maxWeeklyHours")), maxHours, h("span", { class: "meta" }, t("maxWeeklyHoursHelp"))),
     h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
     roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
       h("label", { class: "role-rate" }, h("span", {}, `${roleIcon(x.ro)} ${roleName(x.ro)}`), x.input))) : null,
     photoRow,
-    h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches),
-    h("button", { class: "btn primary", type: "submit" }, t("save")));
+    h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches));
 
   const toggle = (checked, onOn, onOff) => async (e) => {
     try { await (e.target.checked ? onOn() : onOff()); toast(t("saved")); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); }
@@ -1561,9 +1643,11 @@ function staffCard(s, ov) {
     let dlg = document.getElementById("staff-modal");
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
-      h("div", { class: "dlg-head" }, h("h2", {}, s.name), h("button", { class: "icon-btn", type: "button", "aria-label": t("close"), onClick: () => dlg.close() }, "✕")),
+      // Sticky header: Save submits the details form below (form= attribute), Close just closes.
+      h("div", { class: "dlg-head" }, h("h2", {}, s.name),
+        h("div", { class: "dlg-actions" }, h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save")), h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))),
       h("h3", {}, t("details")), details, h("h3", {}, t("assignments")), blocks,
-      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))));
+      h("h3", {}, t("availability")), availabilityEditor(s.id)));
     dlg.addEventListener("close", () => { nameEl.textContent = name.value || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };

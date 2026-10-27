@@ -64,6 +64,13 @@ const dict = {
     isAdminLabel: "Administrateur (accès à tout)", adminNeedsEmail: "Cet employé n’a pas de courriel. Écris-le dans le champ Courriel ci-dessus, puis recoche : il sert à la connexion.", cannotRemoveSelf: "Tu ne peux pas retirer ton propre accès administrateur.", lastAdmin: "Il doit rester au moins un administrateur.",
     preOpenTitle: "Arrivée avant l’ouverture", preOpenHelp: "Nombre de minutes avant l’ouverture où chaque rôle doit arriver (ex. cuisinier et serveur : 30). Le début des nouveaux quarts est réglé en conséquence et la période est indiquée dans la couverture.", setupTime: "Préparation avant l’ouverture",
     defaultRatesTitle: "Taux horaires par défaut", defaultRatesHelp: "Utilisés quand un employé n’a pas de taux à lui. Serveurs et livreurs : taux du personnel à pourboires. Les autres : taux général. Un taux inscrit sur la fiche d’un employé a toujours priorité.", generalRate: "Taux général ($ / h)", defaultWord: "Défaut",
+    myself: "Moi-même (demande)", forEmployee: "Pour", forEmployeeHelp: "Choisis un employé pour lui inscrire un congé directement (accordé tout de suite).", allDay: "Toute la journée",
+    unavailableTitle: "Employé indisponible", maxHoursTitle: "Maximum d’heures par semaine dépassé", maxShort: "Max", wouldBe: "total prévu",
+    fixedDaysOff: "Jours de congé fixes", fixedDaysOffHelp: "Les jours de la semaine où cet employé ne travaille pas (ex. lundi et mardi).", fixedDayOff: "Congé fixe", fixedOffShort: "Congé fixe",
+    replacementOk: "disponible pour les remplacements", unavailableTimes: "Plages d’indisponibilité", unavailableHelp: "Ex. horaire d’école : lundi 8 h à 15 h 30, du début à la fin de la session.",
+    availabilityNote: "Ex. École", noUnavailable: "Aucune indisponibilité.", weekday: "Jour", from: "De", to: "À", validFrom: "Valide à partir du", validTo: "Jusqu’au",
+    myAvailability: "Mes disponibilités", availability: "Disponibilités", maxWeeklyHours: "Maximum d’heures par semaine", noMaxHours: "Aucune limite", maxWeeklyHoursHelp: "Ex. 17 h pour un employé de moins de 16 ans. Jamais dépassé pour les remplacements; averti lors de la planification.",
+    printSchedule: "Imprimer / PDF", printHint: "Dans la fenêtre d’impression, choisis « Enregistrer au format PDF ».",
     close: "Fermer", managerOf: "Gestionnaire de ce département", invalidEmail: "Courriel invalide.", emailTaken: "Ce courriel est déjà utilisé par un autre employé.",
     targets: "Cibles de personnel", targetsHelp: "Nombre d’employés souhaité à chaque heure. Laissez vide s’il n’y a pas de cible.",
     allDays: "Tous les jours", resetDay: "Retirer les valeurs propres à ce jour", dayOverride: "Valeurs propres à ce jour",
@@ -88,7 +95,7 @@ const dict = {
     zoomDay: "Agrandir ce jour", backToWeek: "Semaine complète", prevDay: "Jour précédent", nextDay: "Jour suivant", zoomHint: "Cliquez sur un jour pour l’agrandir.",
     total: "Total", allPlaces: "au total", overtimeWarn: "Dépasse le seuil d’heures", sickOpen: "Malade", replacing: "remplace", elsewhere: "Travaille ailleurs ce jour-là",
     elsewhereToday: "Travaille ailleurs ce jour-là", weekHours: "Heures de la semaine", myWeekHours: "Mes heures cette semaine",
-    "dept.floor": "Salle", "dept.kitchen": "Cuisine", "dept.prep": "Plonge / Préparation", "sameAsGeneral": "Taux général", "rateByRole": "Taux par rôle", "dept.delivery": "Livraison",
+    "dept.floor": "Salle", "dept.kitchen": "Cuisine", "dept.prep": "Plonge / Préparation", "dept.admin": "Administration", "sameAsGeneral": "Taux général", "rateByRole": "Taux par rôle", "dept.delivery": "Livraison",
     footer: "Toujours Mikes — gestion des horaires",
   },
   en: {
@@ -155,6 +162,13 @@ const dict = {
     isAdminLabel: "Administrator (access to everything)", adminNeedsEmail: "This employee has no email. Type it in the Email field above, then tick again: it is used to sign in.", cannotRemoveSelf: "You cannot remove your own administrator access.", lastAdmin: "At least one administrator must remain.",
     preOpenTitle: "Arrival before opening", preOpenHelp: "How many minutes before opening each role should arrive (e.g. cook and waiter: 30). New shifts start accordingly and the period is shown on the coverage view.", setupTime: "Setup before opening",
     defaultRatesTitle: "Default hourly rates", defaultRatesHelp: "Used when an employee has no rate of their own. Waiters and delivery drivers: the tipped-staff rate. Everyone else: the general rate. A rate entered on an employee’s card always wins.", generalRate: "General rate ($ / h)", defaultWord: "Default",
+    myself: "Myself (request)", forEmployee: "For", forEmployeeHelp: "Pick an employee to enter time off for them directly (approved right away).", allDay: "All day",
+    unavailableTitle: "Employee unavailable", maxHoursTitle: "Weekly hours maximum exceeded", maxShort: "Max", wouldBe: "planned total",
+    fixedDaysOff: "Fixed days off", fixedDaysOffHelp: "The weekdays this employee does not work (e.g. Monday and Tuesday).", fixedDayOff: "Fixed day off", fixedOffShort: "Day off",
+    replacementOk: "available for replacements", unavailableTimes: "Unavailable times", unavailableHelp: "E.g. school schedule: Monday 8:00 to 15:30, for the length of the semester.",
+    availabilityNote: "E.g. School", noUnavailable: "No unavailability.", weekday: "Day", from: "From", to: "To", validFrom: "Valid from", validTo: "Until",
+    myAvailability: "My availability", availability: "Availability", maxWeeklyHours: "Maximum hours per week", noMaxHours: "No limit", maxWeeklyHoursHelp: "E.g. 17 h for an employee under 16. Never exceeded for replacements; a warning when scheduling.",
+    printSchedule: "Print / PDF", printHint: "In the print window, choose “Save as PDF”.",
     close: "Close", managerOf: "Manager of this department", invalidEmail: "Invalid email.", emailTaken: "This email is already used by another employee.",
     targets: "Staffing targets", targetsHelp: "How many employees you want at each time. Leave blank for no target.",
     allDays: "Every day", resetDay: "Remove this day’s own values", dayOverride: "Values specific to this day",
@@ -179,7 +193,7 @@ const dict = {
     zoomDay: "Zoom on this day", backToWeek: "Full week", prevDay: "Previous day", nextDay: "Next day", zoomHint: "Click a day to zoom in.",
     total: "Total", allPlaces: "in total", overtimeWarn: "Over the weekly-hours limit", sickOpen: "Sick", replacing: "replacing", elsewhere: "Working elsewhere that day",
     elsewhereToday: "Working elsewhere that day", weekHours: "Weekly hours", myWeekHours: "My hours this week",
-    "dept.floor": "Floor", "dept.kitchen": "Kitchen", "dept.prep": "Dish / Prep", "sameAsGeneral": "General rate", "rateByRole": "Rate by role", "dept.delivery": "Delivery",
+    "dept.floor": "Floor", "dept.kitchen": "Kitchen", "dept.prep": "Dish / Prep", "dept.admin": "Administration", "sameAsGeneral": "General rate", "rateByRole": "Rate by role", "dept.delivery": "Delivery",
     footer: "Toujours Mikes — schedule management",
   },
 };
@@ -200,8 +214,8 @@ export const t = (key) => dict[lang][key] ?? dict.fr[key] ?? key;
 export const locale = () => (lang === "fr" ? "fr-CA" : "en-CA");
 // Role names come from the API as name_fr / name_en.
 // One emoji per role (matched on the English role name); unknown roles fall back to their department's icon.
-const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤" };
-const DEPT_ICONS = { floor: "🍴", kitchen: "🍕", prep: "🔪", delivery: "🚗" };
+const ROLE_ICONS = { "dishwasher": "🍽️", "cook": "🍕", "chef": "👨‍🍳", "prep cook": "🔪", "delivery driver": "🚗", "waiter / waitress": "🍴", "host / hostess": "🛎️", "busboy / busgirl": "🥤", "manager": "🧑‍💼", "assistant manager": "📋", "office": "🗂️" };
+const DEPT_ICONS = { floor: "🍴", kitchen: "🍕", prep: "🔪", delivery: "🚗", admin: "🗂️" };
 export const deptIcon = (d) => DEPT_ICONS[d] ?? "•";
 export const roleIcon = (r) => ROLE_ICONS[(r?.name_en ?? "").toLowerCase()] ?? DEPT_ICONS[r?.department_id] ?? "•";
 export const roleName = (r) => (lang === "fr" ? r.name_fr : r.name_en);
