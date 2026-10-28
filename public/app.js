@@ -201,6 +201,7 @@ async function render() {
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
+    if (e.status === 401) { state.me = null; renderLogin(); return; } // session expired
     console.error("render failed:", e);
     $app.replaceChildren(h("div", { class: "empty" }, errorText(e)));
   }
@@ -208,6 +209,7 @@ async function render() {
 
 document.getElementById("lang-toggle").addEventListener("click", () => {
   setLang(getLang() === "fr" ? "en" : "fr");
+  if (!state.me) { renderChrome(); renderLogin(); return; }
   render();
 });
 
@@ -1276,7 +1278,8 @@ async function renderAccount() {
     h("label", { class: "field" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
     h("div", { class: "field" }, h("span", {}, t("language")), lang),
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
-    h("button", { class: "btn primary", type: "submit" }, t("save")));
+    h("button", { class: "btn primary", type: "submit" }, t("save")),
+    h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
   const tabs = [
     ["profile", t("details"), () => [profile]],
     ["daysoff", t("fixedDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
@@ -2252,10 +2255,45 @@ function staffCard(s, ov) {
 }
 
 // ---------- boot ----------
+// Sign-in screen: email -> 6-digit code sent by email -> session cookie.
+function renderLogin(prefill = "") {
+  renderChrome();
+  document.getElementById("main-tabs").replaceChildren(); // nothing to navigate to before signing in
+  const email = h("input", { type: "email", required: true, autocomplete: "email", inputMode: "email", value: prefill, placeholder: "prenom@exemple.com", maxLength: 200 });
+  const code = h("input", { required: true, autocomplete: "one-time-code", inputMode: "numeric", pattern: "[0-9]{6}", maxLength: 6, class: "login-code", "aria-label": t("loginCode") });
+  const msg = h("div", { class: "alert", role: "alert" });
+  const fail = (e, fallback) => { msg.textContent = e?.body?.error === "too_many_requests" ? t("loginTooMany") : e?.body?.error === "email_not_configured" ? t("loginEmailOff") : fallback; };
+  const stepEmail = () => {
+    msg.textContent = "";
+    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, t("loginTitle")), h("p", { class: "meta" }, t("loginIntro")),
+      h("form", { class: "acc-form", onSubmit: async (e) => {
+        e.preventDefault();
+        try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); stepCode(); }
+        catch (err) { fail(err, err.body?.error === "invalid_email" ? t("invalidEmail") : t("genericError")); }
+      } }, h("label", { class: "field" }, h("span", {}, t("loginEmail")), email), msg, h("button", { class: "btn primary", type: "submit" }, t("loginSend")))));
+    email.focus();
+  };
+  const stepCode = () => {
+    msg.textContent = ""; code.value = "";
+    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, t("loginTitle")), h("p", { class: "meta" }, t("loginCodeSent")), h("p", {}, h("b", {}, email.value.trim())),
+      h("form", { class: "acc-form", onSubmit: async (e) => {
+        e.preventDefault();
+        try { await api("/auth/verify", { method: "POST", body: { email: email.value, code: code.value } }); boot(); }
+        catch (err) { fail(err, t("loginBadCode")); code.value = ""; code.focus(); }
+      } }, code, msg, h("button", { class: "btn primary", type: "submit" }, t("loginVerify"))),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: async () => { try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); toast(t("loginCodeSent").split(":")[0]); } catch (err) { fail(err, t("genericError")); } } }, t("loginResend")),
+        h("button", { class: "btn", type: "button", onClick: stepEmail }, t("loginChangeEmail")))));
+    code.focus();
+  };
+  stepEmail();
+}
+
 async function boot() {
   try {
     state.me = await api("/me");
   } catch (e) {
+    if (e.status === 401) { renderLogin(); return; }
     renderChrome();
     const detail = e.body?.email ? `${t("signedInAs")} ${e.body.email}` : e.body?.reason ?? String(e.message ?? "");
     $app.replaceChildren(h("div", { class: "empty" }, h("h2", {}, t("noAccessTitle")), t("noAccessBody"),

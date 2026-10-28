@@ -18,6 +18,7 @@ import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
+import { CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
 import { localNow, mondayOfDate } from "./week.ts";
 import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
@@ -63,8 +64,20 @@ async function identify(c: Context<any>): Promise<{ email?: string; reason?: str
     const e = (c.req.header("X-Dev-User") ?? c.env.DEV_USER_EMAIL ?? "").toLowerCase();
     return e ? { email: e } : { reason: "no_dev_user" };
   }
+  // 1) In-app session (cookie set after the emailed one-time code was entered).
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  if (sid) {
+    const s = await (c.env.DB as D1Database).prepare("SELECT email FROM sessions WHERE token_hash = ? AND expires_at > ?").bind(await sha256Hex(sid), Date.now()).first<{ email: string }>();
+    if (s) {
+      // Cookie-authenticated writes must come from this site (CSRF defence on top of SameSite=Lax).
+      const origin = c.req.header("origin");
+      if (c.req.method !== "GET" && c.req.method !== "HEAD" && origin && new URL(origin).host !== new URL(c.req.url).host) return { reason: "bad_origin" };
+      return { email: s.email };
+    }
+  }
+  // 2) Cloudflare Access (still honoured when it is configured in front of the app).
   const { ACCESS_TEAM_DOMAIN: team, ACCESS_AUD: aud } = c.env;
-  if (!team || !aud) return { reason: "access_not_configured" };
+  if (!team || !aud) return { reason: "no_session" };
   const token = c.req.header("Cf-Access-Jwt-Assertion");
   if (!token) return { reason: "no_jwt" };
   try {
@@ -77,6 +90,7 @@ async function identify(c: Context<any>): Promise<{ email?: string; reason?: str
 
 app.use("/api/*", async (c, next) => {
   await ensureMigrated(c.env.DB);
+  if (c.req.path.startsWith("/api/auth/")) return next(); // sign-in endpoints are public
   const { email, reason } = await identify(c);
   if (!email) return c.json({ error: "unauthenticated", reason }, 401);
   let row = await c.env.DB.prepare("SELECT id, name, email, is_admin, active FROM staff WHERE lower(email) = ?")
@@ -161,6 +175,57 @@ const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : 
 // ---------- Me ----------
 // Ids of all employees (no names): the browser ranks them to give everyone a distinct automatic colour.
 app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT id FROM staff ORDER BY id").all<{ id: number }>()).results.map((r) => r.id)));
+
+// ---------- In-app sign-in: email one-time code -> session cookie ----------
+const isSecure = (c: Context<any>) => new URL(c.req.url).protocol === "https:";
+
+app.post("/api/auth/request", async (c) => {
+  const b = await c.req.json<{ email?: string; lang?: string }>().catch(() => ({} as { email?: string; lang?: string }));
+  const email = (b.email ?? "").trim().toLowerCase();
+  if (!looksLikeEmail(email)) return c.json({ error: "invalid_email" }, 400);
+  const db = c.env.DB, now = Date.now();
+  const conn = await loadConnections(c.env, db);
+  if (!conn.smtp) return c.json({ error: "email_not_configured" }, 503);
+  await db.prepare("DELETE FROM login_codes WHERE expires_at < ?").bind(now - 3600_000).run();
+  await db.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now).run();
+  // Identical answer whether or not the address belongs to an employee: nobody can probe who works here.
+  const recent = await db.prepare("SELECT COUNT(*) AS n, MAX(created_at) AS last FROM login_codes WHERE email = ? AND created_at > ?").bind(email, now - 3600_000).first<{ n: number; last: number | null }>();
+  if ((recent?.n ?? 0) >= MAX_CODES_PER_HOUR || (recent?.last && now - recent.last < MIN_GAP_MS)) return c.json({ error: "too_many_requests" }, 429);
+  const staff = await db.prepare("SELECT id, lang, active FROM staff WHERE lower(email) = ?").bind(email).first<{ id: number; lang: string; active: number | null }>();
+  const allowed = (staff && staff.active !== 0) || (!!c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase());
+  const code = newCode();
+  const pepper = c.env.SIN_KEY ?? "";
+  await db.prepare("INSERT INTO login_codes (email, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?)")
+    .bind(email, allowed ? await codeHash(pepper, email, code) : await sha256Hex(crypto.randomUUID()), now + CODE_TTL_MS, now).run();
+  if (allowed) {
+    const lang = staff?.lang === "en" || (!staff && b.lang === "en") ? "en" : "fr";
+    c.executionCtx.waitUntil(deliver(db, conn, "email", email, loginMessage(lang, code), "login_code", staff?.id ?? null).then(() => {}));
+  }
+  return c.json({ ok: true });
+});
+
+app.post("/api/auth/verify", async (c) => {
+  const b = await c.req.json<{ email?: string; code?: string }>().catch(() => ({} as { email?: string; code?: string }));
+  const email = (b.email ?? "").trim().toLowerCase(), code = (b.code ?? "").replace(/\s/g, "");
+  if (!looksLikeEmail(email) || !/^\d{6}$/.test(code)) return c.json({ error: "invalid_code" }, 400);
+  const db = c.env.DB, now = Date.now();
+  const row = await db.prepare("SELECT id, code_hash, attempts FROM login_codes WHERE email = ? AND expires_at > ? ORDER BY id DESC LIMIT 1").bind(email, now).first<{ id: number; code_hash: string; attempts: number }>();
+  if (!row || row.attempts >= MAX_ATTEMPTS) return c.json({ error: "invalid_code" }, 400);
+  await db.prepare("UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?").bind(row.id).run();
+  if (!safeEqual(row.code_hash, await codeHash(c.env.SIN_KEY ?? "", email, code))) return c.json({ error: "invalid_code" }, 400);
+  await db.prepare("DELETE FROM login_codes WHERE email = ?").bind(email).run();
+  const token = newSessionToken();
+  await db.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now).run();
+  c.header("Set-Cookie", sessionCookie(token, isSecure(c)));
+  return c.json({ ok: true });
+});
+
+app.post("/api/auth/logout", async (c) => {
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  if (sid) await c.env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256Hex(sid)).run();
+  c.header("Set-Cookie", clearCookie(isSecure(c)));
+  return c.json({ ok: true });
+});
 
 app.get("/api/me", async (c) => {
   const me = c.get("me");
