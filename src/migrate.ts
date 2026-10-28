@@ -35,6 +35,7 @@ import m0032 from "../migrations/0032_remove_repeated_roles.sql";
 import m0033 from "../migrations/0033_login.sql";
 import m0034 from "../migrations/0034_clients.sql";
 import m0035 from "../migrations/0035_api_tokens.sql";
+import m0036 from "../migrations/0036_webhooks.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -72,6 +73,7 @@ const MIGRATIONS: [string, string][] = [
   ["0033_login", m0033],
   ["0034_clients", m0034],
   ["0035_api_tokens", m0035],
+  ["0036_webhooks", m0036],
 ];
 
 const statements = (sql: string) =>

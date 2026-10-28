@@ -19,6 +19,7 @@ import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
+import { EVENTS, MAX_ENDPOINTS, queueEvent, flushDeliveries, validateUrl, validateEvents, newSecret, staffData, shiftData, timeOffData, coverageData, type EventName } from "./webhooks.ts";
 import { parseBrand, validateBrandPatch, senderAddress, LOGO_TYPES, MAX_LOGO_BYTES, type Brand } from "./brand.ts";
 import { settingKey, clientSettingRows, getSetting, putSettingStmt, delSettingStmt } from "./tenant.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
@@ -149,6 +150,13 @@ app.use("/api/*", async (c, next) => {
 });
 
 const superAdmins = (env: Env) => [env.SUPER_ADMIN_EMAILS, env.ADMIN_EMAIL].flatMap((v) => (v ?? "").split(",")).map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+// Webhooks: queue the event for the client's endpoints and send it in the background. Never breaks the request.
+const emitTo = (c: Context<any>, clientId: number, event: EventName, build: () => Promise<unknown>) =>
+  c.executionCtx.waitUntil((async () => {
+    try { await queueEvent(c.env.DB, clientId, event, await build()); await flushDeliveries(c.env.DB); } catch { /* webhooks never break a request */ }
+  })());
+const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) => emitTo(c, (c.get("me") as Me).client_id, event, build);
 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
@@ -291,6 +299,80 @@ app.delete("/api/admin/tokens/:id", requireHuman, async (c) => {
   if (!id) return c.json({ error: "bad_id" }, 400);
   const r = await c.env.DB.prepare("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND client_id = ? AND revoked_at IS NULL").bind(Date.now(), id, c.get("me").client_id).run();
   return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// ---------- Webhooks (client administrators, in the browser) ----------
+const endpointView = (r: any) => ({ id: r.id, name: r.name, url: r.url, events: JSON.parse(r.events), active: r.active === 1, failures: r.failures, created_at: r.created_at, secret_hint: `…${String(r.secret).slice(-4)}`, last_delivery: r.last_delivery ?? null });
+app.get("/api/webhooks/events", requireHuman, (c) => c.json(EVENTS));
+app.get("/api/admin/webhooks", requireHuman, async (c) => {
+  const rows = (await c.env.DB.prepare(
+    `SELECT e.*, (SELECT json_object('status', d.status, 'code', d.response_code, 'at', COALESCE(d.sent_at, d.created_at)) FROM webhook_deliveries d WHERE d.endpoint_id = e.id ORDER BY d.id DESC LIMIT 1) AS last_delivery
+     FROM webhook_endpoints e WHERE e.client_id = ? ORDER BY e.id`).bind(c.get("me").client_id).all<any>()).results;
+  return c.json(rows.map((r) => endpointView({ ...r, last_delivery: r.last_delivery ? JSON.parse(r.last_delivery) : null })));
+});
+app.post("/api/admin/webhooks", requireHuman, async (c) => {
+  const me = c.get("me");
+  const b = await c.req.json<{ name?: string; url?: string; events?: unknown }>().catch(() => ({} as any));
+  const name = (b.name ?? "").trim(), events = validateEvents(b.events);
+  if (!name || name.length > 60) return c.json({ error: "name_required" }, 400);
+  const bad = validateUrl(b.url ?? "", c.env.DEV_MODE === "true");
+  if (bad) return c.json({ error: bad }, 400);
+  if (!events) return c.json({ error: "invalid_events" }, 400);
+  const n = await c.env.DB.prepare("SELECT count(*) AS n FROM webhook_endpoints WHERE client_id = ?").bind(me.client_id).first<{ n: number }>();
+  if ((n?.n ?? 0) >= MAX_ENDPOINTS) return c.json({ error: "too_many_endpoints" }, 409);
+  const secret = newSecret();
+  const r = await c.env.DB.prepare("INSERT INTO webhook_endpoints (client_id, name, url, secret, events, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(me.client_id, name, b.url, secret, JSON.stringify(events), me.id, Date.now()).run();
+  return c.json({ id: r.meta.last_row_id, secret }, 201); // the secret is shown only now
+});
+const ownEndpoint = (c: Context<any>, id: number) => (c.env.DB as D1Database).prepare("SELECT * FROM webhook_endpoints WHERE id = ? AND client_id = ?").bind(id, (c.get("me") as Me).client_id).first<any>();
+app.put("/api/admin/webhooks/:id", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ep = id ? await ownEndpoint(c, id) : null;
+  if (!ep) return c.json({ error: "not_found" }, 404);
+  const b = await c.req.json<{ name?: string; url?: string; events?: unknown; active?: boolean; rotate_secret?: boolean }>().catch(() => ({} as any));
+  const name = b.name === undefined ? ep.name : String(b.name).trim();
+  const url = b.url === undefined ? ep.url : b.url;
+  const events = b.events === undefined ? JSON.parse(ep.events) : validateEvents(b.events);
+  if (!name || name.length > 60) return c.json({ error: "name_required" }, 400);
+  const bad = validateUrl(url, c.env.DEV_MODE === "true"); if (bad) return c.json({ error: bad }, 400);
+  if (!events) return c.json({ error: "invalid_events" }, 400);
+  const secret = b.rotate_secret ? newSecret() : ep.secret;
+  const active = b.active === undefined ? ep.active : b.active ? 1 : 0;
+  await c.env.DB.prepare("UPDATE webhook_endpoints SET name = ?, url = ?, events = ?, secret = ?, active = ?, failures = ? WHERE id = ?")
+    .bind(name, url, JSON.stringify(events), secret, active, active === 1 && ep.active === 0 ? 0 : ep.failures, id).run();
+  return c.json({ ok: true, ...(b.rotate_secret ? { secret } : {}) });
+});
+app.delete("/api/admin/webhooks/:id", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id || !(await ownEndpoint(c, id))) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.batch([c.env.DB.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id = ?").bind(id), c.env.DB.prepare("DELETE FROM webhook_endpoints WHERE id = ?").bind(id)]);
+  return c.json({ ok: true });
+});
+// Sends a "ping" right now so the CRM developer can check the URL and the signature.
+app.post("/api/admin/webhooks/:id/test", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ep = id ? await ownEndpoint(c, id) : null;
+  if (!ep) return c.json({ error: "not_found" }, 404);
+  await queueEvent(c.env.DB, c.get("me").client_id, "ping", { message: "Test from AMO Schedule App" }, ep.id);
+  await flushDeliveries(c.env.DB);
+  const d = await c.env.DB.prepare("SELECT status, response_code, error, attempts FROM webhook_deliveries WHERE endpoint_id = ? ORDER BY id DESC LIMIT 1").bind(ep.id).first();
+  return c.json(d ?? { status: "none" });
+});
+app.get("/api/admin/webhooks/:id/deliveries", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id || !(await ownEndpoint(c, id))) return c.json({ error: "not_found" }, 404);
+  const rows = await c.env.DB.prepare("SELECT id, event, status, attempts, response_code, error, created_at, sent_at, next_attempt_at FROM webhook_deliveries WHERE endpoint_id = ? ORDER BY id DESC LIMIT 50").bind(id).all();
+  return c.json(rows.results);
+});
+// Re-sends a failed delivery.
+app.post("/api/admin/webhooks/:id/deliveries/:did/retry", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id")), did = intParam(c.req.param("did"));
+  if (!id || !did || !(await ownEndpoint(c, id))) return c.json({ error: "not_found" }, 404);
+  const r = await c.env.DB.prepare("UPDATE webhook_deliveries SET status = 'pending', attempts = 0, next_attempt_at = ? WHERE id = ? AND endpoint_id = ? AND status = 'failed'").bind(Date.now(), did, id).run();
+  if (!r.meta.changes) return c.json({ error: "not_found" }, 404);
+  await flushDeliveries(c.env.DB);
+  return c.json({ ok: true });
 });
 
 // ---------- Clients (platform owners only) ----------
@@ -529,6 +611,7 @@ app.put("/api/staff/:id/active", requireAdmin, async (c) => {
   // Pending replacement offers to this person are no longer valid.
   if (!active) await c.env.DB.prepare("UPDATE coverage_offers SET status = 'closed' WHERE staff_id = ? AND status = 'sent'").bind(id).run().catch(() => {});
   const future = await c.env.DB.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND status = 'ok' AND start_at >= ?").bind(id, localNow(c.env.TIMEZONE)).first<{ n: number }>();
+  emit(c, "staff.active_changed", () => staffData(c.env.DB, id));
   return c.json({ ok: true, active, upcoming_shifts: active ? 0 : future?.n ?? 0 });
 });
 
@@ -796,6 +879,7 @@ app.post("/api/staff", requireAdmin, async (c) => {
     const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin, sex, client_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null, c.get("me").client_id)
       .run();
+    emit(c, "staff.created", () => staffData(c.env.DB, r.meta.last_row_id as number));
     return c.json({ id: r.meta.last_row_id }, 201);
   } catch {
     return c.json({ error: "email_taken" }, 409);
@@ -1161,6 +1245,7 @@ app.post("/api/time-off", async (c) => {
       }
     }
   } catch { /* messaging problems never block the request */ }
+  emit(c, forOther ? "time_off.decided" : "time_off.requested", () => timeOffData(c.env.DB, r.meta.last_row_id as number));
   return c.json({ id: r.meta.last_row_id, status: forOther ? "approved" : "requested" }, 201);
 });
 
@@ -1183,6 +1268,7 @@ app.post("/api/time-off/:id/cancel", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
   const r = await c.env.DB.prepare("UPDATE time_off_requests SET status = 'cancelled' WHERE id = ? AND staff_id = ? AND status IN ('requested','approved')").bind(id, c.get("me").id).run();
+  if (r.meta.changes) emit(c, "time_off.cancelled", () => timeOffData(c.env.DB, id));
   return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
 });
 
@@ -1203,6 +1289,7 @@ app.post("/api/time-off/:id/withdraw", async (c) => {
   if (!row) return c.json({ error: "not_found" }, 404);
   if (!(await canDecideFor(c.env.DB, c.get("me"), row.staff_id))) return c.json({ error: "forbidden" }, 403);
   await c.env.DB.prepare("UPDATE time_off_requests SET status = 'cancelled' WHERE id = ?").bind(id).run();
+  emit(c, "time_off.cancelled", () => timeOffData(c.env.DB, id!));
   return c.json({ ok: true });
 });
 
@@ -1233,6 +1320,7 @@ app.post("/api/time-off/:id/decide", async (c) => {
   if (!(await canDecideFor(c.env.DB, c.get("me"), row.staff_id))) return c.json({ error: "forbidden" }, 403);
   const dn = note?.trim().slice(0, 300) || null;
   await c.env.DB.prepare("UPDATE time_off_requests SET status = ?, decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?").bind(approve ? "approved" : "denied", c.get("me").id, Date.now(), dn, id).run();
+  emit(c, "time_off.decided", () => timeOffData(c.env.DB, id));
   try {
     const person = await c.env.DB.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(row.staff_id).first<any>();
     if (person) await notifyStaff(c.env.DB, await loadConnections(c.env, c.env.DB, c.get("me").client_id), person, (l) => T.timeOffDecision(l, { approved: approve, from: row.start_date, to: row.end_date, note: dn }), "time_off_decision");
@@ -1502,6 +1590,7 @@ app.post("/api/admin/ai-schedule/apply", requireAdmin, async (c) => {
     await c.env.DB.prepare("INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes, until_close) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(s.staff_id, b.restaurant_id, s.role_id, s.start_at, s.end_at, s.notes ?? null, s.until_close ? 1 : 0).run();
     created++;
   }
+  emit(c, "schedule.applied", async () => ({ restaurant_id: b.restaurant_id, week: b.week, created, removed }));
   return c.json({ ok: true, created, removed, skipped });
 });
 
@@ -1531,7 +1620,9 @@ app.post("/api/shifts/:id/sick", async (c) => {
   if (!row) return c.json({ error: "not_found" }, 404);
   if (row.staff_id !== me.id && !(await canManage(c.env.DB, me, row.restaurant_id, row.department_id))) return c.json({ error: "forbidden" }, 403);
   try {
-    return c.json(await startSickCall(c.env, c.env.DB, id, me.id), 201);
+    const started = await startSickCall(c.env, c.env.DB, id, me.id);
+    emit(c, "coverage.opened", () => coverageData(c.env.DB, started.request_id));
+    return c.json(started, 201);
   } catch (e) { return flowError(c, e); }
 });
 
@@ -1584,6 +1675,7 @@ app.post("/api/coverage/:id/assign", async (c) => {
   if (!holds) return c.json({ error: "staff_does_not_hold_role_at_restaurant" }, 422);
   try {
     const out = await fillRequest(c.env, c.env.DB, await loadConnections(c.env, c.env.DB, c.get("me").client_id), id, staff_id, "manager");
+    if (out === "ok") emit(c, "coverage.filled", () => coverageData(c.env.DB, id));
     return out === "ok" ? c.json({ ok: true }) : c.json({ error: out === "conflict" ? "overlap" : "already_filled" }, 409);
   } catch (e) { return flowError(c, e); }
 });
@@ -1933,6 +2025,7 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   } catch {
     return c.json({ error: "email_taken" }, 409);
   }
+  emit(c, "staff.updated", () => staffData(c.env.DB, id));
   return c.json({ ok: true });
 });
 
@@ -2045,6 +2138,7 @@ app.post("/api/shifts", async (c) => {
     .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0)
     .run();
   await saveExtraRoles(c.env.DB, r.meta.last_row_id as number, b);
+  emit(c, "shift.created", () => shiftData(c.env.DB, r.meta.last_row_id as number));
   return c.json({ id: r.meta.last_row_id }, 201);
 });
 
@@ -2069,6 +2163,7 @@ app.put("/api/shifts/:id", async (c) => {
     .bind(b.staff_id, b.restaurant_id, b.role_id, b.start_at, b.end_at, b.notes ?? null, b.until_close ? 1 : 0, id)
     .run();
   await saveExtraRoles(c.env.DB, id, b);
+  emit(c, "shift.updated", () => shiftData(c.env.DB, id));
   return c.json({ ok: true });
 });
 
@@ -2083,7 +2178,9 @@ app.delete("/api/shifts/:id", async (c) => {
   if (!existing) return c.json({ error: "not_found" }, 404);
   if (!(await canManage(c.env.DB, c.get("me"), existing.restaurant_id, existing.department_id)))
     return c.json({ error: "forbidden" }, 403);
+  const before = await shiftData(c.env.DB, id);
   await c.env.DB.prepare("DELETE FROM shifts WHERE id = ?").bind(id).run();
+  emit(c, "shift.deleted", async () => before);
   return c.json({ ok: true });
 });
 
@@ -2131,7 +2228,9 @@ app.post("/hooks/offer/:token", async (c) => {
   if (!o) return c.json({ error: "invalid_link" }, 404);
   const { accept } = await c.req.json<{ accept?: boolean }>().catch(() => ({ accept: undefined }));
   if (typeof accept !== "boolean") return c.json({ error: "bad_request" }, 400);
-  return c.json({ result: await answerOffer(c.env, c.env.DB, o, accept) });
+  const result = await answerOffer(c.env, c.env.DB, o, accept);
+  if (result === "accepted") emitTo(c, o.client_id, "coverage.filled", () => coverageData(c.env.DB, o.request_id));
+  return c.json({ result });
 });
 
 // Calendar feed (iCalendar) for one employee, read by Google/Apple/Outlook calendars. Protected by its secret token.
@@ -2187,6 +2286,7 @@ app.post("/hooks/twilio", async (c) => {
     const offer = await c.env.DB.prepare("SELECT id, request_id, staff_id, status FROM coverage_offers WHERE staff_id = ? AND status = 'sent' ORDER BY sent_at DESC LIMIT 1").bind(person.id).first<{ id: number; request_id: number; staff_id: number; status: string }>();
     if (!offer) return twiml(T.noOpenOffer(lang).text);
     const result = await answerOffer(c.env, c.env.DB, offer, accept);
+    if (result === "accepted") emitTo(c, clientId, "coverage.filled", () => coverageData(c.env.DB, offer.request_id));
     // The winner also receives the normal confirmation message from the flow; answer the others right here.
     if (result === "declined") return twiml(lang === "fr" ? "Mikes: merci, c’est noté." : "Mikes: thanks, noted.");
     if (result === "filled" || result === "closed") return twiml(lang === "fr" ? "Mikes: le remplacement est déjà comblé. Merci!" : "Mikes: the replacement is already filled. Thanks!");
@@ -2201,7 +2301,8 @@ app.post("/hooks/twilio", async (c) => {
     ).bind(person.id, now, soon.toISOString().slice(0, 16)).first<{ id: number }>();
     if (!shift) return twiml(T.noUpcomingShift(lang).text);
     try {
-      await startSickCall(c.env, c.env.DB, shift.id, person.id);
+      const started = await startSickCall(c.env, c.env.DB, shift.id, person.id);
+      emitTo(c, clientId, "coverage.opened", () => coverageData(c.env.DB, started.request_id));
       const row = await c.env.DB.prepare("SELECT sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(shift.id).first<{ start_at: string; end_at: string; until_close: number; restaurant: string; name_fr: string; name_en: string }>();
       return twiml(row ? T.sickRecorded(lang, { restaurant: row.restaurant, role: genderedRole(lang === "fr" ? row.name_fr : row.name_en, person.sex), when: formatWhen(row.start_at, row.end_at, !!row.until_close, lang) }).text : undefined);
     } catch (e) {
@@ -2219,6 +2320,6 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await flushDeliveries(env.DB); })());
   },
 };

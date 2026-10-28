@@ -1526,6 +1526,55 @@ function payslipsAdminPanel(ov) {
   return box;
 }
 
+// Webhooks: the CRM is told when something changes. Each delivery is signed; failures are retried.
+function webhooksPanel() {
+  const box = h("div", {});
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "short", timeStyle: "short" });
+  const errMsg = (e) => ({ https_required: t("whInvalidUrl"), invalid_url: t("whInvalidUrl"), ip_not_allowed: t("whInvalidUrl"), host_not_allowed: t("whInvalidUrl"), too_many_endpoints: t("whTooMany") })[e.body?.error] ?? errorText(e);
+  const open = new Set();
+  async function load(secret) {
+    const [rows, events] = await Promise.all([api("/admin/webhooks"), api("/webhooks/events")]);
+    const name = h("input", { required: true, maxLength: 60, placeholder: t("whName") });
+    const url = h("input", { required: true, type: "url", maxLength: 500, placeholder: "https://crm.exemple.com/webhooks/ams" });
+    const all = h("input", { type: "checkbox", checked: true });
+    const boxes = events.map((ev) => ({ ev, input: h("input", { type: "checkbox", checked: true }) }));
+    all.addEventListener("change", () => boxes.forEach((b) => { b.input.checked = all.checked; }));
+    const reveal = secret ? h("div", { class: "panel token-reveal", role: "status" }, h("b", {}, t("whSecretOnce")),
+      h("input", { readonly: true, value: secret, onClick: (e) => e.target.select() }),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => { try { await navigator.clipboard.writeText(secret); toast(t("copied")); } catch { toast(secret); } } }, t("apiCopy")))) : null;
+    const logBox = (r) => { const el = h("div", { class: "log" }, h("p", { class: "meta" }, t("loading"))); api(`/admin/webhooks/${r.id}/deliveries`).then((ds) => el.replaceChildren(...(ds.length ? ds.map((d) => h("div", { class: "log-row avail-row" },
+      h("div", { class: "avail-text" }, h("span", {}, h("b", {}, d.event), ` · ${d.status}${d.response_code ? ` (${d.response_code})` : ""}${d.error && !d.response_code ? ` · ${d.error}` : ""}`), h("span", { class: "meta" }, `${when(d.created_at)} · ${d.attempts}×`)),
+      d.status === "failed" ? h("button", { class: "btn", type: "button", onClick: async () => { await api(`/admin/webhooks/${r.id}/deliveries/${d.id}/retry`, { method: "POST" }).catch((e) => toast(errMsg(e))); load(); } }, t("whRetry")) : null)) : [h("p", { class: "meta" }, "—")]))).catch(() => {}); return el; };
+    box.replaceChildren(
+      h("section", { class: "panel" }, h("h2", {}, t("adminWebhooks")), h("p", { class: "meta" }, t("whHelp")), reveal,
+        rows.length ? rows.map((r) => h("div", { class: "panel", style: "margin:.5rem 0" },
+          h("div", { class: "avail-row log-row" },
+            h("div", { class: "avail-text" },
+              h("div", {}, h("b", {}, r.name), r.active ? null : h("span", { class: "badge", style: "margin-left:.4rem" }, t("whPaused"))),
+              h("div", { class: "meta", style: "word-break:break-all" }, r.url),
+              h("div", { class: "meta" }, `${r.events.includes("*") ? t("whAll") : r.events.join(", ")} · whsec_${r.secret_hint}`),
+              r.failures ? h("div", { class: "meta" }, `⚠ ${r.failures} ${t("whFailures")}${r.active ? "" : ` — ${t("whDisabledAuto")}`}`) : null,
+              r.last_delivery ? h("div", { class: "meta" }, `${t("whLastDelivery")} : ${r.last_delivery.status}${r.last_delivery.code ? ` (${r.last_delivery.code})` : ""} · ${when(r.last_delivery.at)}`) : null)),
+          h("div", { class: "actions" },
+            h("button", { class: "btn", type: "button", onClick: async () => { try { const d = await api(`/admin/webhooks/${r.id}/test`, { method: "POST" }); toast(d.status === "sent" ? `${t("whTestOk")} ${d.response_code ?? 200}` : `${t("whTestFail")} ${d.error ?? d.status}`); load(); } catch (e) { toast(errMsg(e)); } } }, t("whTest")),
+            h("button", { class: "btn", type: "button", onClick: () => { open.has(r.id) ? open.delete(r.id) : open.add(r.id); load(); } }, t("whLog")),
+            h("button", { class: "btn", type: "button", onClick: async () => { await api(`/admin/webhooks/${r.id}`, { method: "PUT", body: { active: !r.active } }); load(); } }, r.active ? t("whPause") : t("whResume")),
+            h("button", { class: "btn", type: "button", onClick: async () => { if (!(await confirmDialog({ title: t("whRotate"), message: t("whRotateConfirm"), yes: t("whRotate"), no: t("cancel") }))) return; const x = await api(`/admin/webhooks/${r.id}`, { method: "PUT", body: { rotate_secret: true } }); load(x.secret); } }, t("whRotate")),
+            h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await confirmDialog({ title: t("whDelete"), message: t("whDeleteConfirm"), yes: t("whDelete"), no: t("cancel") }))) return; await api(`/admin/webhooks/${r.id}`, { method: "DELETE" }); load(); } }, t("whDelete"))),
+          open.has(r.id) ? logBox(r) : null)) : h("p", { class: "meta" }, t("whNone"))),
+      h("section", { class: "panel" }, h("h3", {}, t("whNew")),
+        h("form", { class: "acc-form", onSubmit: async (e) => {
+          e.preventDefault();
+          try { const x = await api("/admin/webhooks", { method: "POST", body: { name: name.value, url: url.value, events: all.checked ? ["*"] : boxes.filter((b) => b.input.checked).map((b) => b.ev) } }); load(x.secret); }
+          catch (err) { toast(errMsg(err)); }
+        } }, h("label", { class: "field" }, h("span", {}, t("whName")), name), h("label", { class: "field" }, h("span", {}, t("whUrl")), url),
+          h("div", { class: "field" }, h("span", {}, t("whEvents")), h("label", { class: "check" }, all, h("span", {}, t("whAll"))), h("div", { class: "wh-events" }, boxes.map((b) => h("label", { class: "check" }, b.input, h("span", {}, b.ev))))),
+          h("button", { class: "btn primary", type: "submit" }, t("whCreate")))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // API tokens for other systems (the CRM): created here, shown once, revocable.
 function apiPanel() {
   const box = h("div", {});
@@ -1644,7 +1693,7 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"], ["api", "adminApi"], ["webhooks", "adminWebhooks"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -1692,6 +1741,7 @@ async function renderAdmin() {
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     branding: () => [brandingPanel()],
     api: () => [apiPanel()],
+    webhooks: () => [webhooksPanel()],
     clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],

@@ -4,7 +4,7 @@
 > reach the schedule app. It is kept up to date with the app: the date and the change log at the bottom say
 > what changed last. **Never paste secrets into this file.**
 
-Last updated: 2026-10-28 · App version: API tokens (migration 0035) and later.
+Last updated: 2026-10-28 · App version: webhooks (migration 0036) and later.
 
 ## 1. What the app is
 
@@ -69,6 +69,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | AI | `POST /admin/ai-schedule`, `/admin/ai-schedule/apply` |
 | Clients (platform owner) | `GET /clients`, `POST /clients`, `PUT /clients/:id` |
 | API tokens (admin, browser only) | `GET/POST /admin/tokens`, `DELETE /admin/tokens/:id` |
+| Webhooks (admin, browser only) | `GET/POST /admin/webhooks`, `PUT/DELETE /admin/webhooks/:id`, `POST /admin/webhooks/:id/test`, `GET /admin/webhooks/:id/deliveries`, `POST .../deliveries/:did/retry`, `GET /webhooks/events` |
 
 Public endpoints (no sign-in, secret token in the URL): `/cal/<token>.ics` (employee calendar feed),
 `/r/<token>` and `POST /hooks/offer/<token>` (replacement offers), `POST /hooks/twilio` (inbound SMS, verified by Twilio signature).
@@ -114,11 +115,59 @@ Rules:
 
 Other no-code options: personal iCalendar link per employee (`Mon compte → Calendrier`), a normal employee account for a person.
 
+## 6b. Webhooks (built): the app tells the CRM when something changes
+
+**Register** (client administrator, browser): Administration → **Webhooks** → name, receiving URL (**https**, public host; no IP addresses or local names), events (all or a selection) → **Créer**.
+The **signing secret** (`whsec_...`) is shown once. Buttons: **Tester** (sends a `ping`), **Journal** (last 50 deliveries, **Renvoyer** a failed one), pause, new secret, delete. Max 10 endpoints per client.
+Webhooks are managed by a signed-in person only, never with an API token.
+
+**Events** (`data` always holds the current state of the object; never wages, SIN, pay slips or incidents):
+
+| Event | When | `data` |
+|---|---|---|
+| `staff.created` | employee added | `{ staff: {id,name,first_name,last_name,email,phone,sex,lang,is_admin,active} }` |
+| `staff.updated` | employee card saved | same |
+| `staff.active_changed` | made active / inactive | same |
+| `shift.created` / `shift.updated` | shift saved | `{ shift: {id,staff_id,restaurant_id,role_id,start_at,end_at,until_close,notes,status} }` |
+| `shift.deleted` | shift removed | same (state just before deletion) |
+| `schedule.applied` | AI schedule applied | `{ restaurant_id, week, created, removed }` |
+| `time_off.requested` | employee asks for leave | `{ time_off: {id,staff_id,start_date,end_date,start_time,end_time,status,note,decision_note} }` |
+| `time_off.decided` | approved / denied (or entered already approved by a manager) | same |
+| `time_off.cancelled` | cancelled / withdrawn | same |
+| `coverage.opened` | sick call, replacement search started | `{ request: {id,shift_id,restaurant_id,role_id,sick_staff_id,start_at,end_at,status,filled_by} }` |
+| `coverage.filled` | a replacement accepted / assigned | same |
+| `ping` | the **Tester** button | `{ message }` |
+
+**Request** the CRM receives: `POST <your URL>`, `Content-Type: application/json`, body:
+
+```json
+{ "id": "uuid", "event": "shift.created", "created_at": "2026-10-28T14:03:11.000Z", "client_id": 1,
+  "data": { "shift": { "id": 98, "staff_id": 12, "restaurant_id": 1, "role_id": 3, "start_at": "2026-11-02T10:00", "end_at": "2026-11-02T14:00", "until_close": 0, "notes": null, "status": "ok" } } }
+```
+
+Headers: `X-AMS-Event` (event name), `X-AMS-Delivery` (delivery number, use it to de-duplicate), `X-AMS-Signature: t=<unix seconds>,v1=<hex>`.
+
+**Verify the signature** (reject if it does not match, or if `t` is more than 5 minutes old):
+
+```js
+// Node.js — rawBody must be the exact bytes received, before any JSON parsing
+const crypto = require("crypto");
+function verify(rawBody, header, secret) {
+  const [t, v1] = header.split(",").map((p) => p.split("=")[1]);
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
+  return expected.length === v1.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1));
+}
+```
+
+**Delivery rules:** answer with any `2xx` within 8 seconds. Otherwise the app retries after 5 min, 15 min, 1 h, 6 h, 24 h (6 attempts in all), then marks it failed (it can be resent from the Journal). 30 failed deliveries in a row switch the endpoint off. Delivery is **at least once** and not strictly ordered: de-duplicate with `X-AMS-Delivery`, and when order matters re-read the object (`GET /api/...`) or compare `created_at`.
+Redirects are not followed. Events of one client only ever go to that client's endpoints.
+
 ## 7. Gaps / proposed work
 
 - [x] API tokens per client (read/write, revocable, hashed).
 - [ ] Per-token restriction to areas (e.g. employees only, no wages) and to restaurants.
-- [ ] Webhooks out of the app (shift created/changed, time off decided) for the CRM to subscribe to.
+- [x] Webhooks out of the app (section 6b).
 - [ ] Rate limits and an audit log of API calls.
 - [ ] Pagination / `updated_since` filters for large exports.
 
@@ -134,5 +183,6 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | **Webhooks** (Administration → Webhooks; signed `POST`s, retries; migration 0036). |
 | 2026-10-28 | **API tokens** (Administration → Accès API; `Authorization: Bearer ams_...`; read/write; migration 0035). |
 | 2026-10-28 | File created. In-app sign-in, per-client branding, multi-client (clients, tenant guard), migration 0034 fix. |
