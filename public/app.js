@@ -186,7 +186,9 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 // A small confirmation screen (yes / no) that resolves true or false.
 function confirmDialog({ title, message, yes, no }) {
   return new Promise((resolve) => {
-    const dlg = document.getElementById("modal");
+    // its own dialog, so it can open on top of another dialog without replacing its content
+    let dlg = document.getElementById("confirm-modal");
+    if (!dlg) { dlg = h("dialog", { id: "confirm-modal" }); document.body.append(dlg); }
     let answered = false;
     const answer = (v) => { if (answered) return; answered = true; resolve(v); dlg.close(); };
     dlg.replaceChildren(h("div", { class: "modal-body" },
@@ -383,6 +385,8 @@ async function renderSchedule() {
     h("label", { class: "field desktop-only order-field" }, h("span", {}, t("tableOrder")),
       h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
         [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v, title: l }, l)))),
+    state.me.me.is_admin ? h("div", { class: "field desktop-only" }, h("span", {}, " "),
+      h("button", { class: "btn", type: "button", title: t("aiTitle"), onClick: () => aiScheduleDialog({ restaurantId: sel.restaurant, departments: [...sel.departments], currentWeek: sel.week }) }, `✨ ${t("aiButton")}`)) : null,
     h("div", { class: "field desktop-only" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", title: t("printHint"), onClick: async () => {
         // the printout is the table: show it for printing, then go back to the tab you were on
@@ -952,6 +956,100 @@ function skillsBox(person) {
       } }), getLang() === "fr" ? p.name_fr : p.name_en)));
   }).catch(() => {});
   return box;
+}
+
+// Hours promised to the employee and notes for the planner (both are given to the AI when it builds a schedule).
+function planningForm(person) {
+  const hoursIn = h("input", { type: "number", min: 0, max: 168, step: "0.5", inputMode: "decimal", placeholder: t("noPromisedHours"), value: person.promised_hours ?? "" });
+  const notes = h("textarea", { rows: 4, maxLength: 1000, placeholder: t("planningNotesPlaceholder") }, person.scheduling_notes ?? "");
+  notes.value = person.scheduling_notes ?? "";
+  return h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
+    e.preventDefault();
+    try { const r = await api(`/staff/${person.id}/planning`, { method: "PUT", body: { promised_hours: hoursIn.value, scheduling_notes: notes.value } }); person.promised_hours = r.promised_hours; person.scheduling_notes = notes.value || null; toast(t("saved")); }
+    catch (err) { toast(err.body?.error === "invalid_hours" ? t("genericError") : errorText(err)); }
+  } },
+    h("label", { class: "field" }, h("span", {}, t("promisedHours")), hoursIn, h("span", { class: "meta" }, t("promisedHoursHelp"))),
+    h("label", { class: "field" }, h("span", {}, t("planningNotes")), notes, h("span", { class: "meta" }, t("planningNotesHelp"))),
+    h("button", { class: "btn primary", type: "submit" }, t("save")));
+}
+
+// ---------- AI: propose next week's schedule ----------
+function aiScheduleDialog({ restaurantId, departments, currentWeek }) {
+  const dlg = document.getElementById("modal");
+  const target = addDays(currentWeek, 7);
+  const resto = state.restaurants.find((r) => r.id === restaurantId);
+  const extra = h("textarea", { rows: 4, maxLength: 3000, placeholder: t("aiExtraPlaceholder") });
+  const body = h("div", { class: "ai-body" });
+  const close = h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close"));
+  dlg.replaceChildren(h("div", { class: "modal-body ai-dialog" }, h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, `✨ ${t("aiTitle")}`), h("div", { class: "dlg-actions" }, close))), body));
+  const reqBody = (extraText, dry) => ({ restaurant_id: restaurantId, departments, week: target, extra_prompt: extraText, dry_run: dry, lang: getLang() });
+
+  async function setup() {
+    body.replaceChildren(h("p", { class: "meta" }, t("loading")));
+    let prev;
+    try { prev = await api("/admin/ai-schedule", { method: "POST", body: reqBody("", true) }); }
+    catch (e) { body.replaceChildren(h("div", { class: "alert" }, e.body?.error === "nothing_to_schedule" ? t("aiNothing") : errorText(e))); return; }
+    const sm = prev.summary;
+    const pre = h("pre", { class: "ai-prompt", hidden: true }, `${prev.system}\n\n${prev.user}`);
+    body.replaceChildren(
+      h("p", {}, h("b", {}, `${resto?.name ?? ""} · ${departments.map((d) => t(`dept.${d}`)).join(" · ")}`), h("br"), `${t("aiWeekFor")} ${weekLabel(target)}`),
+      h("p", { class: "meta" }, t("aiBasis")),
+      h("ul", { class: "ai-included" },
+        h("li", {}, `${sm.current_week_shifts} ${t("aiShiftsNow")}`), h("li", {}, `${sm.time_off} ${t("aiTimeOffN")}`), h("li", {}, `${sm.unavailabilities} ${t("aiUnavailN")}`),
+        h("li", {}, `${sm.employees} ${t("aiEmployeesN")} (${sm.new_employees} ${t("aiNewN")}, ${sm.with_promised_hours} ${t("aiPromisedN")})`), h("li", {}, t("aiTargetsIncluded"))),
+      h("label", { class: "field" }, h("span", {}, t("aiExtra")), extra, h("span", { class: "meta" }, t("aiExtraHelp"))),
+      h("button", { class: "btn sm", type: "button", onClick: async () => {
+        // show exactly what will be sent, including the instructions typed above
+        if (pre.hidden) { try { const pv = await api("/admin/ai-schedule", { method: "POST", body: reqBody(extra.value, true) }); pre.textContent = `${pv.system}\n\n${pv.user}`; } catch (e) { toast(errorText(e)); return; } }
+        pre.hidden = !pre.hidden;
+      } }, t("aiShowPrompt")), pre,
+      h("p", { class: "meta" }, t("aiPrivacy")),
+      sm.existing_next_week ? h("p", { class: "alert" }, `${sm.existing_next_week} ${t("aiExistingWarn")}`) : null,
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: generate }, `✨ ${t("aiGenerate")}`)));
+  }
+
+  async function generate() {
+    body.replaceChildren(h("div", { class: "ai-wait" }, h("div", { class: "spinner" }), h("p", {}, t("aiWorking")), h("p", { class: "meta" }, t("aiWorkingHelp"))));
+    try { review(await api("/admin/ai-schedule", { method: "POST", body: reqBody(extra.value, false) })); }
+    catch (e) {
+      const msg = { no_ai_key: t("aiNoKey"), ai_failed: t("aiFailed"), ai_bad_answer: t("aiBadAnswer"), nothing_to_schedule: t("aiNothing") }[e.body?.error] ?? errorText(e);
+      body.replaceChildren(h("div", { class: "alert", role: "alert" }, msg), h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: setup }, t("aiBack"))));
+    }
+  }
+
+  function review(res) {
+    const names = new Map(res.employees.map((x) => [x.id, x]));
+    const shifts = [...res.proposal.shifts].sort((a, b) => (a.start_at < b.start_at ? -1 : 1));
+    const days = Array.from({ length: 7 }, (_, i) => addDays(target, i));
+    const warnByStaffDay = new Set(res.warnings.filter((w) => w.staff_id && w.date).map((w) => `${w.staff_id}|${w.date}`));
+    const replace = h("input", { type: "checkbox", checked: res.summary.existing_next_week > 0 });
+    const hoursOf = (x) => (Date.parse(`${x.end_at}:00Z`) - Date.parse(`${x.start_at}:00Z`)) / 3_600_000;
+    const perPerson = res.employees.map((e) => ({ e, h: shifts.filter((x) => x.staff_id === e.id).reduce((n, x) => n + hoursOf(x), 0) })).filter((x) => x.h > 0 || x.e.promised_hours);
+    body.replaceChildren(
+      h("p", { class: "ai-summary" }, res.proposal.summary || t("aiNoSummary")),
+      res.proposal.concerns.length ? h("div", { class: "alert" }, h("strong", {}, t("aiConcerns")), h("ul", {}, res.proposal.concerns.map((c) => h("li", {}, c)))) : null,
+      res.warnings.length ? h("details", { class: "alert", open: true }, h("summary", {}, `⚠ ${res.warnings.length} ${t("aiWarnings")}`), h("ul", {}, res.warnings.slice(0, 60).map((w) => h("li", {}, w.text)))) : h("div", { class: "okmsg" }, t("aiNoWarnings")),
+      res.dropped ? h("p", { class: "meta" }, `${res.dropped} ${t("aiDropped")}`) : null,
+      h("h3", {}, `${shifts.length} ${t("aiShiftsProposed")}`),
+      ...days.map((d) => { const list = shifts.filter((x) => x.start_at.startsWith(d)); return list.length ? h("div", { class: "ai-day" }, h("h4", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
+        list.map((x) => { const e = names.get(x.staff_id); const role = state.roles.find((r) => r.id === x.role_id);
+          return h("div", { class: `ai-shift ${warnByStaffDay.has(`${x.staff_id}|${d}`) ? "warn" : ""}` }, h("b", {}, e?.first_name ?? x.staff_id), ` ${hhmm(x.start_at)}–${hhmm(x.end_at)} `, role ? roleIcon(role) : "", ` ${role ? roleName(role) : ""}`); })) : null; }),
+      h("h4", {}, t("aiHoursPerPerson")),
+      h("div", { class: "log" }, perPerson.map(({ e, h: hh }) => h("div", { class: "log-row" }, h("span", {}, e.first_name), h("b", {}, `${Math.round(hh * 10) / 10} h${e.promised_hours != null ? ` / ${e.promised_hours} h` : ""}`)))),
+      h("label", { class: "check" }, replace, h("span", {}, t("aiReplace"))),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: setup }, t("aiBack")),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          if (!await confirmDialog({ title: t("aiApplyTitle"), message: `${t("aiApplyQuestion")} ${weekLabel(target)} ?${replace.checked ? ` ${t("aiApplyReplace")}` : ""}`, yes: t("yesApply"), no: t("cancel") })) return;
+          try {
+            const r = await api("/admin/ai-schedule/apply", { method: "POST", body: { restaurant_id: restaurantId, departments, week: target, replace: replace.checked, shifts: shifts.map((x) => ({ staff_id: x.staff_id, role_id: x.role_id, start_at: x.start_at, end_at: x.end_at, until_close: x.until_close, notes: x.notes })) } });
+            toast(`${r.created} ${t("aiCreated")}${r.skipped.length ? ` · ${r.skipped.length} ${t("aiSkipped")}` : ""}`);
+            state.sel.week = target; state.sel.day = target; dlg.close(); render();
+          } catch (e) { toast(errorText(e)); }
+        } }, t("aiApply"))));
+  }
+  dlg.showModal();
+  setup();
 }
 
 // Time off of one employee, inside the employee dialog: list with approve / decline / withdraw, and a quick "add leave".
@@ -2023,7 +2121,7 @@ function staffCard(s, ov) {
     let dlg = document.getElementById("staff-modal");
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
-    const tabs = [["details", t("details")], ["roles", t("rolesTab")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")]];
+    const tabs = [["details", t("details")], ["roles", t("rolesTab")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const tabBar = h("div", { class: "dlg-tabs", role: "tablist" });
@@ -2039,6 +2137,7 @@ function staffCard(s, ov) {
       },
       availability: () => [availabilityEditor(s.id)],
       timeoff: () => [staffTimeOff(s)],
+      planning: () => [planningForm(s)],
     };
     const draw = () => {
       saveBtn.hidden = tab !== "details";

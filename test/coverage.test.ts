@@ -164,3 +164,33 @@ test("breakfast: while served, the two breakfast posts need competent people; th
   // without a breakfast time nothing changes for the breakfast posts
   assert.deepEqual(postGaps([at([1])], posts, m("07:00"), m("08:00"))[7], []);
 });
+
+import { parseProposal, checkProposal, buildUserPrompt, type AiContext } from "../src/aischedule.ts";
+test("AI schedule: the answer is parsed and checked against the facts given to the AI", () => {
+  const days = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-07", "2026-11-08"];
+  const ctx: AiContext = {
+    lang: "fr", restaurant: { id: 1, name: "X", open_by_dow: Array(7).fill("11:00"), close_by_dow: Array(7).fill("21:00"), breakfast_by_dow: Array(7).fill(null) },
+    week: { start: days[0], days }, departments: ["kitchen"], overtime_hours: 40, period_boundaries: ["14:00", "17:00"],
+    targets: { [days[0]]: { kitchen: { open: 1, "14:00": 1, "17:00": 2 } } }, pre_open_minutes: {},
+    employees: [
+      { id: 1, first_name: "Ana", is_new: false, promised_hours: 30, max_weekly_hours: 17, notes: null, roles: [{ id: 5, name: "Cook", department: "kitchen" }], fixed_days_off: [], days_off_replacement_ok: [], unavailable: [], time_off: [{ start_date: days[1], end_date: days[1], status: "approved" }], kitchen_posts: [] },
+      { id: 2, first_name: "Ben", is_new: true, promised_hours: null, max_weekly_hours: null, notes: null, roles: [{ id: 5, name: "Cook", department: "kitchen" }], fixed_days_off: [0], days_off_replacement_ok: [], unavailable: [], time_off: [], kitchen_posts: [] },
+    ],
+    current_week_shifts: [], already_planned_elsewhere: [], existing_next_week: [],
+  };
+  const text = 'Voici: {"shifts":[{"staff_id":1,"role_id":5,"date":"2026-11-03","start":"11:00","end":"21:00"},{"staff_id":1,"role_id":5,"date":"2026-11-04","start":"11:00","end":"21:00"},{"staff_id":2,"role_id":5,"date":"2026-11-02","start":"11:00","end":"14:00"},{"staff_id":9,"role_id":5,"date":"2026-11-02","start":"11:00","end":"14:00"},{"staff_id":2,"role_id":1,"date":"2026-11-02","start":"11:00","end":"14:00"}],"summary":"ok","concerns":["x"]}';
+  const p = parseProposal(text);
+  assert.equal(p.shifts.length, 5);
+  const r = checkProposal(ctx, p);
+  assert.equal(r.shifts.length, 3);                                                    // unknown employee and role not held are dropped
+  assert.deepEqual(r.dropped.map((d) => d.reason).sort(), ["role_not_held", "unknown_employee"]);
+  const kinds = r.warnings.map((w) => w.kind);
+  assert.ok(kinds.includes("time_off"));        // Ana on her approved day off
+  assert.ok(kinds.includes("day_off"));         // Ben on a fixed day off (Monday)
+  assert.ok(kinds.includes("hours_over"));      // Ana: 20 h > her 17 h maximum
+  assert.ok(kinds.includes("hours_under"));     // Ana promised 30 h
+  assert.ok(kinds.includes("short"));           // Monday 14:00-17:00 and 17:00-21:00 have nobody
+  assert.throws(() => parseProposal("no json here"));
+  assert.ok(buildUserPrompt(ctx, "Pas de quart de nuit").includes("Pas de quart de nuit"));
+  assert.ok(!buildUserPrompt(ctx, "").includes("phone"));
+});

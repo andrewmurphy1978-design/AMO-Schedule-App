@@ -6,8 +6,11 @@ import { weekBounds } from "./week.ts";
 import { computeCosts, parseRate } from "./payroll.ts";
 import { parseSettings, validateSettingsPatch, type Settings } from "./settings.ts";
 import { normalizePhone } from "./phone.ts";
+import { SYSTEM_PROMPT, buildUserPrompt, parseProposal, checkProposal, callClaude, type AiContext } from "./aischedule.ts";
 // @ts-ignore plain JS module shared with the browser
 import { DEFAULT_BOUNDARIES, periodKeys, remapPeriods, validBoundaries } from "../public/coverage.js";
+// @ts-ignore plain JS module shared with the browser
+import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
 import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff } from "./notify.ts";
@@ -35,7 +38,7 @@ type Env = {
   APP_URL?: string;
   TIMEZONE?: string;
   // Optional secrets: key to read pay slip PDFs with Claude, and the key used to hash Social Insurance Numbers.
-  ANTHROPIC_API_KEY?: string; SIN_KEY?: string;
+  ANTHROPIC_API_KEY?: string; SIN_KEY?: string; ANTHROPIC_API_BASE?: string;
   // Optional: messaging credentials as environment secrets (otherwise they are saved from the Administration screen).
   TWILIO_ACCOUNT_SID?: string; TWILIO_AUTH_TOKEN?: string; TWILIO_FROM?: string; TWILIO_API_BASE?: string;
   SMTP_HOST?: string; SMTP_PORT?: string; SMTP_SECURE?: string; SMTP_USER?: string; SMTP_PASS?: string; SMTP_FROM?: string;
@@ -1060,6 +1063,132 @@ app.put("/api/staff/:id/skills", async (c) => {
   return c.json({ ok: true, post_ids: ids });
 });
 
+// ---------- AI schedule for the next week (admin) ----------
+// Builds everything the AI needs: the present schedule, requested breaks, unavailabilities, new employees, promised hours, targets.
+async function buildAiContext(c: Context<any>, restaurantId: number, departments: string[], week: string, lang: "fr" | "en"): Promise<AiContext | null> {
+  const env = c.env as Env, db = env.DB;
+  const bounds = weekBounds(week);
+  const rest = await db.prepare("SELECT id, name, open_time, close_time FROM restaurants WHERE id = ?").bind(restaurantId).first<{ id: number; name: string; open_time: string; close_time: string }>();
+  if (!bounds || !rest || !departments.length) return null;
+  const [r] = await withOpenHours(db, [rest]);
+  const days = Array.from({ length: 7 }, (_, i) => new Date(Date.parse(`${week}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
+  const prevStart = new Date(Date.parse(`${week}T00:00:00Z`) - 7 * 86_400_000).toISOString().slice(0, 10);
+  const dmarks = departments.map(() => "?").join(",");
+  const boundaries = await boundariesOf(db, restaurantId);
+  const settings = await loadSettings(db);
+
+  // targets resolved for each date
+  const trows = (await db.prepare(`SELECT department_id, set_id, dow, slot, count FROM staffing_targets WHERE restaurant_id = ? AND department_id IN (${dmarks})`).bind(restaurantId, ...departments).all<{ department_id: string; set_id: number; dow: number; slot: string; count: number }>()).results;
+  const sets = (await db.prepare("SELECT id, name, kind, rule FROM target_sets WHERE restaurant_id = ?").bind(restaurantId).all<{ id: number; name: string; kind: string; rule: string }>()).results.map((x) => ({ ...x, rule: JSON.parse(x.rule) }));
+  const targets: AiContext["targets"] = {};
+  for (const date of days) { targets[date] = {}; for (const dep of departments) targets[date][dep] = resolveForDate(trows.filter((x) => x.department_id === dep), sets, date).targets; }
+
+  // employees: active people holding a role of these departments here
+  const roleRows = (await db.prepare(
+    `SELECT sr.staff_id, ro.id AS role_id, ro.name_en, ro.department_id, ro.pre_open_minutes FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN staff s ON s.id = sr.staff_id
+     WHERE sr.restaurant_id = ? AND ro.department_id IN (${dmarks}) AND s.active = 1`,
+  ).bind(restaurantId, ...departments).all<{ staff_id: number; role_id: number; name_en: string; department_id: string; pre_open_minutes: number }>()).results;
+  const ids = [...new Set(roleRows.map((x) => x.staff_id))];
+  if (!ids.length) return null;
+  const im = ids.map(() => "?").join(",");
+  const people = (await db.prepare(`SELECT id, first_name, name, promised_hours, scheduling_notes FROM staff WHERE id IN (${im})`).bind(...ids).all<{ id: number; first_name: string; name: string; promised_hours: number | null; scheduling_notes: string | null }>()).results;
+  const limits = new Map((await db.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${im})`).bind(...ids).all<{ staff_id: number; max_weekly_hours: number }>()).results.map((x) => [x.staff_id, x.max_weekly_hours]));
+  const avail = (await db.prepare(`SELECT staff_id, dow, start_time, end_time, kind, replacement_ok, valid_from, valid_to, note FROM staff_availability WHERE staff_id IN (${im})`).bind(...ids).all<any>()).results;
+  const offs = (await db.prepare(`SELECT staff_id, start_date, end_date, start_time, end_time, status FROM time_off_requests WHERE status IN ('requested','approved') AND staff_id IN (${im}) AND start_date <= ? AND end_date >= ?`).bind(...ids, days[6], days[0]).all<any>()).results;
+  const skills = (await db.prepare(`SELECT k.staff_id, p.code FROM staff_post_skills k JOIN posts p ON p.id = k.post_id WHERE k.staff_id IN (${im})`).bind(...ids).all<{ staff_id: number; code: string }>()).results;
+  const seen = new Set((await db.prepare(`SELECT DISTINCT staff_id FROM shifts WHERE staff_id IN (${im}) AND start_at >= ? AND start_at < ?`).bind(...ids, `${new Date(Date.parse(`${week}T00:00:00Z`) - 56 * 86_400_000).toISOString().slice(0, 10)}T00:00`, bounds.start).all<{ staff_id: number }>()).results.map((x) => x.staff_id));
+  const employees = people.map((p) => ({
+    id: p.id, first_name: p.first_name || p.name.split(" ")[0], is_new: !seen.has(p.id), promised_hours: p.promised_hours, max_weekly_hours: limits.get(p.id) ?? null, notes: p.scheduling_notes,
+    roles: roleRows.filter((x) => x.staff_id === p.id).map((x) => ({ id: x.role_id, name: x.name_en, department: x.department_id })),
+    fixed_days_off: avail.filter((a) => a.staff_id === p.id && a.kind === "day_off").map((a) => a.dow),
+    days_off_replacement_ok: avail.filter((a) => a.staff_id === p.id && a.kind === "day_off" && a.replacement_ok === 1).map((a) => a.dow),
+    unavailable: avail.filter((a) => a.staff_id === p.id && a.kind !== "day_off").map((a) => ({ dow: a.dow, start_time: a.start_time, end_time: a.end_time, valid_from: a.valid_from, valid_to: a.valid_to, note: a.note })),
+    time_off: offs.filter((o) => o.staff_id === p.id).map((o) => ({ start_date: o.start_date, end_date: o.end_date, start_time: o.start_time, end_time: o.end_time, status: o.status })),
+    kitchen_posts: skills.filter((k) => k.staff_id === p.id).map((k) => k.code),
+  }));
+
+  // the present (previous) week, existing plans for the target week, shifts elsewhere
+  const prevB = weekBounds(prevStart)!;
+  const prev = (await db.prepare(
+    `SELECT sh.id, sh.staff_id, sh.role_id, sh.start_at, sh.end_at FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
+     WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND ro.department_id IN (${dmarks}) AND sh.start_at >= ? AND sh.start_at < ?`,
+  ).bind(restaurantId, ...departments, prevB.start, prevB.end).all<{ id: number; staff_id: number; role_id: number; start_at: string; end_at: string }>()).results;
+  const extra = new Map<number, number[]>();
+  if (prev.length) for (const x of (await db.prepare(`SELECT shift_id, role_id FROM shift_roles WHERE shift_id IN (${prev.map(() => "?").join(",")})`).bind(...prev.map((x) => x.id)).all<{ shift_id: number; role_id: number }>()).results) extra.set(x.shift_id, [...(extra.get(x.shift_id) ?? []), x.role_id]);
+  const next = (await db.prepare(
+    `SELECT sh.staff_id, sh.role_id, sh.start_at, sh.end_at, sh.restaurant_id, ro.department_id FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
+     WHERE sh.status = 'ok' AND sh.staff_id IN (${im}) AND sh.start_at >= ? AND sh.start_at < ?`,
+  ).bind(...ids, bounds.start, bounds.end).all<{ staff_id: number; role_id: number; start_at: string; end_at: string; restaurant_id: number; department_id: string }>()).results;
+  const here = (x: { restaurant_id: number; department_id: string }) => x.restaurant_id === restaurantId && departments.includes(x.department_id);
+  const roles = (await db.prepare("SELECT name_en, pre_open_minutes FROM roles WHERE pre_open_minutes > 0").all<{ name_en: string; pre_open_minutes: number }>()).results;
+  return {
+    lang,
+    restaurant: { id: rest.id, name: rest.name, open_by_dow: r.open_by_dow, close_by_dow: r.close_by_dow, breakfast_by_dow: r.breakfast_by_dow },
+    week: { start: week, days }, departments, overtime_hours: settings.overtime_hours, period_boundaries: boundaries, targets,
+    pre_open_minutes: Object.fromEntries(roles.map((x) => [x.name_en, x.pre_open_minutes])),
+    employees,
+    current_week_shifts: prev.map((x) => ({ staff_id: x.staff_id, role_ids: [x.role_id, ...(extra.get(x.id) ?? [])], date: x.start_at.slice(0, 10), start: x.start_at.slice(11, 16), end: x.end_at.slice(11, 16) })),
+    already_planned_elsewhere: next.filter((x) => !here(x)).map((x) => ({ staff_id: x.staff_id, start_at: x.start_at, end_at: x.end_at })),
+    existing_next_week: next.filter(here).map((x) => ({ staff_id: x.staff_id, role_id: x.role_id, start_at: x.start_at, end_at: x.end_at })),
+  };
+}
+
+app.post("/api/admin/ai-schedule", requireAdmin, async (c) => {
+  const b = await c.req.json<{ restaurant_id?: number; departments?: string[]; week?: string; extra_prompt?: string; dry_run?: boolean; lang?: string }>();
+  if (!b.restaurant_id || !Array.isArray(b.departments) || !b.departments.length || !b.week) return c.json({ error: "bad_request" }, 400);
+  if (!weekBounds(b.week)) return c.json({ error: "week_must_be_a_monday" }, 400);
+  const ctx = await buildAiContext(c, b.restaurant_id, b.departments.slice(0, 5), b.week, b.lang === "en" ? "en" : "fr");
+  if (!ctx) return c.json({ error: "nothing_to_schedule" }, 422);
+  const user = buildUserPrompt(ctx, (b.extra_prompt ?? "").slice(0, 3000));
+  const summary = { employees: ctx.employees.length, new_employees: ctx.employees.filter((x) => x.is_new).length, with_promised_hours: ctx.employees.filter((x) => x.promised_hours != null).length,
+    time_off: ctx.employees.reduce((n, x) => n + x.time_off.length, 0), unavailabilities: ctx.employees.reduce((n, x) => n + x.unavailable.length + x.fixed_days_off.length, 0), current_week_shifts: ctx.current_week_shifts.length, existing_next_week: ctx.existing_next_week.length };
+  if (b.dry_run) return c.json({ summary, system: SYSTEM_PROMPT, user, characters: SYSTEM_PROMPT.length + user.length });
+  const key = await anthropicKey(c.env);
+  if (!key) return c.json({ error: "no_ai_key" }, 422);
+  let text: string;
+  try { text = await callClaude(key, SYSTEM_PROMPT, user, fetch, c.env.ANTHROPIC_API_BASE); } catch (e) { return c.json({ error: "ai_failed", detail: String((e as Error).message) }, 502); }
+  let proposal;
+  try { proposal = parseProposal(text); } catch { return c.json({ error: "ai_bad_answer" }, 502); }
+  const checked = checkProposal(ctx, proposal);
+  return c.json({ summary, week: b.week, proposal: { shifts: checked.shifts, summary: proposal.summary, concerns: proposal.concerns }, warnings: checked.warnings, dropped: checked.dropped.length, employees: ctx.employees.map((e) => ({ id: e.id, first_name: e.first_name, promised_hours: e.promised_hours, roles: e.roles })) });
+});
+
+// Applies a proposal the admin reviewed: creates the shifts, optionally replacing the week's existing ones for these departments.
+app.post("/api/admin/ai-schedule/apply", requireAdmin, async (c) => {
+  const b = await c.req.json<{ restaurant_id?: number; departments?: string[]; week?: string; replace?: boolean; shifts?: { staff_id: number; role_id: number; start_at: string; end_at: string; until_close?: boolean; notes?: string }[] }>();
+  if (!b.restaurant_id || !Array.isArray(b.departments) || !b.week || !Array.isArray(b.shifts)) return c.json({ error: "bad_request" }, 400);
+  const bounds = weekBounds(b.week);
+  if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
+  if (b.shifts.length > 400) return c.json({ error: "too_many" }, 400);
+  let removed = 0;
+  if (b.replace) {
+    const dm = b.departments.map(() => "?").join(",");
+    const r = await c.env.DB.prepare(`DELETE FROM shifts WHERE restaurant_id = ? AND start_at >= ? AND start_at < ? AND role_id IN (SELECT id FROM roles WHERE department_id IN (${dm}))`).bind(b.restaurant_id, bounds.start, bounds.end, ...b.departments).run();
+    removed = r.meta.changes ?? 0;
+  }
+  let created = 0; const skipped: { staff_id: number; start_at: string; error: string }[] = [];
+  for (const s of b.shifts) {
+    const input: ShiftInput = { staff_id: s.staff_id, restaurant_id: b.restaurant_id, role_id: s.role_id, start_at: s.start_at, end_at: s.end_at, until_close: !!s.until_close, notes: s.notes, force: true };
+    if (s.start_at < bounds.start || s.start_at >= bounds.end) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: "outside_week" }); continue; }
+    const problem = await validateShift(c, input);
+    if (problem) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: String((problem.body as { error?: string }).error) }); continue; }
+    await c.env.DB.prepare("INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes, until_close) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(s.staff_id, b.restaurant_id, s.role_id, s.start_at, s.end_at, s.notes ?? null, s.until_close ? 1 : 0).run();
+    created++;
+  }
+  return c.json({ ok: true, created, removed, skipped });
+});
+
+// Promised hours and planner notes of one employee (admin).
+app.put("/api/staff/:id/planning", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { promised_hours, scheduling_notes } = await c.req.json<{ promised_hours?: number | string | null; scheduling_notes?: string | null }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const n = promised_hours === null || promised_hours === undefined || promised_hours === "" ? null : Number(String(promised_hours).replace(",", "."));
+  if (n !== null && (!Number.isFinite(n) || n < 0 || n > 168)) return c.json({ error: "invalid_hours" }, 400);
+  const r = await c.env.DB.prepare("UPDATE staff SET promised_hours = ?, scheduling_notes = ? WHERE id = ?").bind(n, scheduling_notes?.trim().slice(0, 1000) || null, id).run();
+  return r.meta.changes ? c.json({ ok: true, promised_hours: n }) : c.json({ error: "not_found" }, 404);
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
@@ -1435,7 +1564,7 @@ app.get("/api/roster", async (c) => {
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
+    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
     db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
