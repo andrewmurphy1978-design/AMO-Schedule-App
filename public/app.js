@@ -1499,11 +1499,14 @@ async function renderAdmin() {
     const dlg = document.getElementById("modal");
     const first = h("input", { required: true, maxLength: 80, autocomplete: "off" });
     const last = h("input", { maxLength: 80, autocomplete: "off" });
+    const sexNew = radioGroup("sex-new", [["M", t("sexMale")], ["F", t("sexFemale")]], "");
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
       e.preventDefault();
-      try { await api("/staff", { method: "POST", body: { first_name: first.value, last_name: last.value } }); dlg.close(); render(); } catch (err) { toast(errorText(err)); }
+      if (!sexNew.value) { toast(t("sexRequired")); return; }
+      try { await api("/staff", { method: "POST", body: { first_name: first.value, last_name: last.value, sex: sexNew.value } }); dlg.close(); render(); } catch (err) { toast(errorText(err)); }
     } }, h("h2", {}, t("addStaff")),
       h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
+      h("div", { class: "field" }, h("span", {}, t("sexLabel")), sexNew),
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("add")))));
     dlg.showModal(); first.focus();
   } }, `+ ${t("add")}`);
@@ -2019,7 +2022,7 @@ function staffCard(s, ov) {
   const email = h("input", { type: "email", value: s.email ?? "" });
   const phone = h("input", { type: "tel", value: formatPhone(s.phone), autocomplete: "off", placeholder: "+1 (819) 555-1234" });
   phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
-  const sex = radioGroup(`sex-${s.id}`, [["M", t("sexMale")], ["F", t("sexFemale")], ["", t("sexUnspecified")]], s.sex ?? "");
+  const sex = radioGroup(`sex-${s.id}`, [["M", t("sexMale")], ["F", t("sexFemale")]], s.sex ?? "");
   const lang = radioGroup(`lang-${s.id}`, [["fr", "Français"], ["en", "English"]], s.lang);
   const channel = radioGroup(`chan-${s.id}`, [["sms", t("sms")], ["email", t("emailCh")]], s.notify_channel);
   const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: ov.default_rates?.general_cents != null ? `${t("defaultWord")} ${(ov.default_rates.general_cents / 100).toFixed(2)}` : t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
@@ -2068,7 +2071,8 @@ function staffCard(s, ov) {
   const details = h("form", { id: `staff-form-${s.id}`, class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
     e.preventDefault();
     try {
-      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || null, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      if (!sex.value) { toast(t("sexRequired")); return; }
+      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || undefined, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
       if (sinInput.value.trim()) { const r = await api(`/staff/${s.id}/sin`, { method: "PUT", body: { sin: sinInput.value } }); s.sin_last3 = r.sin_last3; sinInput.value = ""; sinInput.placeholder = `••• ••• ${r.sin_last3}`; }
