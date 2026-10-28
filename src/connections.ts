@@ -3,7 +3,7 @@
 import type { TwilioConfig } from "./twilio.ts";
 
 export interface SmtpSettings { host: string; port: number; secure: "implicit" | "starttls" | "none"; user?: string; pass?: string; from: string }
-export interface Connections { twilio: TwilioConfig | null; smtp: SmtpSettings | null; appUrl: string }
+export interface Connections { twilio: TwilioConfig | null; smtp: SmtpSettings | null; appUrl: string; brand?: string }
 
 export interface ConnEnv {
   TWILIO_ACCOUNT_SID?: string; TWILIO_AUTH_TOKEN?: string; TWILIO_FROM?: string; TWILIO_API_BASE?: string;

@@ -99,10 +99,12 @@ async function photoToDataUrl(file) {
 class ApiError extends Error {
   constructor(status, body) { super(body?.error ?? String(status)); this.status = status; this.body = body ?? {}; }
 }
+// A platform owner can work inside another client: every request then carries that client's id.
+const clientHeader = () => { try { const v = localStorage.getItem("workClient"); return v ? { "X-Client": v } : {}; } catch { return {}; } };
 async function api(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
     method: opts.method ?? "GET",
-    headers: opts.body ? { "content-type": "application/json" } : undefined,
+    headers: { ...(opts.body ? { "content-type": "application/json" } : {}), ...clientHeader() },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const body = await res.json().catch(() => ({}));
@@ -170,7 +172,17 @@ function allowedDepartments(restaurantId) {
 // ---------- shell ----------
 const $app = document.getElementById("app");
 
+function renderClientBanner() {
+  const bar = document.getElementById("client-bar");
+  let work = null; try { work = localStorage.getItem("workClient"); } catch {}
+  if (!(state.me?.me.is_super && work && state.me.client && String(state.me.client.id) === work)) { bar?.remove(); return; }
+  const el = bar ?? h("div", { id: "client-bar", class: "client-bar" });
+  if (!bar) document.querySelector(".topbar").after(el);
+  el.replaceChildren(h("span", {}, `${t("clientEditing")} `), h("b", {}, state.me.client.name), h("button", { class: "btn", type: "button", onClick: () => { try { localStorage.removeItem("workClient"); } catch {} location.reload(); } }, t("clientBack")));
+}
+
 function renderChrome() {
+  renderClientBanner();
   document.getElementById("lang-toggle").textContent = mqDesktop.matches ? (getLang() === "fr" ? "English" : "Français") : (getLang() === "fr" ? "EN" : "FR");
   document.getElementById("footer").textContent = brandText("footer") || (state.brand.name === DEFAULT_BRAND.name ? t("footer") : state.brand.name);
   document.title = `${state.brand.name} · ${t("app")}`;
@@ -1553,6 +1565,48 @@ function brandingPanel() {
       h("button", { class: "btn primary", type: "submit" }, t("save"))));
 }
 
+// Platform owners: all clients, create a new one (with its first administrator, who is an employee of that client) and open any of them.
+function clientsPanel() {
+  const box = h("div", {});
+  const current = () => state.me.client?.id;
+  const switchTo = (id) => { try { id === state.me.me.home_client ? localStorage.removeItem("workClient") : localStorage.setItem("workClient", String(id)); } catch {} location.reload(); };
+  const errMsg = (e) => ({ email_taken: t("errEmailTaken"), hostname_taken: t("errHostTaken"), invalid_hostname: t("errHostInvalid"), restaurant_name_taken: t("errRestaurantTaken"), invalid_email: t("invalidEmail") })[e.body?.error] ?? errorText(e);
+  async function load() {
+    const rows = await api("/clients");
+    const name = h("input", { required: true, maxLength: 80 }), host = h("input", { maxLength: 200, placeholder: "horaires.exemple.com", autocapitalize: "off" });
+    const first = h("input", { required: true, maxLength: 80 }), last = h("input", { maxLength: 80 }), email = h("input", { type: "email", required: true, maxLength: 200 }), rest = h("input", { maxLength: 80 });
+    const field = (label, el, help) => h("label", { class: "field" }, h("span", {}, label), el, help ? h("span", { class: "meta" }, help) : null);
+    box.replaceChildren(
+      h("section", { class: "panel" }, h("h2", {}, t("adminClients")), h("p", { class: "meta" }, t("clientsHelp")),
+        rows.map((r) => h("div", { class: `cov-row avail-row ${r.active ? "" : "inactive"}` },
+          h("div", { class: "avail-text" },
+            h("div", {}, h("b", {}, r.name), r.id === current() ? h("span", { class: "badge", style: "margin-left:.4rem" }, t("clientCurrent")) : null, r.active ? null : h("span", { class: "badge", style: "margin-left:.4rem" }, t("clientInactive"))),
+            h("div", { class: "meta" }, `${r.employees} ${t("clientEmployees")} · ${r.restaurants} ${t("clientRestaurants")}${r.hostname ? ` · ${r.hostname}` : ""}`),
+            h("div", { class: "meta" }, `${t("clientAdmins")} : ${r.admins.map((a) => `${a.name}${a.email ? ` (${a.email})` : ""}`).join(", ") || "—"}`)),
+          h("div", { class: "row-icons" },
+            r.active && r.id !== current() ? h("button", { class: "btn", type: "button", onClick: () => switchTo(r.id) }, t("clientOpen")) : null,
+            r.id !== 1 ? h("button", { class: "btn", type: "button", onClick: async () => {
+              if (r.active && !(await confirmDialog({ title: t("clientDisable"), message: t("clientDisableConfirm"), yes: t("clientDisable"), no: t("cancel") }))) return;
+              try { await api(`/clients/${r.id}`, { method: "PUT", body: { active: !r.active } }); load(); } catch (e) { toast(errMsg(e)); }
+            } }, r.active ? t("clientDisable") : t("clientEnable")) : null)))),
+      h("section", { class: "panel" }, h("h2", {}, t("clientNew")),
+        h("form", { class: "acc-form", onSubmit: async (e) => {
+          e.preventDefault();
+          try {
+            await api("/clients", { method: "POST", body: { name: name.value, hostname: host.value, admin_first_name: first.value, admin_last_name: last.value, admin_email: email.value, restaurant_name: rest.value } });
+            toast(t("clientCreated")); load();
+          } catch (err) { toast(errMsg(err)); }
+        } },
+          field(t("clientName"), name), field(t("clientHostname"), host, t("clientHostnameHelp")),
+          h("h3", {}, t("clientAdmin")),
+          h("div", { class: "form-row r2" }, field(t("firstName"), first), field(t("lastName"), last)), field(t("email"), email),
+          field(t("clientFirstRestaurant"), rest),
+          h("button", { class: "btn primary", type: "submit" }, t("clientCreate")))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 const ADMIN_SECTIONS_MARK = 0;
 const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"]];
 state.adminSection = "restaurants";
@@ -1601,10 +1655,11 @@ async function renderAdmin() {
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     branding: () => [brandingPanel()],
+    clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
   };
-  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, ADMIN_SECTIONS.map(([id, label]) =>
+  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
     h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[state.adminSection]())));
 }
@@ -2313,7 +2368,7 @@ function applyBrand() {
   if (state.me || state.brandLoaded) renderChrome();
 }
 async function loadBrand() {
-  try { state.brand = { ...DEFAULT_BRAND, ...(await (await fetch("/api/auth/branding")).json()) }; } catch {}
+  try { state.brand = { ...DEFAULT_BRAND, ...(await (await fetch("/api/auth/branding", { headers: clientHeader() })).json()) }; } catch {}
   state.brandLoaded = true;
   applyBrand();
 }

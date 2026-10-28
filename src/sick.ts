@@ -34,6 +34,11 @@ function newToken(): string {
   return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** The client (company) a restaurant belongs to: its own messaging accounts and settings apply. */
+async function clientOfRestaurant(db: D1Database, restaurantId: number): Promise<number> {
+  return (await db.prepare("SELECT client_id FROM restaurants WHERE id = ?").bind(restaurantId).first<{ client_id: number }>())?.client_id ?? 1;
+}
+
 // ---------- who can be asked ----------
 export async function gatherCandidates(db: D1Database, req: { restaurant_id: number; role_id: number; start_at: string; end_at: string; sick_staff_id: number }, settings: { overtime_hours: number; replacement_allow_overtime: boolean }) {
   const people = (await db.prepare(
@@ -84,8 +89,9 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
   ).bind(shift.id, shift.restaurant_id, shift.role_id, shift.staff_id, shift.start_at, shift.end_at, actorId, Date.now()).run();
   const requestId = created.meta.last_row_id as number;
 
-  const conn = await loadConnections(env, db);
-  const settings = await loadSettingsFrom(db);
+  const cid = await clientOfRestaurant(db, shift.restaurant_id);
+  const conn = await loadConnections(env, db, cid);
+  const settings = await loadSettingsFrom(db, cid);
   const found = await gatherCandidates(db, { restaurant_id: shift.restaurant_id, role_id: shift.role_id, start_at: shift.start_at, end_at: shift.end_at, sick_staff_id: shift.staff_id }, settings);
 
   // Offer to everyone eligible, all at once.
@@ -112,8 +118,8 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
 // ---------- someone answers an offer ----------
 export async function answerOffer(env: FlowEnv, db: D1Database, offer: { id: number; request_id: number; staff_id: number; status: string }, accept: boolean): Promise<"accepted" | "declined" | "filled" | "closed" | "conflict"> {
   if (offer.status !== "sent") return offer.status === "accepted" ? "accepted" : offer.status === "declined" ? "declined" : "closed";
-  const conn = await loadConnections(env, db);
-  const req = await db.prepare("SELECT * FROM coverage_requests WHERE id = ?").bind(offer.request_id).first<{ id: number; shift_id: number; status: string; sick_staff_id: number }>();
+  const req = await db.prepare("SELECT * FROM coverage_requests WHERE id = ?").bind(offer.request_id).first<{ id: number; shift_id: number; status: string; sick_staff_id: number; restaurant_id: number }>();
+  const conn = await loadConnections(env, db, req ? await clientOfRestaurant(db, req.restaurant_id) : 1);
   if (!req || req.status !== "open") {
     await db.prepare("UPDATE coverage_offers SET status = 'closed', responded_at = ? WHERE id = ? AND status = 'sent'").bind(Date.now(), offer.id).run();
     return "filled";
@@ -165,20 +171,23 @@ export async function escalate(env: FlowEnv, db: D1Database, conn: Connections, 
     `${shiftSql} JOIN coverage_requests cr ON cr.shift_id = sh.id WHERE cr.id = ?`,
   ).bind(requestId).first<ShiftRow>();
   if (!shift) return false;
-  const settings = await loadSettingsFrom(db);
+  const cid = await clientOfRestaurant(db, shift.restaurant_id);
+  conn = await loadConnections(env, db, cid); // the client's own messaging accounts
+  const settings = await loadSettingsFrom(db, cid);
   await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.escalation(lang, { ...ctxOf(shift, lang, shift.sex), sick: shift.staff_name, minutes: settings.sick_timeout_minutes }), "escalation");
   return true;
 }
 
 /** Cron: send the "take action" message for every open request that has waited too long. Returns how many. */
 export async function escalateDue(env: FlowEnv, db: D1Database): Promise<number> {
-  const settings = await loadSettingsFrom(db);
-  const cutoff = Date.now() - settings.sick_timeout_minutes * 60_000;
-  const due = (await db.prepare("SELECT id FROM coverage_requests WHERE status = 'open' AND escalated_at IS NULL AND created_at <= ?").bind(cutoff).all<{ id: number }>()).results;
-  if (!due.length) return 0;
-  const conn = await loadConnections(env, db);
+  const open = (await db.prepare("SELECT cr.id, cr.created_at, rs.client_id FROM coverage_requests cr JOIN restaurants rs ON rs.id = cr.restaurant_id WHERE cr.status = 'open' AND cr.escalated_at IS NULL").all<{ id: number; created_at: number; client_id: number }>()).results;
   let n = 0;
-  for (const r of due) if (await escalate(env, db, conn, r.id)) n++;
+  const timeouts = new Map<number, number>(); // each client sets its own waiting time
+  for (const r of open) {
+    if (!timeouts.has(r.client_id)) timeouts.set(r.client_id, (await loadSettingsFrom(db, r.client_id)).sick_timeout_minutes);
+    if (r.created_at > Date.now() - timeouts.get(r.client_id)! * 60_000) continue;
+    if (await escalate(env, db, await loadConnections(env, db, r.client_id), r.id)) n++;
+  }
   return n;
 }
 

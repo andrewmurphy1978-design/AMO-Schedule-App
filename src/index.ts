@@ -20,6 +20,7 @@ import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { parseBrand, validateBrandPatch, senderAddress, LOGO_TYPES, MAX_LOGO_BYTES, type Brand } from "./brand.ts";
+import { settingKey, clientSettingRows, getSetting, putSettingStmt, delSettingStmt } from "./tenant.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
 import { localNow, mondayOfDate } from "./week.ts";
 import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
@@ -33,6 +34,8 @@ type Env = {
   ACCESS_AUD?: string;
   // Email of the first admin; created automatically on first login if no such staff row exists.
   ADMIN_EMAIL?: string;
+  // Platform owners (comma-separated emails): can create clients and switch between them.
+  SUPER_ADMIN_EMAILS?: string;
   // Local development ONLY (set in .dev.vars, never in production).
   DEV_MODE?: string;
   DEV_USER_EMAIL?: string;
@@ -51,6 +54,9 @@ interface Me {
   name: string;
   email: string;
   is_admin: boolean;
+  client_id: number;
+  home_client: number; // the client the person belongs to (client_id changes when a platform owner works inside another one)
+  is_super: boolean;
 }
 
 type Vars = { me: Me };
@@ -94,26 +100,87 @@ app.use("/api/*", async (c, next) => {
   if (c.req.path.startsWith("/api/auth/")) return next(); // sign-in endpoints are public
   const { email, reason } = await identify(c);
   if (!email) return c.json({ error: "unauthenticated", reason }, 401);
-  let row = await c.env.DB.prepare("SELECT id, name, email, is_admin, active FROM staff WHERE lower(email) = ?")
+  let row = await c.env.DB.prepare("SELECT id, name, email, is_admin, active, client_id FROM staff WHERE lower(email) = ?")
     .bind(email)
-    .first<{ id: number; name: string; email: string; is_admin: number; active?: number }>();
+    .first<{ id: number; name: string; email: string; is_admin: number; active?: number; client_id: number }>();
   if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
     // An admin record created without an email (e.g. by an import) is claimed by the first ADMIN_EMAIL login.
     row = await c.env.DB.prepare(
-      "UPDATE staff SET email = ? WHERE id = (SELECT id FROM staff WHERE is_admin = 1 AND email IS NULL ORDER BY id LIMIT 1) RETURNING id, name, email, is_admin",
+      "UPDATE staff SET email = ? WHERE id = (SELECT id FROM staff WHERE is_admin = 1 AND email IS NULL AND client_id = 1 ORDER BY id LIMIT 1) RETURNING id, name, email, is_admin, client_id",
     )
       .bind(email)
-      .first<{ id: number; name: string; email: string; is_admin: number }>();
+      .first<{ id: number; name: string; email: string; is_admin: number; client_id: number }>();
   }
   if (!row && c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase()) {
     const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, email, is_admin) VALUES (?, ?, ?, 1)")
       .bind(email.split("@")[0], email.split("@")[0], email)
       .run();
-    row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1 };
+    row = { id: r.meta.last_row_id as number, name: email.split("@")[0], email, is_admin: 1, client_id: 1 };
   }
   if (!row) return c.json({ error: "unknown_user", email }, 403);
   if (row.active === 0) return c.json({ error: "inactive", email }, 403); // deactivated employees cannot sign in
-  c.set("me", { ...row, is_admin: row.is_admin === 1 });
+  const client = await c.env.DB.prepare("SELECT active FROM clients WHERE id = ?").bind(row.client_id).first<{ active: number }>();
+  if (!client || client.active === 0) return c.json({ error: "client_inactive", email }, 403);
+  const isSuper = superAdmins(c.env).includes(email);
+  const me: Me = { id: row.id, name: row.name, email: row.email, is_admin: row.is_admin === 1, client_id: row.client_id, home_client: row.client_id, is_super: isSuper };
+  // A platform owner can work inside any client (X-Client header): there they act as that client's administrator.
+  const want = Number(c.req.header("X-Client"));
+  if (isSuper && want && want !== me.client_id) {
+    if (!(await c.env.DB.prepare("SELECT 1 FROM clients WHERE id = ?").bind(want).first())) return c.json({ error: "unknown_client" }, 404);
+    me.client_id = want; me.is_admin = true;
+  }
+  c.set("me", me);
+  await next();
+});
+
+const superAdmins = (env: Env) => [env.SUPER_ADMIN_EMAILS, env.ADMIN_EMAIL].flatMap((v) => (v ?? "").split(",")).map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+// ---------- Tenant guard ----------
+// Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
+// (Lists and aggregates are filtered by client in their own queries.)
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident";
+const OWNER_SQL: Record<Owned, string> = {
+  staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
+  restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
+  shift: "SELECT 1 FROM shifts sh JOIN restaurants r ON r.id = sh.restaurant_id WHERE sh.id = ?1 AND r.client_id = ?2",
+  target_set: "SELECT 1 FROM target_sets t JOIN restaurants r ON r.id = t.restaurant_id WHERE t.id = ?1 AND r.client_id = ?2",
+  time_off: "SELECT 1 FROM time_off_requests t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
+  availability: "SELECT 1 FROM staff_availability t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
+  coverage: "SELECT 1 FROM coverage_requests t JOIN restaurants r ON r.id = t.restaurant_id WHERE t.id = ?1 AND r.client_id = ?2",
+  payslip: "SELECT 1 FROM payslips WHERE id = ?1 AND client_id = ?2",
+  incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
+};
+const PATH_OWNERS: [RegExp, Owned][] = [
+  [/^\/api\/staff\/(\d+)(\/|$)/, "staff"], [/^\/api\/time-off\/staff\/(\d+)$/, "staff"], [/^\/api\/admin\/staff\/(\d+)\//, "staff"],
+  [/^\/api\/restaurants\/(\d+)\//, "restaurant"], [/^\/api\/target-sets\/(\d+)$/, "target_set"], [/^\/api\/shifts\/(\d+)(\/|$)/, "shift"],
+  [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
+  [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
+  [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
+];
+const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
+const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
+
+function collectBodyIds(v: unknown, out: [Owned, number][], depth = 0) {
+  if (depth > 6 || v === null || typeof v !== "object") return;
+  if (Array.isArray(v)) { for (const x of v.slice(0, 2000)) collectBodyIds(x, out, depth + 1); return; }
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    const kind = BODY_OWNERS[k];
+    if (kind && typeof x === "number" && Number.isInteger(x)) out.push([kind, x]);
+    else if (kind && typeof x === "string" && /^\d+$/.test(x)) out.push([kind, Number(x)]);
+    else collectBodyIds(x, out, depth + 1);
+  }
+}
+
+app.use("/api/*", async (c, next) => {
+  if (c.req.path.startsWith("/api/auth/")) return next();
+  const me = c.get("me"), db = c.env.DB;
+  const checks: [Owned, number][] = [];
+  for (const [re, kind] of PATH_OWNERS) { const m = re.exec(c.req.path); if (m) checks.push([kind, Number(m[1])]); }
+  for (const [name, kind] of QUERY_OWNERS) { const v = c.req.query(name); if (v && /^\d+$/.test(v)) checks.push([kind, Number(v)]); }
+  if (c.req.method !== "GET" && c.req.method !== "HEAD" && (c.req.header("content-type") ?? "").includes("json")) {
+    try { collectBodyIds(await c.req.raw.clone().json(), checks); } catch { /* the route reports bad JSON itself */ }
+  }
+  for (const [kind, id] of checks) if (!(await db.prepare(OWNER_SQL[kind]).bind(id, me.client_id).first())) return c.json({ error: "not_found" }, 404);
   await next();
 });
 
@@ -167,55 +234,134 @@ async function withOpenHours<T extends { id: number; open_time: string; close_ti
   });
 }
 
-async function loadSettings(db: D1Database): Promise<Settings> {
-  return parseSettings((await db.prepare("SELECT key, value FROM settings WHERE key != 'brand_logo'").all<{ key: string; value: string }>()).results);
+async function loadSettings(db: D1Database, clientId: number): Promise<Settings> {
+  return parseSettings(await clientSettingRows(db, clientId));
 }
 
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
 
 // ---------- Me ----------
 // Ids of all employees (no names): the browser ranks them to give everyone a distinct automatic colour.
-app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT id FROM staff ORDER BY id").all<{ id: number }>()).results.map((r) => r.id)));
+app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT id FROM staff WHERE client_id = ? ORDER BY id").bind(c.get("me").client_id).all<{ id: number }>()).results.map((r) => r.id)));
+
+// ---------- Clients (platform owners only) ----------
+const requireSuper = async (c: any, next: any) => {
+  if (!c.get("me").is_super) return c.json({ error: "forbidden" }, 403);
+  await next();
+};
+const HOST_RE = /^[a-z0-9]([a-z0-9.-]{1,251}[a-z0-9])$/;
+
+app.get("/api/clients", requireSuper, async (c) => {
+  const rows = (await c.env.DB.prepare(
+    `SELECT cl.id, cl.name, cl.hostname, cl.active, cl.created_at,
+            (SELECT count(*) FROM staff s WHERE s.client_id = cl.id AND s.active = 1) AS employees,
+            (SELECT count(*) FROM restaurants r WHERE r.client_id = cl.id) AS restaurants
+     FROM clients cl ORDER BY cl.id`,
+  ).all<{ id: number }>()).results;
+  const admins = (await c.env.DB.prepare("SELECT client_id, id, name, email FROM staff WHERE is_admin = 1 AND active = 1 ORDER BY name").all<{ client_id: number; id: number; name: string; email: string | null }>()).results;
+  return c.json(rows.map((r) => ({ ...r, admins: admins.filter((a) => a.client_id === r.id).map(({ id, name, email }) => ({ id, name, email })) })));
+});
+
+// A new client comes with its first administrator (an employee of that client, who signs in with the email) and, optionally, a first restaurant.
+app.post("/api/clients", requireSuper, async (c) => {
+  const b = await c.req.json<{ name?: string; hostname?: string; admin_first_name?: string; admin_last_name?: string; admin_email?: string; restaurant_name?: string }>().catch(() => ({} as any));
+  const name = (b.name ?? "").trim(), email = (b.admin_email ?? "").trim().toLowerCase();
+  const nm = namesFrom({ first_name: b.admin_first_name, last_name: b.admin_last_name });
+  const host = (b.hostname ?? "").trim().toLowerCase();
+  if (!name || name.length > 80) return c.json({ error: "name_required" }, 400);
+  if (!looksLikeEmail(email)) return c.json({ error: "invalid_email" }, 400);
+  if (!nm) return c.json({ error: "admin_name_required" }, 400);
+  if (host && !HOST_RE.test(host)) return c.json({ error: "invalid_hostname" }, 400);
+  if (await c.env.DB.prepare("SELECT 1 FROM staff WHERE lower(email) = ?").bind(email).first()) return c.json({ error: "email_taken" }, 409);
+  if (host && (await c.env.DB.prepare("SELECT 1 FROM clients WHERE hostname = ?").bind(host).first())) return c.json({ error: "hostname_taken" }, 409);
+  const restName = (b.restaurant_name ?? "").trim();
+  if (restName && (await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE name = ?").bind(restName).first())) return c.json({ error: "restaurant_name_taken" }, 409);
+  const created = await c.env.DB.prepare("INSERT INTO clients (name, hostname, created_at) VALUES (?, ?, ?)").bind(name, host || null, Date.now()).run();
+  const id = created.meta.last_row_id as number;
+  const stmts = [
+    c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, is_admin, client_id) VALUES (?, ?, ?, ?, 1, ?)").bind(nm.name, nm.first, nm.last, email, id),
+    putSettingStmt(c.env.DB, id, "brand_name", name),
+  ];
+  if (restName) stmts.push(c.env.DB.prepare("INSERT INTO restaurants (name, client_id) VALUES (?, ?)").bind(restName, id));
+  await c.env.DB.batch(stmts);
+  return c.json({ id }, 201);
+});
+
+app.put("/api/clients/:id", requireSuper, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ name?: string; hostname?: string | null; active?: boolean }>().catch(() => ({} as any));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const cur = await c.env.DB.prepare("SELECT name, hostname, active FROM clients WHERE id = ?").bind(id).first<{ name: string; hostname: string | null; active: number }>();
+  if (!cur) return c.json({ error: "not_found" }, 404);
+  const name = b.name === undefined ? cur.name : b.name.trim();
+  const host = b.hostname === undefined ? cur.hostname : (b.hostname ?? "").trim().toLowerCase() || null;
+  if (!name || name.length > 80) return c.json({ error: "name_required" }, 400);
+  if (host && !HOST_RE.test(host)) return c.json({ error: "invalid_hostname" }, 400);
+  if (id === 1 && b.active === false) return c.json({ error: "cannot_disable_main_client" }, 409);
+  if (host && host !== cur.hostname && (await c.env.DB.prepare("SELECT 1 FROM clients WHERE hostname = ? AND id != ?").bind(host, id).first())) return c.json({ error: "hostname_taken" }, 409);
+  await c.env.DB.prepare("UPDATE clients SET name = ?, hostname = ?, active = ? WHERE id = ?").bind(name, host, b.active === undefined ? cur.active : b.active ? 1 : 0, id).run();
+  return c.json({ ok: true });
+});
 
 // ---------- In-app sign-in: email one-time code -> session cookie ----------
 const isSecure = (c: Context<any>) => new URL(c.req.url).protocol === "https:";
 
 // ---------- Branding (per client): public read for the sign-in screen, admin write ----------
-async function loadBrand(db: D1Database): Promise<Brand> {
-  const rows = await db.prepare("SELECT key, value FROM settings WHERE key LIKE 'brand\\_%' ESCAPE '\\' AND key NOT IN ('brand_logo')").all<{ key: string; value: string }>();
-  return parseBrand(rows.results);
+async function loadBrand(db: D1Database, clientId: number): Promise<Brand> {
+  const rows = await clientSettingRows(db, clientId, "brand_");
+  const b = parseBrand(rows.filter((r) => r.key !== "brand_logo"));
+  if (!rows.some((r) => r.key === "brand_name")) b.name = (await db.prepare("SELECT name FROM clients WHERE id = ?").bind(clientId).first<{ name: string }>())?.name ?? b.name;
+  return b;
 }
-app.get("/api/auth/branding", async (c) => c.json(await loadBrand(c.env.DB)));
+// The sign-in screen has no session yet: the client is the one whose domain the visitor used (default: client 1).
+// Signed-in visitors always get their own client's branding.
+async function brandClientId(c: Context<any>): Promise<number> {
+  const db = c.env.DB as D1Database;
+  if (c.env.DEV_MODE === "true" && c.req.header("X-Dev-User")) {
+    const devEmail = c.req.header("X-Dev-User")!.toLowerCase();
+    const dev = await db.prepare("SELECT client_id FROM staff WHERE lower(email) = ?").bind(devEmail).first<{ client_id: number }>();
+    if (dev) { const want = Number(c.req.header("X-Client")); return want && superAdmins(c.env).includes(devEmail) ? want : dev.client_id; }
+  }
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  if (sid) {
+    const row = await db.prepare("SELECT s.client_id, x.email FROM sessions x JOIN staff s ON lower(s.email) = x.email WHERE x.token_hash = ? AND x.expires_at > ?").bind(await sha256Hex(sid), Date.now()).first<{ client_id: number; email: string }>();
+    if (row) {
+      const want = Number(c.req.header("X-Client"));
+      return want && superAdmins(c.env).includes(row.email) ? want : row.client_id;
+    }
+  }
+  const host = new URL(c.req.url).hostname.toLowerCase();
+  const byHost = await db.prepare("SELECT id FROM clients WHERE hostname = ? AND active = 1").bind(host).first<{ id: number }>();
+  return byHost?.id ?? 1;
+}
+app.get("/api/auth/branding", async (c) => c.json(await loadBrand(c.env.DB, await brandClientId(c))));
 app.get("/api/auth/logo", async (c) => {
-  const [d, t] = await Promise.all([
-    c.env.DB.prepare("SELECT value FROM settings WHERE key = 'brand_logo'").first<{ value: string }>(),
-    c.env.DB.prepare("SELECT value FROM settings WHERE key = 'brand_logo_type'").first<{ value: string }>(),
-  ]);
+  const cid = await brandClientId(c);
+  const [d, t] = await Promise.all([getSetting(c.env.DB, cid, "brand_logo"), getSetting(c.env.DB, cid, "brand_logo_type")]);
   if (!d || !t) return c.body(null, 404);
-  const bytes = Uint8Array.from(atob(d.value), (ch) => ch.charCodeAt(0));
-  return new Response(bytes, { headers: { "content-type": t.value, "cache-control": "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } });
+  const bytes = Uint8Array.from(atob(d), (ch) => ch.charCodeAt(0));
+  return new Response(bytes, { headers: { "content-type": t, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } });
 });
 app.put("/api/admin/branding", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id;
   const v = validateBrandPatch(await c.req.json<Record<string, unknown>>().catch(() => ({})));
   if ("error" in v) return c.json({ error: v.error }, 400);
   await c.env.DB.batch(Object.entries(v.values).map(([k, val]) =>
-    val === "" && k !== "brand_name" ? c.env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(k) : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, val)));
-  return c.json(await loadBrand(c.env.DB));
+    val === "" && k !== "brand_name" ? delSettingStmt(c.env.DB, cid, k) : putSettingStmt(c.env.DB, cid, k, val)));
+  return c.json(await loadBrand(c.env.DB, cid));
 });
 app.put("/api/admin/branding/logo", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id;
   const b = await c.req.json<{ type?: string; data?: string }>().catch(() => ({} as { type?: string; data?: string }));
   if (!b.type || !(LOGO_TYPES as readonly string[]).includes(b.type)) return c.json({ error: "invalid_type" }, 400);
   if (!b.data || !/^[A-Za-z0-9+/]+=*$/.test(b.data) || b.data.length * 0.75 > MAX_LOGO_BYTES) return c.json({ error: "invalid_or_too_large" }, 400);
-  await c.env.DB.batch([
-    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo', ?)").bind(b.data),
-    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo_type', ?)").bind(b.type),
-    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo_v', ?)").bind(String(Date.now())),
-  ]);
-  return c.json(await loadBrand(c.env.DB));
+  await c.env.DB.batch([putSettingStmt(c.env.DB, cid, "brand_logo", b.data), putSettingStmt(c.env.DB, cid, "brand_logo_type", b.type), putSettingStmt(c.env.DB, cid, "brand_logo_v", String(Date.now()))]);
+  return c.json(await loadBrand(c.env.DB, cid));
 });
 app.delete("/api/admin/branding/logo", requireAdmin, async (c) => {
-  await c.env.DB.prepare("DELETE FROM settings WHERE key IN ('brand_logo', 'brand_logo_type', 'brand_logo_v')").run();
-  return c.json(await loadBrand(c.env.DB));
+  const cid = c.get("me").client_id;
+  await c.env.DB.batch(["brand_logo", "brand_logo_type", "brand_logo_v"].map((k) => delSettingStmt(c.env.DB, cid, k)));
+  return c.json(await loadBrand(c.env.DB, cid));
 });
 
 app.post("/api/auth/request", async (c) => {
@@ -223,22 +369,25 @@ app.post("/api/auth/request", async (c) => {
   const email = (b.email ?? "").trim().toLowerCase();
   if (!looksLikeEmail(email)) return c.json({ error: "invalid_email" }, 400);
   const db = c.env.DB, now = Date.now();
-  const conn = await loadConnections(c.env, db);
+  const staff = await db.prepare("SELECT id, lang, active, client_id FROM staff WHERE lower(email) = ?").bind(email).first<{ id: number; lang: string; active: number | null; client_id: number }>();
+  const clientId = staff?.client_id ?? 1;
+  // The client's own mail settings, else the platform owner's (client 1).
+  let conn = await loadConnections(c.env, db, clientId);
+  if (!conn.smtp && clientId !== 1) conn = { ...conn, smtp: (await loadConnections(c.env, db, 1)).smtp };
   if (!conn.smtp) return c.json({ error: "email_not_configured" }, 503);
   await db.prepare("DELETE FROM login_codes WHERE expires_at < ?").bind(now - 3600_000).run();
   await db.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now).run();
   // Identical answer whether or not the address belongs to an employee: nobody can probe who works here.
   const recent = await db.prepare("SELECT COUNT(*) AS n, MAX(created_at) AS last FROM login_codes WHERE email = ? AND created_at > ?").bind(email, now - 3600_000).first<{ n: number; last: number | null }>();
   if ((recent?.n ?? 0) >= MAX_CODES_PER_HOUR || (recent?.last && now - recent.last < MIN_GAP_MS)) return c.json({ error: "too_many_requests" }, 429);
-  const staff = await db.prepare("SELECT id, lang, active FROM staff WHERE lower(email) = ?").bind(email).first<{ id: number; lang: string; active: number | null }>();
-  const allowed = (staff && staff.active !== 0) || (!!c.env.ADMIN_EMAIL && email === c.env.ADMIN_EMAIL.toLowerCase());
+  const allowed = (staff && staff.active !== 0) || superAdmins(c.env).includes(email);
   const code = newCode();
   const pepper = c.env.SIN_KEY ?? "";
   await db.prepare("INSERT INTO login_codes (email, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?)")
     .bind(email, allowed ? await codeHash(pepper, email, code) : await sha256Hex(crypto.randomUUID()), now + CODE_TTL_MS, now).run();
   if (allowed) {
     const lang = staff?.lang === "en" || (!staff && b.lang === "en") ? "en" : "fr";
-    const brand = await loadBrand(db);
+    const brand = await loadBrand(db, clientId);
     const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name) } };
     c.executionCtx.waitUntil(deliver(db, smtp, "email", email, loginMessage(lang, code, brand.name), "login_code", staff?.id ?? null).then(() => {}));
   }
@@ -286,23 +435,33 @@ app.get("/api/me", async (c) => {
     )
     .bind(me.id)
     .all();
-  return c.json({ me, managed: managed.results, roles: roles.results });
+  const client = await db.prepare("SELECT id, name FROM clients WHERE id = ?").bind(me.client_id).first();
+  return c.json({ me, client, managed: managed.results, roles: roles.results });
 });
 
 app.get("/api/departments", async (c) =>
   c.json((await c.env.DB.prepare("SELECT * FROM departments").all()).results),
 );
-app.get("/api/roles", async (c) =>
-  c.json((await c.env.DB.prepare("SELECT * FROM roles").all()).results),
-);
+// Roles are a shared catalogue; each client has its own "minutes before opening" and default hourly rate per role
+// (client 1 keeps them in the roles table, the others in their settings).
+async function rolesFor(db: D1Database, clientId: number): Promise<any[]> {
+  const rows = (await db.prepare("SELECT * FROM roles").all<Record<string, any>>()).results;
+  if (clientId === 1) return rows;
+  const set = new Map((await clientSettingRows(db, clientId)).map((r) => [r.key, r.value]));
+  return rows.map((r) => ({ ...r, pre_open_minutes: Number(set.get(`preopen_${r.id}`) ?? 0), default_hourly_cents: set.has(`rate_${r.id}`) ? Number(set.get(`rate_${r.id}`)) : null }));
+}
+app.get("/api/roles", async (c) => c.json(await rolesFor(c.env.DB, c.get("me").client_id)));
 
 // Minutes before opening that this role should arrive (default start time of its shifts).
 app.put("/api/roles/:id/pre-open", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   const { minutes } = await c.req.json<{ minutes?: number }>();
   if (!id || !Number.isInteger(minutes) || (minutes as number) < 0 || (minutes as number) > 180) return c.json({ error: "invalid_minutes" }, 400);
-  const r = await c.env.DB.prepare("UPDATE roles SET pre_open_minutes = ? WHERE id = ?").bind(minutes, id).run();
-  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM roles WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  const cid = c.get("me").client_id;
+  if (cid === 1) await c.env.DB.prepare("UPDATE roles SET pre_open_minutes = ? WHERE id = ?").bind(minutes, id).run();
+  else await putSettingStmt(c.env.DB, cid, `preopen_${id}`, String(minutes)).run();
+  return c.json({ ok: true });
 });
 
 // Deactivate / reactivate an employee (admin only; not yourself).
@@ -312,7 +471,7 @@ app.put("/api/staff/:id/active", requireAdmin, async (c) => {
   if (!id || typeof active !== "boolean") return c.json({ error: "bad_request" }, 400);
   if (!active && id === c.get("me").id) return c.json({ error: "cannot_remove_self" }, 409);
   if (!active) {
-    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND active = 1 AND id != ?").bind(id).first<{ n: number }>();
+    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND active = 1 AND id != ? AND client_id = ?").bind(id, c.get("me").client_id).first<{ n: number }>();
     const isAdmin = await c.env.DB.prepare("SELECT is_admin FROM staff WHERE id = ?").bind(id).first<{ is_admin: number }>();
     if (isAdmin?.is_admin === 1 && !n?.n) return c.json({ error: "last_admin" }, 409);
   }
@@ -343,7 +502,7 @@ app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
   if (is_admin && !person.email) return c.json({ error: "email_required" }, 422);
   if (!is_admin) {
     if (id === c.get("me").id) return c.json({ error: "cannot_remove_self" }, 409);
-    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND id != ?").bind(id).first<{ n: number }>();
+    const n = await c.env.DB.prepare("SELECT count(*) AS n FROM staff WHERE is_admin = 1 AND id != ? AND client_id = ?").bind(id, c.get("me").client_id).first<{ n: number }>();
     if (!n?.n) return c.json({ error: "last_admin" }, 409);
   }
   await c.env.DB.prepare("UPDATE staff SET is_admin = ? WHERE id = ?").bind(is_admin ? 1 : 0, id).run();
@@ -354,12 +513,12 @@ app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
 app.get("/api/restaurants", async (c) => {
   const me = c.get("me");
   const sql = me.is_admin
-    ? "SELECT id, name, open_time, close_time FROM restaurants ORDER BY name"
-    : `SELECT DISTINCT r.id, r.name, r.open_time, r.close_time FROM restaurants r WHERE r.id IN
+    ? "SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ?2 ORDER BY name"
+    : `SELECT DISTINCT r.id, r.name, r.open_time, r.close_time FROM restaurants r WHERE r.client_id = ?2 AND r.id IN
          (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?1
           UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1) ORDER BY r.name`;
   const stmt = c.env.DB.prepare(sql);
-  const rows = (await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results as { id: number; name: string; open_time: string; close_time: string }[];
+  const rows = (await stmt.bind(me.id, me.client_id).all()).results as { id: number; name: string; open_time: string; close_time: string }[];
   return c.json(await withOpenHours(c.env.DB, rows));
 });
 
@@ -367,7 +526,7 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
   const { name } = await c.req.json<{ name?: string }>();
   if (!name?.trim()) return c.json({ error: "name_required" }, 400);
   try {
-    const r = await c.env.DB.prepare("INSERT INTO restaurants (name) VALUES (?)").bind(name.trim()).run();
+    const r = await c.env.DB.prepare("INSERT INTO restaurants (name, client_id) VALUES (?, ?)").bind(name.trim(), c.get("me").client_id).run();
     return c.json({ id: r.meta.last_row_id, name: name.trim() }, 201);
   } catch {
     return c.json({ error: "name_taken" }, 409);
@@ -566,12 +725,11 @@ app.get("/api/staff", async (c) => {
   const db = c.env.DB;
   // Admins see everyone; managers see staff holding a role at a restaurant they manage.
   const sql = me.is_admin
-    ? "SELECT id, name, email, phone FROM staff ORDER BY name"
+    ? "SELECT id, name, email, phone FROM staff WHERE client_id = ?2 ORDER BY name"
     : `SELECT DISTINCT s.id, s.name, s.email, s.phone FROM staff s
        JOIN staff_roles sr ON sr.staff_id = s.id
-       WHERE sr.restaurant_id IN (SELECT restaurant_id FROM managers WHERE staff_id = ?) ORDER BY s.name`;
-  const stmt = db.prepare(sql);
-  return c.json(sortByName(((await (me.is_admin ? stmt : stmt.bind(me.id)).all()).results) as { name: string }[]));
+       WHERE s.client_id = ?2 AND sr.restaurant_id IN (SELECT restaurant_id FROM managers WHERE staff_id = ?1) ORDER BY s.name`;
+  return c.json(sortByName(((await db.prepare(sql).bind(me.id, me.client_id).all()).results) as { name: string }[]));
 });
 
 // first_name + last_name (or a single "name", split at the first space) -> { first, last, name = "First Last" }.
@@ -586,8 +744,8 @@ app.post("/api/staff", requireAdmin, async (c) => {
   const nm = namesFrom(b);
   if (!nm) return c.json({ error: "name_required" }, 400);
   try {
-    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin, sex) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null)
+    const r = await c.env.DB.prepare("INSERT INTO staff (name, first_name, last_name, email, phone, is_admin, sex, client_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null, c.get("me").client_id)
       .run();
     return c.json({ id: r.meta.last_row_id }, 201);
   } catch {
@@ -652,13 +810,14 @@ app.delete("/api/staff/:id/photo", async (c) => {
 });
 
 // ---------- Settings (admin) ----------
-app.get("/api/settings", requireAdmin, async (c) => c.json(await loadSettings(c.env.DB)));
+app.get("/api/settings", requireAdmin, async (c) => c.json(await loadSettings(c.env.DB, c.get("me").client_id)));
 
 app.put("/api/settings", requireAdmin, async (c) => {
   const rows = validateSettingsPatch(await c.req.json().catch(() => null));
   if (!rows) return c.json({ error: "invalid_setting" }, 400);
-  await c.env.DB.batch(Object.entries(rows).map(([k, v]) => c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, v)));
-  return c.json(await loadSettings(c.env.DB));
+  const cid = c.get("me").client_id;
+  await c.env.DB.batch(Object.entries(rows).map(([k, v]) => putSettingStmt(c.env.DB, cid, k, v)));
+  return c.json(await loadSettings(c.env.DB, cid));
 });
 
 // ---------- Wages and labour cost (ADMIN ONLY) ----------
@@ -691,28 +850,34 @@ app.put("/api/staff/:id/wage", requireAdmin, async (c) => {
 });
 
 // Default rates: one general rate plus optional per-role rates (tipped roles). Used when an employee has no rate of their own.
-async function defaultRates(db: D1Database) {
-  const g = await db.prepare("SELECT value FROM settings WHERE key = 'default_hourly_cents'").first<{ value: string }>();
-  const roles = (await db.prepare("SELECT id, default_hourly_cents FROM roles WHERE default_hourly_cents IS NOT NULL").all<{ id: number; default_hourly_cents: number }>()).results;
-  return { general_cents: g ? Number(g.value) : null, roles: Object.fromEntries(roles.map((r) => [r.id, r.default_hourly_cents])) };
+async function defaultRates(db: D1Database, clientId: number) {
+  const g = await getSetting(db, clientId, "default_hourly_cents");
+  const roles = (await rolesFor(db, clientId)).filter((r) => r.default_hourly_cents != null);
+  return { general_cents: g ? Number(g) : null, roles: Object.fromEntries(roles.map((r) => [r.id, r.default_hourly_cents])) };
 }
-app.get("/api/admin/default-rates", requireAdmin, async (c) => c.json(await defaultRates(c.env.DB)));
+app.get("/api/admin/default-rates", requireAdmin, async (c) => c.json(await defaultRates(c.env.DB, c.get("me").client_id)));
 app.put("/api/admin/default-rates", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id;
   const b = await c.req.json<{ general?: string | number | null; roles?: Record<string, string | number | null> }>();
   const stmts: D1PreparedStatement[] = [];
   if (b.general !== undefined) {
     const cents = parseRate(b.general);
     if (b.general !== null && b.general !== "" && cents === null) return c.json({ error: "invalid_rate" }, 400);
-    stmts.push(cents === null ? c.env.DB.prepare("DELETE FROM settings WHERE key = 'default_hourly_cents'") : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('default_hourly_cents', ?)").bind(String(cents)));
+    stmts.push(cents === null ? delSettingStmt(c.env.DB, cid, "default_hourly_cents") : putSettingStmt(c.env.DB, cid, "default_hourly_cents", String(cents)));
   }
   for (const [rid, v] of Object.entries(b.roles ?? {})) {
     const roleId = intParam(rid), cents = parseRate(v);
     if (!roleId || (v !== null && v !== "" && cents === null)) return c.json({ error: "invalid_rate" }, 400);
-    stmts.push(c.env.DB.prepare("UPDATE roles SET default_hourly_cents = ? WHERE id = ?").bind(cents, roleId));
+    if (cid === 1) stmts.push(c.env.DB.prepare("UPDATE roles SET default_hourly_cents = ? WHERE id = ?").bind(cents, roleId));
+    else stmts.push(cents === null ? delSettingStmt(c.env.DB, cid, `rate_${roleId}`) : putSettingStmt(c.env.DB, cid, `rate_${roleId}`, String(cents)));
   }
   if (stmts.length) await c.env.DB.batch(stmts);
-  return c.json(await defaultRates(c.env.DB));
+  return c.json(await defaultRates(c.env.DB, cid));
 });
+
+// SQL for "this role's default rate" and "the general default rate" of a client (ids come from the database, never from the user).
+const roleRateSql = (cid: number) => (cid === 1 ? "ro.default_hourly_cents" : `(SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'c${cid}:rate_' || ro.id)`);
+const generalRateSql = (cid: number) => `(SELECT CAST(value AS INTEGER) FROM settings WHERE key = '${settingKey(cid, "default_hourly_cents")}')`;
 
 // GET /api/admin/payroll?restaurant=1&department=kitchen&week=2026-10-26
 // -> labour cost of that department (per day and per clock hour) and of the whole restaurant.
@@ -720,6 +885,7 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   const restaurantId = intParam(c.req.query("restaurant"));
   const department = c.req.query("department");
   const weekStart = c.req.query("week") ?? "";
+  const cid = c.get("me").client_id;
   const bounds = weekBounds(weekStart);
   if (!restaurantId || !department) return c.json({ error: "restaurant_and_department_required" }, 400);
   if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
@@ -733,7 +899,7 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
   prev.setUTCDate(prev.getUTCDate() - 1);
   const from = `${prev.toISOString().slice(0, 10)}T00:00`;
   const rows = await c.env.DB.prepare(
-    `SELECT sh.id, sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
+    `SELECT sh.id, sh.start_at, sh.end_at, ro.department_id, COALESCE(rw.hourly_cents, w.hourly_cents, ${roleRateSql(cid)}, ${generalRateSql(cid)}) AS rate_cents
      FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id
           LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = sh.role_id
      WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
@@ -742,7 +908,7 @@ app.get("/api/admin/payroll", requireAdmin, async (c) => {
     .all<{ id: number; start_at: string; end_at: string; department_id: string; rate_cents: number | null }>();
   // A shift covering several roles (cook + dishwasher) is paid at the highest of their rates; its cost stays in the main role's department.
   const extra = await c.env.DB.prepare(
-    `SELECT x.shift_id, COALESCE(rw.hourly_cents, w.hourly_cents, ro.default_hourly_cents, (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'default_hourly_cents')) AS rate_cents
+    `SELECT x.shift_id, COALESCE(rw.hourly_cents, w.hourly_cents, ${roleRateSql(cid)}, ${generalRateSql(cid)}) AS rate_cents
      FROM (SELECT shift_id, role_id FROM shift_roles UNION SELECT shift_id, role_id FROM shift_segments) x JOIN shifts sh ON sh.id = x.shift_id JOIN roles ro ON ro.id = x.role_id
           LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = x.role_id
      WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
@@ -795,9 +961,10 @@ async function sinKey(env: Env): Promise<string> {
   await env.DB.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('sin_key', ?)").bind(k).run();
   return (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sin_key'").first<{ value: string }>())!.value;
 }
-async function anthropicKey(env: Env): Promise<string | null> {
-  if (env.ANTHROPIC_API_KEY?.trim()) return env.ANTHROPIC_API_KEY.trim();
-  return (await env.DB.prepare("SELECT value FROM settings WHERE key = 'conn_anthropic_key'").first<{ value: string }>())?.value ?? null;
+async function anthropicKey(env: Env, clientId: number): Promise<string | null> {
+  const own = await getSetting(env.DB, clientId, "conn_anthropic_key");
+  if (own) return own;
+  return clientId === 1 && env.ANTHROPIC_API_KEY?.trim() ? env.ANTHROPIC_API_KEY.trim() : null;
 }
 
 app.put("/api/staff/:id/sin", requireAdmin, async (c) => {
@@ -818,13 +985,14 @@ app.put("/api/staff/:id/sin", requireAdmin, async (c) => {
   return c.json({ ok: true, sin_last3: digits.slice(-3) });
 });
 
-app.get("/api/admin/payslip-setup", requireAdmin, async (c) => c.json({ ai_configured: !!(await anthropicKey(c.env)), max_bytes: MAX_PDF_BYTES }));
+app.get("/api/admin/payslip-setup", requireAdmin, async (c) => c.json({ ai_configured: !!(await anthropicKey(c.env, c.get("me").client_id)), max_bytes: MAX_PDF_BYTES }));
 app.put("/api/admin/payslip-setup", requireAdmin, async (c) => {
   const { anthropic_key } = await c.req.json<{ anthropic_key?: string | null }>();
-  if (!anthropic_key) await c.env.DB.prepare("DELETE FROM settings WHERE key = 'conn_anthropic_key'").run();
+  const cid = c.get("me").client_id;
+  if (!anthropic_key) await delSettingStmt(c.env.DB, cid, "conn_anthropic_key").run();
   else if (!/^sk-ant-[\w-]{20,}$/.test(anthropic_key.trim())) return c.json({ error: "invalid_key" }, 400);
-  else await c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('conn_anthropic_key', ?)").bind(anthropic_key.trim()).run();
-  return c.json({ ai_configured: !!(await anthropicKey(c.env)) });
+  else await putSettingStmt(c.env.DB, cid, "conn_anthropic_key", anthropic_key.trim()).run();
+  return c.json({ ai_configured: !!(await anthropicKey(c.env, cid)) });
 });
 
 // One PDF per request (the browser sends the files of a batch one after the other). The AI reads it and proposes an employee.
@@ -834,15 +1002,16 @@ app.post("/api/admin/payslips", requireAdmin, async (c) => {
   if (!isPdf(bytes)) return c.json({ error: "not_a_pdf" }, 400);
   const filename = decodeURIComponent(c.req.header("X-Filename") ?? "payslip.pdf").replace(/[^\w .()-]/g, "_").slice(0, 120);
   const b64 = bytesToBase64(bytes);
-  const key = await anthropicKey(c.env);
+  const cid = c.get("me").client_id;
+  const key = await anthropicKey(c.env, cid);
   const ex = key ? await extractPayslip(key, b64).catch(() => null) : null;
-  const people = (await c.env.DB.prepare("SELECT s.id, s.name, ss.sin_hash FROM staff s LEFT JOIN staff_sin ss ON ss.staff_id = s.id").all<{ id: number; name: string; sin_hash: string | null }>()).results;
+  const people = (await c.env.DB.prepare("SELECT s.id, s.name, ss.sin_hash FROM staff s LEFT JOIN staff_sin ss ON ss.staff_id = s.id WHERE s.client_id = ?").bind(cid).all<{ id: number; name: string; sin_hash: string | null }>()).results;
   const m = ex ? await chooseMatch(ex, people, await sinKey(c.env)) : { staff_id: null, kind: "none" as const };
   const sinDigits = ex ? normalizeSin(ex.sin) : null;
   const r = await c.env.DB.prepare(
-    `INSERT INTO payslips (filename, content_b64, size, status, period_label, pay_date, extracted_name, extracted_last3, suggested_staff_id, match_kind, uploaded_by, uploaded_at)
-     VALUES (?, ?, ?, 'review', ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(filename, b64, bytes.length, ex?.period ?? null, ex?.pay_date ?? null, ex?.employee_name ?? null, sinDigits ? sinDigits.slice(-3) : null, m.staff_id, m.kind, c.get("me").id, Date.now()).run();
+    `INSERT INTO payslips (filename, content_b64, size, status, period_label, pay_date, extracted_name, extracted_last3, suggested_staff_id, match_kind, uploaded_by, uploaded_at, client_id)
+     VALUES (?, ?, ?, 'review', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(filename, b64, bytes.length, ex?.period ?? null, ex?.pay_date ?? null, ex?.employee_name ?? null, sinDigits ? sinDigits.slice(-3) : null, m.staff_id, m.kind, c.get("me").id, Date.now(), cid).run();
   return c.json({ id: r.meta.last_row_id, read_by_ai: !!ex, match: m.kind }, 201);
 });
 
@@ -850,8 +1019,8 @@ app.get("/api/admin/payslips", requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT p.id, p.filename, p.size, p.period_label, p.pay_date, p.extracted_name, p.extracted_last3, p.match_kind, p.suggested_staff_id, sg.name AS suggested_name,
             (SELECT last3 FROM staff_sin WHERE staff_id = p.suggested_staff_id) AS suggested_last3, p.uploaded_at
-     FROM payslips p LEFT JOIN staff sg ON sg.id = p.suggested_staff_id WHERE p.status = 'review' ORDER BY p.id`,
-  ).all();
+     FROM payslips p LEFT JOIN staff sg ON sg.id = p.suggested_staff_id WHERE p.status = 'review' AND p.client_id = ? ORDER BY p.id`,
+  ).bind(c.get("me").client_id).all();
   return c.json(rows.results);
 });
 
@@ -903,7 +1072,7 @@ async function approversOf(db: D1Database, staffId: number): Promise<number[]> {
     `SELECT DISTINCT m.staff_id FROM managers m
        JOIN (SELECT DISTINCT sr.restaurant_id, ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?) x
          ON x.restaurant_id = m.restaurant_id AND x.department_id = m.department_id
-     UNION SELECT id FROM staff WHERE is_admin = 1 AND active = 1`,
+     UNION SELECT id FROM staff WHERE is_admin = 1 AND active = 1 AND client_id = (SELECT client_id FROM staff WHERE id = ?1)`,
   ).bind(staffId).all<{ staff_id: number }>();
   return r.results.map((x) => x.staff_id);
 }
@@ -933,7 +1102,7 @@ app.post("/api/time-off", async (c) => {
   const r = await c.env.DB.prepare("INSERT INTO time_off_requests (staff_id, start_date, end_date, start_time, end_time, note, status, decided_by, decided_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(staffId, start, end, st, et, note, forOther ? "approved" : "requested", forOther ? me.id : null, forOther ? Date.now() : null, Date.now()).run();
   try {
-    const conn = await loadConnections(c.env, c.env.DB);
+    const conn = await loadConnections(c.env, c.env.DB, c.get("me").client_id);
     if (forOther) await notifyStaff(c.env.DB, conn, target, (l) => T.timeOffDecision(l, { approved: true, from: start, to: end, note }), "time_off_decision");
     else {
       const ids = (await approversOf(c.env.DB, me.id)).filter((id) => id !== me.id);
@@ -949,7 +1118,7 @@ app.post("/api/time-off", async (c) => {
 // People a manager/admin may enter time off for.
 app.get("/api/time-off/people", async (c) => {
   const me = c.get("me");
-  const rows = sortByName((await c.env.DB.prepare("SELECT id, name FROM staff WHERE active = 1").all<{ id: number; name: string }>()).results);
+  const rows = sortByName((await c.env.DB.prepare("SELECT id, name FROM staff WHERE active = 1 AND client_id = ?").bind(me.client_id).all<{ id: number; name: string }>()).results);
   if (me.is_admin) return c.json(rows);
   const out = [];
   for (const r of rows) if (r.id !== me.id && (await approversOf(c.env.DB, r.id)).includes(me.id)) out.push(r);
@@ -993,9 +1162,9 @@ app.get("/api/time-off/review", async (c) => {
   const rows = (await c.env.DB.prepare(
     `SELECT t.id, t.staff_id, s.name AS staff_name, t.start_date, t.end_date, t.start_time, t.end_time, t.note, t.status, t.decision_note
      FROM time_off_requests t JOIN staff s ON s.id = t.staff_id
-     WHERE t.status != 'cancelled' AND (t.status = 'requested' OR t.end_date >= date('now','-14 day')) AND t.end_date >= date('now','-14 day')
+     WHERE s.client_id = ? AND t.status != 'cancelled' AND (t.status = 'requested' OR t.end_date >= date('now','-14 day')) AND t.end_date >= date('now','-14 day')
      ORDER BY (t.status = 'requested') DESC, t.start_date LIMIT 200`,
-  ).all<{ staff_id: number }>()).results;
+  ).bind(me.client_id).all<{ staff_id: number }>()).results;
   if (me.is_admin) return c.json(rows);
   const out = [];
   const cache = new Map<number, boolean>();
@@ -1017,7 +1186,7 @@ app.post("/api/time-off/:id/decide", async (c) => {
   await c.env.DB.prepare("UPDATE time_off_requests SET status = ?, decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?").bind(approve ? "approved" : "denied", c.get("me").id, Date.now(), dn, id).run();
   try {
     const person = await c.env.DB.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(row.staff_id).first<any>();
-    if (person) await notifyStaff(c.env.DB, await loadConnections(c.env, c.env.DB), person, (l) => T.timeOffDecision(l, { approved: approve, from: row.start_date, to: row.end_date, note: dn }), "time_off_decision");
+    if (person) await notifyStaff(c.env.DB, await loadConnections(c.env, c.env.DB, c.get("me").client_id), person, (l) => T.timeOffDecision(l, { approved: approve, from: row.start_date, to: row.end_date, note: dn }), "time_off_decision");
   } catch { /* ignore */ }
   // Shifts already planned on those days: tell the manager so they can be moved.
   const clash = await c.env.DB.prepare("SELECT count(*) AS n FROM shifts WHERE staff_id = ? AND status = 'ok' AND substr(start_at,1,10) >= ? AND substr(start_at,1,10) <= ?").bind(row.staff_id, row.start_date, row.end_date).first<{ n: number }>();
@@ -1034,13 +1203,13 @@ app.get("/api/admin/incidents", requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT i.id, i.staff_id, s.name AS staff_name, i.shift_id, i.restaurant_id, rs.name AS restaurant, i.incident_date, i.kind, i.minutes, i.notes, rb.name AS recorded_by_name, i.created_at
      FROM incidents i JOIN staff s ON s.id = i.staff_id LEFT JOIN restaurants rs ON rs.id = i.restaurant_id LEFT JOIN staff rb ON rb.id = i.recorded_by
-     WHERE (?1 IS NULL OR i.staff_id = ?1) ORDER BY i.incident_date DESC, i.id DESC LIMIT 500`,
-  ).bind(staffId ?? null).all();
+     WHERE s.client_id = ?2 AND (?1 IS NULL OR i.staff_id = ?1) ORDER BY i.incident_date DESC, i.id DESC LIMIT 500`,
+  ).bind(staffId ?? null, c.get("me").client_id).all();
   const counts = await c.env.DB.prepare(
     `SELECT i.staff_id, s.name AS staff_name,
             sum(i.kind = 'no_call_no_show') AS no_shows, sum(i.kind = 'late_arrival') AS lates, sum(i.kind = 'early_departure') AS early, count(*) AS total
-     FROM incidents i JOIN staff s ON s.id = i.staff_id WHERE i.incident_date >= date('now', '-365 day') GROUP BY i.staff_id ORDER BY total DESC, s.name`,
-  ).all();
+     FROM incidents i JOIN staff s ON s.id = i.staff_id WHERE s.client_id = ? AND i.incident_date >= date('now', '-365 day') GROUP BY i.staff_id ORDER BY total DESC, s.name`,
+  ).bind(c.get("me").client_id).all();
   return c.json({ incidents: rows.results, last_12_months: counts.results });
 });
 
@@ -1181,7 +1350,9 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
   const prevStart = new Date(Date.parse(`${week}T00:00:00Z`) - 7 * 86_400_000).toISOString().slice(0, 10);
   const dmarks = departments.map(() => "?").join(",");
   const boundaries = await boundariesOf(db, restaurantId);
-  const settings = await loadSettings(db);
+  const cid = (c.get("me") as Me).client_id;
+  const settings = await loadSettings(db, cid);
+  const roleCatalogue = await rolesFor(db, cid);
 
   // targets resolved for each date
   const trows = (await db.prepare(`SELECT department_id, set_id, dow, slot, count FROM staffing_targets WHERE restaurant_id = ? AND department_id IN (${dmarks})`).bind(restaurantId, ...departments).all<{ department_id: string; set_id: number; dow: number; slot: string; count: number }>()).results;
@@ -1194,6 +1365,7 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
     `SELECT sr.staff_id, ro.id AS role_id, ro.name_en, ro.department_id, ro.pre_open_minutes FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN staff s ON s.id = sr.staff_id
      WHERE sr.restaurant_id = ? AND ro.department_id IN (${dmarks}) AND s.active = 1`,
   ).bind(restaurantId, ...departments).all<{ staff_id: number; role_id: number; name_en: string; department_id: string; pre_open_minutes: number }>()).results;
+  for (const x of roleRows) x.pre_open_minutes = roleCatalogue.find((r) => r.id === x.role_id)?.pre_open_minutes ?? 0;
   const ids = [...new Set(roleRows.map((x) => x.staff_id))];
   if (!ids.length) return null;
   const im = ids.map(() => "?").join(",");
@@ -1226,7 +1398,7 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
      WHERE sh.status = 'ok' AND sh.staff_id IN (${im}) AND sh.start_at >= ? AND sh.start_at < ?`,
   ).bind(...ids, bounds.start, bounds.end).all<{ staff_id: number; role_id: number; start_at: string; end_at: string; restaurant_id: number; department_id: string }>()).results;
   const here = (x: { restaurant_id: number; department_id: string }) => x.restaurant_id === restaurantId && departments.includes(x.department_id);
-  const roles = (await db.prepare("SELECT name_en, pre_open_minutes FROM roles WHERE pre_open_minutes > 0").all<{ name_en: string; pre_open_minutes: number }>()).results;
+  const roles = (await rolesFor(db, c.get("me").client_id)).filter((r) => r.pre_open_minutes > 0) as { name_en: string; pre_open_minutes: number }[];
   return {
     lang,
     restaurant: { id: rest.id, name: rest.name, open_by_dow: r.open_by_dow, close_by_dow: r.close_by_dow, breakfast_by_dow: r.breakfast_by_dow },
@@ -1249,7 +1421,7 @@ app.post("/api/admin/ai-schedule", requireAdmin, async (c) => {
   const summary = { employees: ctx.employees.length, new_employees: ctx.employees.filter((x) => x.is_new).length, with_promised_hours: ctx.employees.filter((x) => x.promised_hours != null).length,
     time_off: ctx.employees.reduce((n, x) => n + x.time_off.length, 0), unavailabilities: ctx.employees.reduce((n, x) => n + x.unavailable.length + x.fixed_days_off.length, 0), current_week_shifts: ctx.current_week_shifts.length, existing_next_week: ctx.existing_next_week.length };
   if (b.dry_run) return c.json({ summary, system: SYSTEM_PROMPT, user, characters: SYSTEM_PROMPT.length + user.length });
-  const key = await anthropicKey(c.env);
+  const key = await anthropicKey(c.env, c.get("me").client_id);
   if (!key) return c.json({ error: "no_ai_key" }, 422);
   let text: string;
   try { text = await callClaude(key, SYSTEM_PROMPT, user, fetch, c.env.ANTHROPIC_API_BASE); } catch (e) { return c.json({ error: "ai_failed", detail: String((e as Error).message) }, 502); }
@@ -1326,10 +1498,10 @@ app.get("/api/coverage", async (c) => {
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'sent') AS waiting
      FROM coverage_requests cr JOIN restaurants rs ON rs.id = cr.restaurant_id JOIN roles ro ON ro.id = cr.role_id
           JOIN shifts sh ON sh.id = cr.shift_id JOIN staff sick ON sick.id = cr.sick_staff_id LEFT JOIN staff fb ON fb.id = cr.filled_by
-     WHERE (cr.status = 'open' OR cr.created_at >= ?)
+     WHERE rs.client_id = ?4 AND (cr.status = 'open' OR cr.created_at >= ?1)
        AND (?2 = 1 OR EXISTS (SELECT 1 FROM managers m WHERE m.staff_id = ?3 AND m.restaurant_id = cr.restaurant_id AND m.department_id = ro.department_id))
      ORDER BY (cr.status = 'open') DESC, cr.created_at DESC LIMIT 100`,
-  ).bind(since, me.is_admin ? 1 : 0, me.id).all();
+  ).bind(since, me.is_admin ? 1 : 0, me.id, me.client_id).all();
   return c.json(rows.results);
 });
 
@@ -1347,7 +1519,7 @@ app.get("/api/coverage/:id/candidates", async (c) => {
   if (!id) return c.json({ error: "bad_id" }, 400);
   const { req, error } = await requestScope(c, id);
   if (error) return error;
-  const settings = await loadSettingsFrom(c.env.DB);
+  const settings = await loadSettingsFrom(c.env.DB, c.get("me").client_id);
   const r = await gatherCandidates(c.env.DB, { restaurant_id: req!.restaurant_id, role_id: req!.role_id, start_at: req!.start_at, end_at: req!.end_at, sick_staff_id: req!.sick_staff_id }, settings);
   return c.json({ eligible: r.eligible.map((p) => ({ staff_id: p.staff_id, name: p.name, week_hours: Math.round(p.week_hours * 10) / 10 })), excluded: r.excluded });
 });
@@ -1362,7 +1534,7 @@ app.post("/api/coverage/:id/assign", async (c) => {
   const holds = await c.env.DB.prepare("SELECT 1 FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(staff_id, req!.restaurant_id, req!.role_id).first();
   if (!holds) return c.json({ error: "staff_does_not_hold_role_at_restaurant" }, 422);
   try {
-    const out = await fillRequest(c.env, c.env.DB, await loadConnections(c.env, c.env.DB), id, staff_id, "manager");
+    const out = await fillRequest(c.env, c.env.DB, await loadConnections(c.env, c.env.DB, c.get("me").client_id), id, staff_id, "manager");
     return out === "ok" ? c.json({ ok: true }) : c.json({ error: out === "conflict" ? "overlap" : "already_filled" }, 409);
   } catch (e) { return flowError(c, e); }
 });
@@ -1376,7 +1548,7 @@ app.post("/api/coverage/:id/cancel", async (c) => {
 });
 
 // ---------- Messaging connections and log (admin) ----------
-app.get("/api/connections", requireAdmin, async (c) => c.json(publicConnectionView(await loadConnections(c.env, c.env.DB))));
+app.get("/api/connections", requireAdmin, async (c) => c.json(publicConnectionView(await loadConnections(c.env, c.env.DB, c.get("me").client_id))));
 
 app.put("/api/connections", requireAdmin, async (c) => {
   const b = await c.req.json<{ twilio?: { sid?: string; token?: string; from?: string } | null; smtp?: { host?: string; port?: number; secure?: string; user?: string; pass?: string; from?: string } | null }>();
@@ -1405,27 +1577,28 @@ app.put("/api/connections", requireAdmin, async (c) => {
     if (pass) writes.push(["conn_smtp_pass", pass]); // empty = keep the saved password
     if (from) writes.push(["conn_smtp_from", from]);
   }
-  await c.env.DB.batch(writes.map(([k, v]) => (v === null ? c.env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(k) : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, v))));
-  return c.json(publicConnectionView(await loadConnections(c.env, c.env.DB)));
+  const cid = c.get("me").client_id;
+  await c.env.DB.batch(writes.map(([k, v]) => (v === null ? delSettingStmt(c.env.DB, cid, k) : putSettingStmt(c.env.DB, cid, k, v))));
+  return c.json(publicConnectionView(await loadConnections(c.env, c.env.DB, c.get("me").client_id)));
 });
 
 app.post("/api/connections/test", requireAdmin, async (c) => {
   const { channel, to } = await c.req.json<{ channel?: string; to?: string }>();
-  const conn = await loadConnections(c.env, c.env.DB);
+  const conn = await loadConnections(c.env, c.env.DB, c.get("me").client_id);
   const lang: Lang = c.get("me") && (await c.env.DB.prepare("SELECT lang FROM staff WHERE id = ?").bind(c.get("me").id).first<{ lang: string }>())?.lang === "en" ? "en" : "fr";
   if (channel === "sms") {
     const phone = normalizePhone(to);
     if (!phone) return c.json({ error: "invalid_phone" }, 400);
-    return c.json(await deliver(c.env.DB, conn, "sms", phone, T.test(lang), "test", null));
+    return c.json(await deliver(c.env.DB, conn, "sms", phone, T.test(lang), "test", c.get("me").id));
   }
-  if (channel === "email" && to && to.includes("@")) return c.json(await deliver(c.env.DB, conn, "email", to.trim(), T.test(lang), "test", null));
+  if (channel === "email" && to && to.includes("@")) return c.json(await deliver(c.env.DB, conn, "email", to.trim(), T.test(lang), "test", c.get("me").id));
   return c.json({ error: "invalid_request" }, 400);
 });
 
 app.get("/api/admin/notifications", requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(
-    "SELECT n.id, n.created_at, n.channel, n.to_addr, n.subject, n.kind, n.status, n.error, s.name AS staff_name FROM notifications n LEFT JOIN staff s ON s.id = n.staff_id ORDER BY n.id DESC LIMIT 60",
-  ).all();
+    "SELECT n.id, n.created_at, n.channel, n.to_addr, n.subject, n.kind, n.status, n.error, s.name AS staff_name FROM notifications n LEFT JOIN staff s ON s.id = n.staff_id WHERE s.client_id = ? ORDER BY n.id DESC LIMIT 60",
+  ).bind(c.get("me").client_id).all();
   return c.json(rows.results);
 });
 
@@ -1556,7 +1729,7 @@ app.get("/api/schedule", async (c) => {
     for (const sh of shifts.results as any[]) sh.segments = [...(segs.get(sh.id)?.values() ?? [])];
   }
   const editable = await canManage(c.env.DB, me, restaurantId, department);
-  const settings = await loadSettings(c.env.DB);
+  const settings = await loadSettings(c.env.DB, me.client_id);
 
   // Weekly hours per person (all restaurants and departments) and "working elsewhere" markers.
   // Managers/admins see them for everyone on this schedule; everyone else only sees their own hours.
@@ -1599,7 +1772,7 @@ app.get("/api/schedule", async (c) => {
   const skills: Record<number, number[]> = {};
   const sIds = [...ids];
   if (sIds.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, post_id FROM staff_post_skills WHERE staff_id IN (${sIds.map(() => "?").join(",")})`).bind(...sIds).all<{ staff_id: number; post_id: number }>()).results) (skills[r.staff_id] ??= []).push(r.post_id);
-  const anySkills = !!(await c.env.DB.prepare("SELECT 1 FROM staff_post_skills LIMIT 1").first());
+  const anySkills = !!(await c.env.DB.prepare("SELECT 1 FROM staff_post_skills k JOIN staff s ON s.id = k.staff_id WHERE s.client_id = ? LIMIT 1").bind(me.client_id).first());
   // Delivery staff on duty (times only, no names): they can take the kitchen's out-of-the-oven post.
   const delivery_presence = department === "kitchen"
     ? (await c.env.DB.prepare(
@@ -1634,7 +1807,7 @@ app.get("/api/my-shifts", async (c) => {
   const minutes = (a: string, b: string) => (Date.parse(`${b}:00Z`) - Date.parse(`${a}:00Z`)) / 60000;
   const total_hours = Math.round((rows.filter((x) => x.status === "ok").reduce((n, x) => n + minutes(x.start_at, x.end_at), 0) / 60) * 100) / 100;
   const mine = await c.env.DB.prepare("SELECT max_weekly_hours FROM staff_limits WHERE staff_id = ?").bind(c.get("me").id).first<{ max_weekly_hours: number }>();
-  const general = (await loadSettings(c.env.DB)).overtime_hours;
+  const general = (await loadSettings(c.env.DB, c.get("me").client_id)).overtime_hours;
   return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
 });
 
@@ -1669,16 +1842,17 @@ app.get("/api/roster", async (c) => {
 
 app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
+  const cid = c.get("me").client_id;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff ORDER BY name").all(),
-    db.prepare("SELECT staff_id, restaurant_id, role_id FROM staff_roles").all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
-    db.prepare("SELECT staff_id, restaurant_id, department_id FROM managers").all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
-    db.prepare("SELECT id, name, open_time, close_time FROM restaurants ORDER BY name").all(),
-    db.prepare("SELECT staff_id, role_id, hourly_cents FROM staff_role_wages").all<{ staff_id: number; role_id: number; hourly_cents: number }>(),
+    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff WHERE client_id = ? ORDER BY name").bind(cid).all(),
+    db.prepare("SELECT sr.staff_id, sr.restaurant_id, sr.role_id FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
+    db.prepare("SELECT m.staff_id, m.restaurant_id, m.department_id FROM managers m JOIN staff s ON s.id = m.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
+    db.prepare("SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all(),
+    db.prepare("SELECT w.staff_id, w.role_id, w.hourly_cents FROM staff_role_wages w JOIN staff s ON s.id = w.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; role_id: number; hourly_cents: number }>(),
   ]);
   return c.json({
     restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
-    default_rates: await defaultRates(db),
+    default_rates: await defaultRates(db, cid),
     staff: sortByName(staff.results as any[]).map((s) => ({
       ...s,
       is_admin: s.is_admin === 1,
@@ -1869,9 +2043,9 @@ app.delete("/api/shifts/:id", async (c) => {
 // The reply link is protected by its long random token; the webhook by Twilio's request signature.
 const esc = (v: string) => v.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
-interface OfferView { sex: string | null; id: number; request_id: number; staff_id: number; status: string; req_status: string; lang: string; restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }
+interface OfferView { client_id: number; sex: string | null; id: number; request_id: number; staff_id: number; status: string; req_status: string; lang: string; restaurant: string; name_fr: string; name_en: string; start_at: string; end_at: string; until_close: number }
 const offerByToken = (db: D1Database, token: string) => db.prepare(
-  `SELECT o.id, o.request_id, o.staff_id, o.status, cr.status AS req_status, s.lang, s.sex, rs.name AS restaurant, ro.name_fr, ro.name_en, cr.start_at, cr.end_at, sh.until_close
+  `SELECT o.id, o.request_id, o.staff_id, o.status, cr.status AS req_status, s.lang, s.sex, rs.name AS restaurant, rs.client_id, ro.name_fr, ro.name_en, cr.start_at, cr.end_at, sh.until_close
    FROM coverage_offers o JOIN coverage_requests cr ON cr.id = o.request_id JOIN staff s ON s.id = o.staff_id
         JOIN restaurants rs ON rs.id = cr.restaurant_id JOIN roles ro ON ro.id = cr.role_id JOIN shifts sh ON sh.id = cr.shift_id
    WHERE o.token = ?`,
@@ -1896,7 +2070,9 @@ ${open ? `<div id="btns"><button class="y" onclick="ans(true)">${L.yes}</button>
 <p id="msg" role="status"></p></div></main>
 <script>async function ans(a){document.getElementById('btns').style.display='none';try{const r=await fetch('/hooks/offer/${esc(token)}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({accept:a})});const j=await r.json();
 document.getElementById('msg').textContent=j.result==='accepted'?${JSON.stringify(L.accepted)}:j.result==='declined'?${JSON.stringify(L.declined)}:${JSON.stringify(L.filled)}}catch(e){document.getElementById('msg').textContent=${JSON.stringify(L.err)};document.getElementById('btns').style.display=''}}</script></body></html>`;
-  return c.html(html, 200, { "cache-control": "no-store" });
+  const brand = o ? await loadBrand(c.env.DB, o.client_id) : null;
+  const branded = brand ? html.replace("<title>Mikes</title>", `<title>${esc(brand.name)}</title>`).replace("<header>Mikes</header>", `<header>${esc(brand.name)}</header>`).replaceAll("#da291c", brand.color) : html;
+  return c.html(branded, 200, { "cache-control": "no-store" });
 });
 
 app.post("/hooks/offer/:token", async (c) => {
@@ -1913,7 +2089,7 @@ app.post("/hooks/offer/:token", async (c) => {
 app.get("/cal/:file", async (c) => {
   await ensureMigrated(c.env.DB);
   const token = c.req.param("file").replace(/\.ics$/, "");
-  const who = /^[A-Za-z0-9_-]{20,64}$/.test(token) ? await c.env.DB.prepare("SELECT s.id, s.name FROM calendar_tokens ct JOIN staff s ON s.id = ct.staff_id WHERE ct.token = ?").bind(token).first<{ id: number; name: string }>() : null;
+  const who = /^[A-Za-z0-9_-]{20,64}$/.test(token) ? await c.env.DB.prepare("SELECT s.id, s.name, s.client_id FROM calendar_tokens ct JOIN staff s ON s.id = ct.staff_id WHERE ct.token = ?").bind(token).first<{ id: number; client_id: number; name: string }>() : null;
   if (!who) return c.text("not found", 404);
   const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 16), to = new Date(Date.now() + 180 * 86_400_000).toISOString().slice(0, 16);
   const rows = await c.env.DB.prepare(
@@ -1921,14 +2097,15 @@ app.get("/cal/:file", async (c) => {
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
   ).bind(who.id, from, to).all<{ id: number; start_at: string; end_at: string; until_close: number; notes: string | null; restaurant: string; name_fr: string; sex: string | null }>();
+  const brandName = (await loadBrand(c.env.DB, who.client_id)).name;
   const stamp = (v: string) => v.replace(/[-:]/g, "") + "00";
   const fold = (v: string) => v.replace(/[\\;,]/g, (m) => "\\" + m).replace(/\n/g, "\\n");
-  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Mikes//Horaire//FR", "CALSCALE:GREGORIAN", "X-WR-CALNAME:Mikes - Horaire", `X-WR-TIMEZONE:${c.env.TIMEZONE ?? "America/Toronto"}`];
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Mikes//Horaire//FR", "CALSCALE:GREGORIAN", `X-WR-CALNAME:${fold(brandName)} - Horaire`, `X-WR-TIMEZONE:${c.env.TIMEZONE ?? "America/Toronto"}`];
   const now = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
   for (const r of rows.results) {
     lines.push("BEGIN:VEVENT", `UID:shift-${r.id}@mikes`, `DTSTAMP:${now}`,
       `DTSTART;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.start_at)}`, `DTEND;TZID=${c.env.TIMEZONE ?? "America/Toronto"}:${stamp(r.end_at)}`,
-      `SUMMARY:${fold(`Mikes ${r.restaurant} - ${genderedRole(r.name_fr, r.sex)}`)}`, ...(r.notes ? [`DESCRIPTION:${fold(r.notes)}`] : []), "END:VEVENT");
+      `SUMMARY:${fold(`${brandName} ${r.restaurant} - ${genderedRole(r.name_fr, r.sex)}`)}`, ...(r.notes ? [`DESCRIPTION:${fold(r.notes)}`] : []), "END:VEVENT");
   }
   lines.push("END:VCALENDAR");
   return c.body(lines.join("\r\n") + "\r\n", 200, { "content-type": "text/calendar; charset=utf-8", "cache-control": "private, max-age=300" });
@@ -1937,15 +2114,21 @@ app.get("/cal/:file", async (c) => {
 // Inbound SMS from Twilio: YES / NO to an offer, or SICK to report the next shift.
 app.post("/hooks/twilio", async (c) => {
   await ensureMigrated(c.env.DB);
-  const conn = await loadConnections(c.env, c.env.DB);
   const form = await c.req.formData().catch(() => null);
   const params: Record<string, string> = {};
   form?.forEach((v, k) => { if (typeof v === "string") params[k] = v; });
+  // Which client's Twilio account is calling? (Each client has its own; the signature is checked with that client's token.)
+  let clientId = 1;
+  for (const cl of (await c.env.DB.prepare("SELECT id FROM clients WHERE active = 1").all<{ id: number }>()).results) {
+    const cn = await loadConnections(c.env, c.env.DB, cl.id);
+    if (cn.twilio && cn.twilio.sid === params.AccountSid) { clientId = cl.id; break; }
+  }
+  const conn = await loadConnections(c.env, c.env.DB, clientId);
   const url = conn.appUrl ? `${conn.appUrl}/hooks/twilio` : c.req.url;
   if (!conn.twilio || !(await verifyTwilioSignature(conn.twilio.token, url, params, c.req.header("X-Twilio-Signature")))) return c.text("forbidden", 403);
   const twiml = (text?: string) => c.body(`<?xml version="1.0" encoding="UTF-8"?><Response>${text ? `<Message>${esc(text)}</Message>` : ""}</Response>`, 200, { "content-type": "text/xml" });
   const from = normalizePhone(params.From);
-  const person = from ? await c.env.DB.prepare("SELECT id, name, lang, sex FROM staff WHERE phone = ?").bind(from).first<{ id: number; name: string; lang: string; sex: string | null }>() : null;
+  const person = from ? await c.env.DB.prepare("SELECT id, name, lang, sex FROM staff WHERE phone = ? AND client_id = ?").bind(from, clientId).first<{ id: number; name: string; lang: string; sex: string | null }>() : null;
   if (!person) return twiml();
   const lang: Lang = person.lang === "en" ? "en" : "fr";
   const word = (params.Body ?? "").trim().toLowerCase();

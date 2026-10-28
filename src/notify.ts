@@ -3,12 +3,17 @@ import { parseConnections, pickChannel, type Channel, type ConnEnv, type Connect
 import { sendTwilioSms } from "./twilio.ts";
 import { sendMailOverSocket } from "./smtp-socket.ts";
 import type { Lang, Msg } from "./templates.ts";
+import { clientSettingRows, getSetting } from "./tenant.ts";
 
 export interface StaffContact { id: number; name: string; phone: string | null; email: string | null; lang: string; notify_channel: string }
 
-export async function loadConnections(env: ConnEnv, db: D1Database): Promise<Connections> {
-  const rows = await db.prepare("SELECT key, value FROM settings WHERE key LIKE 'conn\\_%' ESCAPE '\\'").all<{ key: string; value: string }>();
-  return parseConnections(rows.results, env);
+/** Twilio / SMTP settings of one client. Environment secrets belong to the platform owner (client 1); other clients use what they saved. */
+export async function loadConnections(env: ConnEnv, db: D1Database, clientId = 1): Promise<Connections> {
+  const rows = await clientSettingRows(db, clientId, "conn_");
+  const conn = parseConnections(rows, clientId === 1 ? env : { APP_URL: env.APP_URL });
+  // The name used in messages ("Mikes: ...") is the client's company name.
+  const brand = await getSetting(db, clientId, "brand_name") ?? (await db.prepare("SELECT name FROM clients WHERE id = ?").bind(clientId).first<{ name: string }>())?.name;
+  return { ...conn, brand: brand || "Mikes" };
 }
 
 async function log(db: D1Database, e: { staff_id: number | null; channel: Channel; to: string | null; subject: string | null; body: string; kind: string; status: "sent" | "failed" | "skipped"; error?: string }) {
@@ -18,6 +23,7 @@ async function log(db: D1Database, e: { staff_id: number | null; channel: Channe
 
 /** Sends one message on one channel and logs the outcome. Never throws. */
 export async function deliver(db: D1Database, conn: Connections, channel: Channel, to: string, msg: Msg, kind: string, staffId: number | null): Promise<{ ok: boolean; error?: string }> {
+  if (conn.brand && conn.brand !== "Mikes") msg = { ...msg, text: msg.text.replace(/^Mikes:/, `${conn.brand}:`) };
   let result: { ok: boolean; error?: string };
   try {
     if (channel === "sms") {
@@ -50,7 +56,8 @@ export async function notifyStaff(db: D1Database, conn: Connections, person: Sta
 export async function managersOf(db: D1Database, restaurantId: number, departmentId: string): Promise<StaffContact[]> {
   const r = await db.prepare(
     `SELECT DISTINCT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel FROM staff s
-     WHERE s.active = 1 AND (s.is_admin = 1 OR s.id IN (SELECT staff_id FROM managers WHERE restaurant_id = ? AND department_id = ?))`,
+     WHERE s.active = 1 AND s.client_id = (SELECT client_id FROM restaurants WHERE id = ?1)
+       AND (s.is_admin = 1 OR s.id IN (SELECT staff_id FROM managers WHERE restaurant_id = ?1 AND department_id = ?2))`,
   ).bind(restaurantId, departmentId).all<StaffContact>();
   return r.results;
 }
