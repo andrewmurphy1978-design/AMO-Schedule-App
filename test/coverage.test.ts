@@ -147,3 +147,20 @@ test("the oven post can also be covered by delivery staff", () => {
   assert.deepEqual(postGaps(people, posts, m("17:00"), m("18:00"), 30, [{ a: m("17:00"), b: m("19:00") }])[5], []);
   assert.equal(postGaps(people, posts, m("17:00"), m("18:00"), 30, [{ a: m("17:00"), b: m("19:00") }])[4].length, 1); // pizza still needs its own person
 });
+
+test("breakfast: while served, the two breakfast posts need competent people; the runner covers everything", () => {
+  const posts = [{ id: 1, code: "subs", all_posts: 0, kind: "main" }, { id: 2, code: "starters", all_posts: 0, kind: "main" }, { id: 3, code: "pasta", all_posts: 0, kind: "main" }, { id: 4, code: "pizza", all_posts: 0, kind: "main" }, { id: 5, code: "oven", all_posts: 0, kind: "main" }, { id: 7, code: "bf_eggs", all_posts: 0, kind: "breakfast" }, { id: 8, code: "bf_back", all_posts: 0, kind: "breakfast" }];
+  const m = (h: string) => toMin(h);
+  const at = (skills: number[], a = "06:30", b = "14:00") => ({ skills: new Set(skills), a: m(a), b: m(b) });
+  // two people at 07:00: one does eggs, the other nothing breakfast-related -> back post flagged until 11:00; regular posts are not required before 11:00
+  const g = postGaps([at([7]), at([1, 2])], posts, m("07:00"), m("12:00"), 30, [], { from: m("06:30"), until: m("11:00") });
+  assert.deepEqual(g[8], [{ from: m("07:00"), to: m("11:00") }]);
+  assert.deepEqual(g[7], []);
+  assert.deepEqual(g[4], [{ from: m("11:00"), to: m("12:00") }]); // after breakfast the usual posts apply: nobody does pizza
+  assert.deepEqual(g[3], [{ from: m("11:00"), to: m("12:00") }]);
+  // a runner (all posts, as a person with every skill) + an eggs cook: both breakfast posts covered
+  const g2 = postGaps([at([7]), at([7, 8, 1, 2, 3, 4, 5])], posts, m("07:00"), m("11:00"), 30, [], { from: m("06:30"), until: m("11:00") });
+  assert.deepEqual(Object.values(g2).flat(), []);
+  // without a breakfast time nothing changes for the breakfast posts
+  assert.deepEqual(postGaps([at([1])], posts, m("07:00"), m("08:00"))[7], []);
+});

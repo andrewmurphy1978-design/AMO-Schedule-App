@@ -132,6 +132,7 @@ const requireAdmin = async (c: any, next: any) => {
 // Adds open_by_dow and close_by_dow (7 "HH:MM" values each, Monday..Sunday) to restaurant rows.
 async function withOpenHours<T extends { id: number; open_time: string; close_time: string }>(db: D1Database, rows: T[]) {
   const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null }>();
+  const bfRows = (await db.prepare("SELECT restaurant_id, dow, start_time, end_time FROM restaurant_breakfast").all<{ restaurant_id: number; dow: number; start_time: string; end_time: string }>()).results;
   const bounds = new Map<number, string[]>();
   for (const p of (await db.prepare("SELECT restaurant_id, boundaries FROM restaurant_periods").all<{ restaurant_id: number; boundaries: string }>()).results) {
     try { const b = JSON.parse(p.boundaries); if (validBoundaries(b)) bounds.set(p.restaurant_id, b); } catch { /* default */ }
@@ -141,6 +142,7 @@ async function withOpenHours<T extends { id: number; open_time: string; close_ti
     return {
       ...r,
       period_bounds: bounds.get(r.id) ?? DEFAULT_BOUNDARIES,
+      breakfast_by_dow: Array.from({ length: 7 }, (_, d) => { const b = bfRows.find((x) => x.restaurant_id === r.id && x.dow === d); return b ? { start: b.start_time, end: b.end_time } : null; }),
       open_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.open_time ?? r.open_time),
       close_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.close_time ?? r.close_time),
     };
@@ -335,6 +337,20 @@ app.put("/api/targets", async (c) => {
   } catch {
     return c.json({ error: "invalid_reference" }, 400);
   }
+  return c.json({ ok: true });
+});
+
+// Breakfast hours per weekday: days = 7 entries (Monday..Sunday), each { start, end } or null (no breakfast that day).
+app.put("/api/restaurants/:id/breakfast", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { days } = await c.req.json<{ days?: ({ start: string; end: string } | null)[] }>();
+  if (!id || !Array.isArray(days) || days.length !== 7) return c.json({ error: "bad_request" }, 400);
+  if (days.some((d) => d && (!TIME_RE.test(d.start) || !TIME_RE.test(d.end) || d.start >= d.end))) return c.json({ error: "invalid_times" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM restaurant_breakfast WHERE restaurant_id = ?").bind(id),
+    ...days.flatMap((d, dow) => (d ? [c.env.DB.prepare("INSERT INTO restaurant_breakfast (restaurant_id, dow, start_time, end_time) VALUES (?, ?, ?, ?)").bind(id, dow, d.start, d.end)] : [])),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -1024,7 +1040,7 @@ app.put("/api/staff/:id/limit", requireAdmin, async (c) => {
 });
 
 // ---------- Kitchen posts and competencies ----------
-app.get("/api/posts", async (c) => c.json((await c.env.DB.prepare("SELECT id, department_id, code, name_fr, name_en, sort, all_posts FROM posts ORDER BY sort").all()).results));
+app.get("/api/posts", async (c) => c.json((await c.env.DB.prepare("SELECT id, department_id, code, name_fr, name_en, sort, all_posts, kind FROM posts ORDER BY sort").all()).results));
 
 // Posts one employee is competent at (admin, or a manager of that employee).
 app.get("/api/staff/:id/skills", async (c) => {

@@ -29,6 +29,7 @@ import m0026 from "../migrations/0026_print_order.sql";
 import m0027 from "../migrations/0027_shift_roles_no_count.sql";
 import m0028 from "../migrations/0028_shift_segments.sql";
 import m0029 from "../migrations/0029_kitchen_posts.sql";
+import m0030 from "../migrations/0030_breakfast_runner.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -60,6 +61,7 @@ const MIGRATIONS: [string, string][] = [
   ["0027_shift_roles_no_count", m0027],
   ["0028_shift_segments", m0028],
   ["0029_kitchen_posts", m0029],
+  ["0030_breakfast_runner", m0030],
 ];
 
 const statements = (sql: string) =>

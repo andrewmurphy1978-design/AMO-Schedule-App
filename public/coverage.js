@@ -107,14 +107,17 @@ export const surpluses = (buckets, wins, step = 30) => runs(buckets, wins, step,
  *  - With fewer people, one person covers several posts: each post just needs someone competent present (the oven counts as
  *    covered when someone present can work the oven, pizza, subs or pasta).
  * `ovenHelpers` ([{ a, b }]): delivery staff present: they can also take the oven post.
+ * `breakfast` ({ from, until } in minutes, or null): while breakfast is served only the breakfast posts are required.
  * Returns { postId: [{ from, to }] } of the uncovered stretches.
  */
 export const PRINCIPAL_POSTS = ["pizza", "pasta", "subs", "starters"]; // order used when reporting which post is the one left out
-export function postGaps(people, posts, from, to, step = 30, ovenHelpers = []) {
+export function postGaps(people, posts, from, to, step = 30, ovenHelpers = [], breakfast = null) {
   const runnerIds = new Set(posts.filter((p) => p.all_posts).map((p) => p.id));
   const real = posts.filter((p) => !p.all_posts);
+  const breakfastPosts = real.filter((p) => p.kind === "breakfast");
   const byCode = Object.fromEntries(real.map((p) => [p.code, p]));
   const principals = PRINCIPAL_POSTS.map((c) => byCode[c]).filter(Boolean);
+  const lunchPosts = real.filter((p) => p.kind !== "breakfast");
   const can = (x, post) => x.skills.has(post.id) || [...runnerIds].some((r) => x.skills.has(r));
   const gaps = Object.fromEntries(real.map((p) => [p.id, []]));
   const add = (post, t) => { const list = gaps[post.id], last = list[list.length - 1]; if (last && last.to === t) last.to = t + step; else list.push({ from: t, to: t + step }); };
@@ -122,6 +125,13 @@ export function postGaps(people, posts, from, to, step = 30, ovenHelpers = []) {
     const here = people.filter((x) => x.a <= t && x.b > t);
     if (!here.length) continue;
     const missing = new Set();
+    if (breakfast && t >= breakfast.from && t < breakfast.until && breakfastPosts.length) {
+      // while breakfast is served, the breakfast posts are the ones to cover: one person each when there are enough people
+      if (here.length >= breakfastPosts.length) matchPosts(here, breakfastPosts, can, missing);
+      else for (const p of breakfastPosts) if (!here.some((x) => can(x, p))) missing.add(p.id);
+      for (const p of real) if (missing.has(p.id)) add(p, t);
+      continue;
+    }
     if (here.length >= principals.length && principals.length === 4) {
       // one person per principal post: bipartite matching by augmenting paths, posts tried in a fixed order
       const owner = new Map(); // person index -> post id
@@ -141,7 +151,22 @@ export function postGaps(people, posts, from, to, step = 30, ovenHelpers = []) {
     }
     const oven = byCode.oven;
     if (oven && !ovenHelpers.some((x) => x.a <= t && x.b > t) && !here.some((x) => can(x, oven) || principals.some((p) => ["pizza", "subs", "pasta"].includes(p.code) && can(x, p)))) missing.add(oven.id);
-    for (const p of real) if (missing.has(p.id)) add(p, t);
+    for (const p of real) if (missing.has(p.id) && p.kind !== "breakfast") add(p, t);
   }
   return gaps;
+}
+
+/** One distinct competent person per post (augmenting paths); the posts left without anyone are added to `missing`. */
+function matchPosts(here, posts, can, missing) {
+  const owner = new Map();
+  const place = (pi, seen) => {
+    for (let i = 0; i < here.length; i++) {
+      if (seen.has(i) || !can(here[i], posts[pi])) continue;
+      seen.add(i);
+      const cur = owner.get(i);
+      if (cur === undefined || place(posts.findIndex((q) => q.id === cur), seen)) { owner.set(i, posts[pi].id); return true; }
+    }
+    return false;
+  };
+  posts.forEach((p, pi) => { if (!place(pi, new Set())) missing.add(p.id); });
 }

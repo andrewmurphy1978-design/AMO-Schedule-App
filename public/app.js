@@ -596,10 +596,14 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const kitchenPeople = d.items.filter((x) => x.s.status !== "sick_open").flatMap((x) =>
         shiftSlices(x.s).filter((sl) => sl.roles.some((r) => r.department_id === "kitchen" && !r.no_count)).map((sl) => {
           const sp = shiftSpan({ start_at: sl.a, end_at: sl.b }, d.day);
-          return { skills: new Set(data.skills?.[x.s.staff_id] ?? []), a: sp.s, b: sp.e };
+          // a person working as Runner is competent at every post (the extra person on busy days)
+          const runner = sl.roles.some((r) => (r.name_en ?? "").toLowerCase() === "runner");
+          return { skills: new Set(runner ? state.posts.map((p) => p.id) : data.skills?.[x.s.staff_id] ?? []), a: sp.s, b: sp.e };
         }));
+      const bfDay = state.restaurants.find((r) => r.id === sel.restaurant)?.breakfast_by_dow?.[dowOf(d.day)];
       const gaps = postGaps(kitchenPeople, state.posts.filter((p) => p.department_id === "kitchen"), Math.max(startMin, d.openMin - 60), Math.min(endMin, d.closeMin), 30,
-        (data.delivery_presence ?? []).map((x) => { const sp = shiftSpan(x, d.day); return { a: sp.s, b: sp.e }; }));
+        (data.delivery_presence ?? []).map((x) => { const sp = shiftSpan(x, d.day); return { a: sp.s, b: sp.e }; }),
+        bfDay ? { from: toMin(bfDay.start), until: toMin(bfDay.end) } : null);
       for (const p of state.posts.filter((q) => q.department_id === "kitchen" && !q.all_posts))
         for (const g of gaps[p.id] ?? []) postLines.push(`${shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : ""}${getLang() === "fr" ? p.name_fr : p.name_en} · ${fromMin(g.from)}–${fromMin(g.to)}`);
     }
@@ -1335,7 +1339,7 @@ async function renderAdmin() {
   const showInactive = inactiveCount ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!state.showInactive, onChange: (e) => { state.showInactive = e.target.checked; render(); } }), h("span", {}, `${t("showInactive")} (${inactiveCount})`)) : null;
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), periodsPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), periodsPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, showInactive, h("div", { class: state.showInactive ? "" : "hide-inactive" }, staffList)],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -1616,6 +1620,40 @@ const thisMonday = () => mondayOf(new Date());
 function fromField() {
   const input = h("input", { type: "date", value: thisMonday() });
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
+}
+
+// Breakfast hours per weekday: while breakfast is served, the breakfast posts (eggs, back post) are the ones to cover in the kitchen.
+function breakfastPanel(ov) {
+  const st = { restaurant: ov.restaurants[0]?.id };
+  const box = h("section", { class: "panel" });
+  function draw() {
+    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
+    if (!resto) { box.replaceChildren(); return; }
+    const rows = Array.from({ length: 7 }, (_, i) => {
+      const cur = resto.breakfast_by_dow?.[i];
+      const on = h("input", { type: "checkbox", checked: !!cur, "aria-label": weekdayName(i) });
+      const from = timeField(cur?.start ?? resto.open_by_dow?.[i] ?? "07:00"), to = timeField(cur?.end ?? "11:00");
+      const sync = () => { from.hidden = to.hidden = !on.checked; };
+      on.addEventListener("change", sync); sync();
+      return { on, from, to };
+    });
+    const copyMonday = () => rows.slice(1).forEach((r) => { r.on.checked = rows[0].on.checked; r.from.value = rows[0].from.value; r.to.value = rows[0].to.value; r.on.dispatchEvent(new Event("change")); });
+    box.replaceChildren(h("h2", {}, t("breakfastTitle")), h("p", { class: "meta" }, t("breakfastHelp")),
+      h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+      h("div", { class: "hours-table" }, rows.map((r, i) => h("div", { class: "hours-row" },
+        h("label", { class: "check" }, r.on, h("strong", {}, weekdayName(i))),
+        h("label", { class: "mini" }, h("span", {}, t("openTime")), r.from), h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.to)))),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try {
+            await api(`/restaurants/${st.restaurant}/breakfast`, { method: "PUT", body: { days: rows.map((r) => (r.on.checked ? { start: r.from.value, end: r.to.value } : null)) } });
+            state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
+          } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
+        } }, t("save"))));
+  }
+  draw();
+  return box;
 }
 
 // The time periods of the staffing targets, per restaurant (Open-8:00, 8:00-9:00 ... 20:00-Close).
