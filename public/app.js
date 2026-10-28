@@ -628,9 +628,8 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const kitchenPeople = d.items.filter((x) => x.s.status !== "sick_open").flatMap((x) =>
         shiftSlices(x.s).filter((sl) => sl.roles.some((r) => r.department_id === "kitchen" && !r.no_count)).map((sl) => {
           const sp = shiftSpan({ start_at: sl.a, end_at: sl.b }, d.day);
-          // a person working as Runner is competent at every post (the extra person on busy days)
-          const runner = sl.roles.some((r) => (r.name_en ?? "").toLowerCase() === "runner");
-          return { skills: new Set(runner ? state.posts.map((p) => p.id) : data.skills?.[x.s.staff_id] ?? []), a: sp.s, b: sp.e };
+          // the runner is a competency (competent at every post), not a role
+          return { skills: new Set(data.skills?.[x.s.staff_id] ?? []), a: sp.s, b: sp.e };
         }));
       const bfDay = state.restaurants.find((r) => r.id === sel.restaurant)?.breakfast_by_dow?.[dowOf(d.day)];
       const gaps = postGaps(kitchenPeople, state.posts.filter((p) => p.department_id === "kitchen"), Math.max(startMin, d.openMin - 60), Math.min(endMin, d.closeMin), 30,
@@ -939,7 +938,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 // ---------- my shifts ----------
 // ---------- time off ----------
 // Kitchen competencies of one employee: the posts they can work (a runner can work all of them).
-const KITCHEN_SKILL_ROLES = ["chef", "cook", "assistant cook"];
+const KITCHEN_SKILL_ROLES = ["chef", "cook"];
 function skillsBox(person) {
   const box = h("div", { class: "skills-box" });
   const eligible = () => (person.roles ?? []).some((r) => KITCHEN_SKILL_ROLES.includes((state.roles.find((x) => x.id === r.role_id)?.name_en ?? "").toLowerCase()));
@@ -960,17 +959,27 @@ function skillsBox(person) {
 
 // Hours promised to the employee and notes for the planner (both are given to the AI when it builds a schedule).
 function planningForm(person) {
-  const hoursIn = h("input", { type: "number", min: 0, max: 168, step: "0.5", inputMode: "decimal", placeholder: t("noPromisedHours"), value: person.promised_hours ?? "" });
-  const notes = h("textarea", { rows: 4, maxLength: 1000, placeholder: t("planningNotesPlaceholder") }, person.scheduling_notes ?? "");
+  const hoursIn = h("input", { type: "number", min: 0, max: 168, step: "0.5", inputMode: "decimal", placeholder: "—", value: person.promised_hours ?? "", "aria-label": t("promisedHours") });
+  const notes = h("textarea", { rows: 4, maxLength: 1000, placeholder: t("planningNotesPlaceholder") });
   notes.value = person.scheduling_notes ?? "";
-  return h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: async (e) => {
+  const setHours = (v) => { hoursIn.value = v === null ? "" : String(v); markChips(); };
+  const step = (d) => { const cur = Number(hoursIn.value) || 0; setHours(Math.max(0, Math.min(168, cur + d))); };
+  const chips = [10, 15, 20, 25, 30, 35, 40].map((n) => h("button", { type: "button", class: "chip-btn", onClick: () => setHours(n) }, `${n} h`));
+  const markChips = () => chips.forEach((c, i) => c.setAttribute("aria-pressed", String(Number(hoursIn.value) === [10, 15, 20, 25, 30, 35, 40][i])));
+  hoursIn.addEventListener("input", markChips); markChips();
+  const form = h("form", { id: `planning-form-${person.id}`, class: "planning-form", onSubmit: async (e) => {
     e.preventDefault();
     try { const r = await api(`/staff/${person.id}/planning`, { method: "PUT", body: { promised_hours: hoursIn.value, scheduling_notes: notes.value } }); person.promised_hours = r.promised_hours; person.scheduling_notes = notes.value || null; toast(t("saved")); }
     catch (err) { toast(err.body?.error === "invalid_hours" ? t("genericError") : errorText(err)); }
   } },
-    h("label", { class: "field" }, h("span", {}, t("promisedHours")), hoursIn, h("span", { class: "meta" }, t("promisedHoursHelp"))),
-    h("label", { class: "field" }, h("span", {}, t("planningNotes")), notes, h("span", { class: "meta" }, t("planningNotesHelp"))),
-    h("button", { class: "btn primary", type: "submit" }, t("save")));
+    h("section", { class: "plan-card" },
+      h("h4", {}, `⏱ ${t("promisedHours")}`), h("p", { class: "meta" }, t("promisedHoursHelp")),
+      h("div", { class: "hours-stepper" },
+        h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), hoursIn, h("span", { class: "unit" }, t("hoursPerWeek")), h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+")),
+      h("div", { class: "chip-row" }, chips, h("button", { type: "button", class: "chip-btn", onClick: () => setHours(null) }, t("noPromisedHours")))),
+    h("section", { class: "plan-card" },
+      h("h4", {}, `📝 ${t("planningNotes")}`), h("p", { class: "meta" }, t("planningNotesHelp")), notes));
+  return form;
 }
 
 // ---------- AI: propose next week's schedule ----------
@@ -2124,14 +2133,16 @@ function staffCard(s, ov) {
     const tabs = [["details", t("details")], ["roles", t("rolesTab")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
+    const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
     const tabBar = h("div", { class: "dlg-tabs", role: "tablist" });
     const content = h("div", { class: "dlg-content" });
     const panes = {
       details: () => [details],
       roles: () => {
+        const sideBySide = h("div", { class: "resto-cols" }, blocks);
         // the kitchen competencies only concern Chef, Cook and Assistant cook: shown/hidden as the roles change
         const box = skillsBox(s);
-        const wrap = h("div", { class: "roles-tab" }, box, blocks);
+        const wrap = h("div", { class: "roles-tab" }, box, sideBySide);
         wrap.addEventListener("change", () => { setTimeout(() => box.refresh(), 700); });
         return [wrap];
       },
@@ -2140,7 +2151,7 @@ function staffCard(s, ov) {
       planning: () => [planningForm(s)],
     };
     const draw = () => {
-      saveBtn.hidden = tab !== "details";
+      saveTarget();
       tabBar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label)));
       content.replaceChildren(...panes[tab]());
     };

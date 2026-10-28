@@ -572,3 +572,21 @@ dialog:has(.ai-dialog){width:min(780px,96vw)}
 .ai-included{margin:.2rem 0 .6rem 1.1rem}.ai-prompt{white-space:pre-wrap;max-height:240px;overflow:auto;background:#f3f1ee;border-radius:8px;padding:8px;font-size:.75rem}
 .ai-summary{font-weight:600}.ai-day h4{margin:.8rem 0 .2rem}.ai-shift{padding:2px 6px;border-left:3px solid #ccc;margin:2px 0}.ai-shift.warn{border-left-color:#d92d20;background:#fde8e6}
 .ai-wait{display:grid;justify-items:center;gap:.4rem;padding:2rem 0}.spinner{width:34px;height:34px;border:4px solid #eee;border-top-color:var(--brand,#da291c);border-radius:50%;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+
+/* employee dialog: roles side by side per restaurant, friendlier Hours tab */
+dialog.wide { width: min(860px, calc(100vw - 24px)); }
+.resto-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: .8rem; align-items: start; }
+.resto-cols .resto-block { border: 1px solid var(--line, #e3dfd9); border-radius: 12px; padding: .7rem; background: #faf8f5; }
+.resto-cols .resto-block h3 { margin: 0 0 .4rem; color: var(--brand, #da291c); }
+.planning-form { display: grid; gap: .9rem; }
+.plan-card { border: 1px solid var(--line, #e3dfd9); border-radius: 14px; padding: 1rem; background: #fff; display: grid; gap: .5rem; }
+.plan-card h4 { margin: 0; font-size: 1.05rem; }
+.hours-stepper { display: flex; align-items: center; gap: .6rem; }
+.hours-stepper input { width: 6rem; text-align: center; font-size: 1.6rem; font-weight: 800; min-height: 56px; }
+.hours-stepper .icon-btn { width: 48px; height: 48px; font-size: 1.5rem; }
+.hours-stepper .unit { color: var(--muted, #666); font-weight: 600; }
+.chip-row { display: flex; flex-wrap: wrap; gap: .4rem; }
+.chip-btn { border: 1px solid var(--line, #c9c4bc); background: #fff; border-radius: 999px; padding: .35rem .8rem; font: inherit; font-weight: 600; cursor: pointer; min-height: 36px; }
+.chip-btn[aria-pressed="true"] { background: var(--brand, #da291c); border-color: var(--brand, #da291c); color: #fff; }
+.skills-box:not([hidden]) { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .4rem; }
+.skills-box > h4, .skills-box > p { grid-column: 1 / -1; margin: 0; }

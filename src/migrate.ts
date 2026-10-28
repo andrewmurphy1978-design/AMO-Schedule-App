@@ -31,6 +31,7 @@ import m0028 from "../migrations/0028_shift_segments.sql";
 import m0029 from "../migrations/0029_kitchen_posts.sql";
 import m0030 from "../migrations/0030_breakfast_runner.sql";
 import m0031 from "../migrations/0031_ai_schedule.sql";
+import m0032 from "../migrations/0032_remove_repeated_roles.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -64,6 +65,7 @@ const MIGRATIONS: [string, string][] = [
   ["0029_kitchen_posts", m0029],
   ["0030_breakfast_runner", m0030],
   ["0031_ai_schedule", m0031],
+  ["0032_remove_repeated_roles", m0032],
 ];
 
 const statements = (sql: string) =>
