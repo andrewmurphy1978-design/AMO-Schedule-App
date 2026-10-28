@@ -623,7 +623,9 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     const bars = clipped.map((x) => {
       const range = `${hhmm(x.s.start_at)}–${x.s.until_close ? "F" : hhmm(x.s.end_at)}`;
       const height = ((x.to - x.from) / 60) * ph;
-      const wide = zoom || lanes <= 2 || (!desktop && lanes <= 3);
+      // Week view: always the vertical layout (text read top to bottom, name visible). Horizontal text only when a single day is shown.
+      const single = shown.length === 1;
+      const wide = single && (zoom || lanes <= 2 || (!desktop && lanes <= 3));
       const color = staffColor(x.s.staff_id, x.s.staff_color);
       const fill = x.s.until_close ? `linear-gradient(to bottom, ${color} 85%, color-mix(in srgb, ${color} 65%, black))` : color;
       const props = {
@@ -633,7 +635,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       };
       // Picture size follows the room available in this lane; skip it on very short bars.
       const size = Math.max(14, Math.min(zoom ? 44 : 30, Math.floor(laneArea / lanes) - 6));
-      const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
+      const pic = height >= size + 14 + (wide ? 0 : 80) ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
       // Role icon (plate = dishwasher, pizza = cook, car = delivery, knife = prep…); the full name is in the tooltip.
       const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, shiftRoleIcons(x.s));
       // different roles during the shift: a marker with the roles' icons where each new range starts
@@ -646,7 +648,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), `${range} · ${shiftRoleLabel(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
         ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), range]
-        : [pic, icon, h("span", { class: "bar-text" }, `${shortOf.get(x.s.staff_id)} ${range}`)];
+        : [pic, height >= 60 ? icon : null, h("span", { class: "bar-text" }, `${shortOf.get(x.s.staff_id)} ${range}`)];
       return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body, marks) : h("div", props, body, marks);
     });
     // Roles that arrive before opening (cook, waiter…): the closed hatching stops earlier and a lighter "setup" band marks that time.

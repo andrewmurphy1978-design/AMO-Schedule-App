@@ -513,3 +513,6 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 @media print{.seg-line{font-size:8px}}
 .seg-head{display:grid;gap:2px}
 .skills-box[hidden]{display:none}
+
+/* week view: vertical text always readable, name first */
+.vtl-bar.vertical .bar-text { min-height: 2.2em; }
