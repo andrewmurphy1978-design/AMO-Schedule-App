@@ -11,18 +11,15 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <div class="strip">
-    <span id="brand-sub"></span>
-    <button id="lang-toggle" class="chip" type="button"></button>
-  </div>
   <header class="topbar">
     <div class="brand">
       <!-- Drop the official logo at public/logo.png (or logo.svg + update src) to replace the text wordmark. -->
       <img id="logo" src="logo.png" alt="Toujours Mikes" height="52" onerror="this.hidden=true;document.getElementById('wordmark').hidden=false">
       <span id="wordmark" class="wordmark" hidden>Mikes</span>
     </div>
+    <nav class="tabs" id="main-tabs" aria-label="Navigation"></nav>
+    <button id="lang-toggle" class="chip" type="button"></button>
   </header>
-  <nav class="tabs" id="main-tabs" aria-label="Navigation"></nav>
   <main id="app" aria-live="polite"></main>
   <footer class="footer" id="footer"></footer>
   <dialog id="modal"></dialog>

@@ -119,12 +119,13 @@ function errorText(e) {
 
 // ---------- state ----------
 const state = {
-  me: null, restaurants: [], roles: [], posts: [], view: "schedule",
+  me: null, restaurants: [], roles: [], posts: [], view: window.matchMedia("(min-width: 900px)").matches ? "schedule" : "mine",
   sel: { restaurant: null, department: null, departments: [], week: mondayOf(new Date()), day: ymd(new Date()) },
 };
 
 const DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
+state.scheduleTab = (() => { try { return localStorage.getItem("scheduleTab") || "coverage"; } catch { return "coverage"; } })();
 state.tableOrder = (() => { try { return localStorage.getItem("tableOrder") || "alpha"; } catch { return "alpha"; } })();
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
 
@@ -142,11 +143,13 @@ function allowedDepartments(restaurantId) {
 const $app = document.getElementById("app");
 
 function renderChrome() {
-  document.getElementById("lang-toggle").textContent = getLang() === "fr" ? "English" : "Français";
+  document.getElementById("lang-toggle").textContent = mqDesktop.matches ? (getLang() === "fr" ? "English" : "Français") : (getLang() === "fr" ? "EN" : "FR");
   document.getElementById("footer").textContent = t("footer");
-  document.getElementById("brand-sub").textContent = t("app");
   document.title = `Mikes · ${t("app")}`;
-  const tabs = [["schedule", t("schedule")], ["mine", t("myShifts")], ["timeoff", t("timeOff")], ["account", t("account")]];
+  // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
+  const tabs = mqDesktop.matches
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["timeoff", t("timeOff")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["timeoff", t("timeOff")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -377,11 +380,17 @@ async function renderSchedule() {
         h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); sel.day = sel.week; render(); } }, "›"))),
     h("div", { class: "field" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", onClick: () => { sel.week = mondayOf(new Date()); sel.day = ymd(new Date()); render(); } }, t("today"))),
-    h("label", { class: "field" }, h("span", {}, t("tableOrder")),
+    h("label", { class: "field desktop-only order-field" }, h("span", {}, t("tableOrder")),
       h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
-        [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v }, l)))),
-    h("div", { class: "field" }, h("span", {}, " "),
-      h("button", { class: "btn", type: "button", title: t("printHint"), onClick: () => window.print() }, `🖨 ${t("printSchedule")}`)),
+        [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v, title: l }, l)))),
+    h("div", { class: "field desktop-only" }, h("span", {}, " "),
+      h("button", { class: "btn", type: "button", title: t("printHint"), onClick: async () => {
+        // the printout is the table: show it for printing, then go back to the tab you were on
+        const prev = state.scheduleTab;
+        if (prev !== "table") { state.scheduleTab = "table"; await render(); }
+        window.addEventListener("afterprint", () => { if (state.scheduleTab !== prev) { state.scheduleTab = prev; render(); } }, { once: true });
+        setTimeout(() => window.print(), 150);
+      } }, `🖨 ${t("printSchedule")}`)),
   );
   // Only shown on paper: a title above the week table so the printed/PDF schedule can be posted in the restaurant.
   const printHead = h("div", { class: "print-head" },
@@ -504,7 +513,11 @@ async function renderSchedule() {
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
   const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
-  $app.replaceChildren(...[printHead, controls, status, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), daytabs, timeline, daily, grid, fab].filter(Boolean));
+  const setTab = (v) => { state.scheduleTab = v; try { localStorage.setItem("scheduleTab", v); } catch { /* ignore */ } render(); };
+  const subtabs = h("div", { class: "subtabs", role: "tablist" },
+    ...[["coverage", t("coverageTab")], ["table", t("tableTab")]].map(([v, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.scheduleTab === v), onClick: () => setTab(v) }, l)), status);
+  const onTable = state.scheduleTab === "table";
+  $app.replaceChildren(...[printHead, controls, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : [timeline]), fab].filter(Boolean));
 }
 
 

@@ -521,3 +521,48 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 .vtl-cell .dept-count { display: inline-block; margin: 0 4px 0 0; font-size: .78rem; font-weight: 700; white-space: nowrap; }
 .vtl-cell .dept-count.short { color: #b4160b; } .vtl-cell .dept-count.over { color: #1c4fa0; } .vtl-cell .dept-count.ok { color: #1c6b30; }
 .vtl-cell:has(.dept-count){display:flex;align-items:center;justify-content:center;gap:2px;white-space:nowrap;overflow:hidden;padding:0 2px}
+
+/* ---------- One-line header: logo, navigation, language ---------- */
+.strip { display: none; }
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: .75rem; padding: .35rem 16px; padding-top: calc(.35rem + env(safe-area-inset-top)); background: #fff; border-bottom: 1px solid var(--line); }
+.topbar .brand img { height: 42px; }
+.topbar .tabs { position: static; flex: 1 1 auto; min-width: 0; border-bottom: 0; background: transparent; justify-content: flex-start; }
+.topbar .tabs button { flex: 0 0 auto; min-height: 44px; padding: 0 .9rem; }
+.topbar .chip { flex: 0 0 auto; border: 1px solid var(--brand); color: var(--brand); background: #fff; min-height: 34px; }
+@media (max-width: 640px) { .topbar { gap: .4rem; padding-left: 8px; padding-right: 8px; } .topbar .brand img { height: 30px; } .topbar .tabs button { padding: 0 .55rem; font-size: .85rem; } }
+
+/* ---------- Horaire controls on one line ---------- */
+@media (min-width: 900px) {
+  .controls { display: flex; flex-wrap: wrap; gap: .5rem .6rem; align-items: end; }
+  .controls .field { min-width: 0; }
+  .controls .field > span { font-size: .7rem; }
+  .controls select { min-height: 36px; padding: .25rem .5rem; font-size: .85rem; }
+  .controls .btn, .controls .icon-btn { min-height: 36px; padding: 0 .7rem; font-size: .85rem; }
+  .controls .seg button { min-height: 36px; padding: 0 .55rem; font-size: .8rem; white-space: nowrap; }
+  .controls .weeknav { gap: .25rem; } .controls .weeknav .label { font-size: .85rem; white-space: nowrap; }
+}
+
+/* ---------- Coverage / Table sub-tabs ---------- */
+.subtabs { display: flex; align-items: center; gap: .3rem; border-bottom: 1px solid var(--line); margin: 0 0 .8rem; }
+.subtabs button { border: 0; background: none; font: inherit; font-weight: 700; padding: .6rem 1rem; color: var(--muted); border-bottom: 3px solid transparent; cursor: pointer; min-height: 44px; }
+.subtabs button[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); }
+.subtabs .status-line { margin: 0 0 0 auto; }
+@media print { .topbar, .subtabs { display: none !important; } }
+
+/* The Horaire is designed for desktop (wide layout, everything on one line); on a phone it is a lighter version. */
+main { max-width: 1680px; }
+@media (min-width: 900px) {
+  .controls { flex-wrap: nowrap; }
+  .controls .order-field select { width: 150px; }
+  .controls .field:first-child select { width: 190px; }
+}
+@media (min-width: 900px) and (max-width: 1300px) { .controls { flex-wrap: wrap; } }
+@media (max-width: 899px) {
+  .desktop-only, .payroll, .tl-legend, .zoom-hint { display: none !important; }   /* no print, ordering or cost panels on a phone */
+  .subtabs button { flex: 1; }
+  .subtabs .status-line { display: none; }
+}
+
+.topbar .brand { flex: 0 0 auto; }
+.topbar .tabs { scrollbar-width: none; } .topbar .tabs::-webkit-scrollbar { display: none; }
+@media (max-width: 899px) { .topbar .chip { padding: 0 .6rem; min-height: 32px; } }
