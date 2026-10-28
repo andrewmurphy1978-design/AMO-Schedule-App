@@ -2083,7 +2083,7 @@ function staffCard(s, ov) {
       adminMsg.textContent = "";
       try {
         const r = await api(`/staff/${s.id}/active`, { method: "PUT", body: { active: want } });
-        s.active = want; rowEl.classList.toggle("inactive", !want); activeChanged = true;
+        s.active = want; rowEl.classList.toggle("inactive", !want); activeChanged = false; render(); // the list behind the dialog moves the employee to the other group right away
         toast(!want && r.upcoming_shifts ? `${t("saved")} — ⚠ ${r.upcoming_shifts} ${t("upcomingShiftsKept")}` : t("saved"));
       } catch (err) { e.target.checked = !want; adminMsg.textContent = { cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err); }
     } }), h("span", {}, t("activeLabel"))),
