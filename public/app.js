@@ -564,7 +564,12 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   let anyTargets = false;
   const dayCols = perDay.map((d) => {
     if (d.wins.length) anyTargets = true;
-    const buckets = coverage(d.items.map((x) => x.s).filter((x) => x.status !== "sick_open"), d.day, startMin, endMin);
+    // A shift covering several of the selected departments (main role Delivery + Plonge) meets the requirement of each: it counts once per department.
+    const present = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) => {
+      const n = new Set(shiftRoles(x).map((r) => r.department_id).filter((dep) => sel.departments.includes(dep))).size || 1;
+      return Array(n).fill(x);
+    });
+    const buckets = coverage(present, d.day, startMin, endMin);
     const dayLabel = shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : "";
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
     for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
