@@ -1,6 +1,6 @@
 import { splitName, joinName, shortNames, orderStaff } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
-import { DEFAULT_BOUNDARIES, periodKeys, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
+import { postGaps, DEFAULT_BOUNDARIES, periodKeys, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
@@ -119,7 +119,7 @@ function errorText(e) {
 
 // ---------- state ----------
 const state = {
-  me: null, restaurants: [], roles: [], view: "schedule",
+  me: null, restaurants: [], roles: [], posts: [], view: "schedule",
   sel: { restaurant: null, department: null, departments: [], week: mondayOf(new Date()), day: ymd(new Date()) },
 };
 
@@ -278,7 +278,9 @@ function mergeSchedules(datas, restaurantId, depts) {
   const time_off = datas.flatMap((d) => d.time_off ?? []).filter((o) => { const k = `${o.staff_id}|${o.start_date}|${o.end_date}|${o.status}`; return !offSeen.has(k) && offSeen.add(k); });
   const by_staff = Object.assign({}, ...datas.map((d) => d.limits?.by_staff ?? {}));
   const days_off = Object.assign({}, ...datas.map((d) => d.days_off ?? {}));
-  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off, days_off, limits: { ...datas[0].limits, by_staff } };
+  const skills = Object.assign({}, ...datas.map((d) => d.skills ?? {}));
+  const delivery_presence = datas.flatMap((d) => d.delivery_presence ?? []);
+  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off, days_off, skills, any_skills: datas.some((d) => d.any_skills), delivery_presence, limits: { ...datas[0].limits, by_staff } };
 }
 function mergeRosters(rosters) {
   const by = new Map();
@@ -577,6 +579,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
 
   const gapLines = [];
   const extraLines = [];
+  const postLines = [];
   let anyTargets = false;
   const dayCols = perDay.map((d) => {
     if (d.wins.length) anyTargets = true;
@@ -588,6 +591,18 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
         return Array(n).fill({ start_at: sl.a, end_at: sl.b });
       }));
     const buckets = coverage(present, d.day, startMin, endMin);
+    // Kitchen posts: every post needs someone competent present (a runner is competent everywhere).
+    if (sel.departments.includes("kitchen") && data.any_skills) {
+      const kitchenPeople = d.items.filter((x) => x.s.status !== "sick_open").flatMap((x) =>
+        shiftSlices(x.s).filter((sl) => sl.roles.some((r) => r.department_id === "kitchen" && !r.no_count)).map((sl) => {
+          const sp = shiftSpan({ start_at: sl.a, end_at: sl.b }, d.day);
+          return { skills: new Set(data.skills?.[x.s.staff_id] ?? []), a: sp.s, b: sp.e };
+        }));
+      const gaps = postGaps(kitchenPeople, state.posts.filter((p) => p.department_id === "kitchen"), Math.max(startMin, d.openMin - 60), Math.min(endMin, d.closeMin), 30,
+        (data.delivery_presence ?? []).map((x) => { const sp = shiftSpan(x, d.day); return { a: sp.s, b: sp.e }; }));
+      for (const p of state.posts.filter((q) => q.department_id === "kitchen" && !q.all_posts))
+        for (const g of gaps[p.id] ?? []) postLines.push(`${shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : ""}${getLang() === "fr" ? p.name_fr : p.name_en} · ${fromMin(g.from)}–${fromMin(g.to)}`);
+    }
     const dayLabel = shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : "";
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
     for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
@@ -676,6 +691,12 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       ? h("div", { class: "alert", role: "status" }, h("strong", {}, t("shortagesTitle")), h("ul", {}, gapLines.map((l) => h("li", {}, l))))
       : h("div", { class: "okmsg" }, shown.length > 1 ? t("noShortagesWeek") : t("noShortages"));
   // Shown in addition to the shortage message: people above the target (labour cost with no need).
+  // Kitchen posts nobody competent covers (red), or a reminder that competencies were not entered yet.
+  const postBox = sel.departments.includes("kitchen")
+    ? (!data.any_skills
+        ? h("div", { class: "info", role: "status" }, t("postsNotSet"))
+        : postLines.length ? h("div", { class: "alert", role: "alert" }, h("strong", {}, `⚠ ${t("postsUncovered")}`), h("ul", {}, postLines.map((l) => h("li", {}, l)))) : null)
+    : null;
   const extraBox = anyTargets && extraLines.length
     ? h("div", { class: "info", role: "status" }, h("strong", {}, t("surplusTitle")), h("ul", {}, extraLines.map((l) => h("li", {}, l))))
     : null;
@@ -713,7 +734,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     zoomBar,
     dayTabs,
     payrollBox,
-    h("div", { class: "gaps" }, gapBox, extraBox),
+    h("div", { class: "gaps" }, gapBox, postBox, extraBox),
     h("div", { class: "vtl-scroll" },
       h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
@@ -870,6 +891,22 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 
 // ---------- my shifts ----------
 // ---------- time off ----------
+// Kitchen competencies of one employee: the posts they can work (a runner can work all of them).
+function skillsBox(person) {
+  const box = h("div", { class: "skills-box" });
+  const posts = state.posts.filter((p) => p.department_id === "kitchen");
+  api(`/staff/${person.id}/skills`).then((have) => {
+    const set = new Set(have);
+    box.replaceChildren(h("h4", {}, t("kitchenPosts")), h("p", { class: "meta" }, t("kitchenPostsHelp")),
+      ...posts.map((p) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: set.has(p.id), onChange: async (e) => {
+        e.target.checked ? set.add(p.id) : set.delete(p.id);
+        try { await api(`/staff/${person.id}/skills`, { method: "PUT", body: { post_ids: [...set] } }); toast(t("saved")); }
+        catch (err) { e.target.checked = !e.target.checked; e.target.checked ? set.add(p.id) : set.delete(p.id); toast(errorText(err)); }
+      } }), getLang() === "fr" ? p.name_fr : p.name_en)));
+  }).catch(() => {});
+  return box;
+}
+
 // Time off of one employee, inside the employee dialog: list with approve / decline / withdraw, and a quick "add leave".
 function staffTimeOff(person) {
   const box = h("div", {});
@@ -1909,7 +1946,7 @@ function staffCard(s, ov) {
     const content = h("div", { class: "dlg-content" });
     const panes = {
       details: () => [details],
-      roles: () => [blocks],
+      roles: () => [skillsBox(s), blocks],
       availability: () => [availabilityEditor(s.id)],
       timeoff: () => [staffTimeOff(s)],
     };
@@ -1946,7 +1983,7 @@ async function boot() {
       h("p", { class: "meta" }, detail)));
     return;
   }
-  [state.restaurants, state.roles] = await Promise.all([api("/restaurants"), api("/roles")]);
+  [state.restaurants, state.roles, state.posts] = await Promise.all([api("/restaurants"), api("/roles"), api("/posts").catch(() => [])]);
   render();
 }
 boot();

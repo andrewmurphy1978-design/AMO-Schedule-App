@@ -1023,6 +1023,27 @@ app.put("/api/staff/:id/limit", requireAdmin, async (c) => {
   return c.json({ ok: true, max_weekly_hours: n });
 });
 
+// ---------- Kitchen posts and competencies ----------
+app.get("/api/posts", async (c) => c.json((await c.env.DB.prepare("SELECT id, department_id, code, name_fr, name_en, sort, all_posts FROM posts ORDER BY sort").all()).results));
+
+// Posts one employee is competent at (admin, or a manager of that employee).
+app.get("/api/staff/:id/skills", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await canEditPerson(c, id))) return c.json({ error: "forbidden" }, 403);
+  return c.json((await c.env.DB.prepare("SELECT post_id FROM staff_post_skills WHERE staff_id = ?").bind(id).all<{ post_id: number }>()).results.map((r) => r.post_id));
+});
+app.put("/api/staff/:id/skills", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const { post_ids } = await c.req.json<{ post_ids?: number[] }>();
+  if (!id || !Array.isArray(post_ids)) return c.json({ error: "bad_request" }, 400);
+  if (!(await canDecideFor(c.env.DB, c.get("me"), id))) return c.json({ error: "forbidden" }, 403); // admin or a manager of that employee, not oneself
+  const valid = new Set((await c.env.DB.prepare("SELECT id FROM posts").all<{ id: number }>()).results.map((r) => r.id));
+  const ids = [...new Set(post_ids)].filter((x) => valid.has(x));
+  await c.env.DB.batch([c.env.DB.prepare("DELETE FROM staff_post_skills WHERE staff_id = ?").bind(id), ...ids.map((pid) => c.env.DB.prepare("INSERT INTO staff_post_skills (staff_id, post_id) VALUES (?, ?)").bind(id, pid))]);
+  return c.json({ ok: true, post_ids: ids });
+});
+
 // ---------- Sick calls and replacements ----------
 const flowError = (c: Context<any>, e: unknown) => {
   if (e instanceof FlowError) return c.json({ error: e.code }, e.status as 400);
@@ -1323,11 +1344,27 @@ app.get("/api/schedule", async (c) => {
   const time_off = offIds.length ? (await c.env.DB.prepare(
     `SELECT t.id, t.staff_id, s.first_name, s.last_name, s.name AS staff_name, t.start_date, t.end_date, t.start_time, t.end_time, t.note, t.status FROM time_off_requests t JOIN staff s ON s.id = t.staff_id WHERE t.status IN ('requested','approved') AND t.staff_id IN (${offIds.map(() => "?").join(",")}) AND t.start_date <= ? AND t.end_date >= ? ORDER BY t.start_date`,
   ).bind(...offIds, weekEndDay.toISOString().slice(0, 10), bounds.start.slice(0, 10)).all()).results : [];
+  // Kitchen posts: competencies of the people on this schedule (everyone may see them: they drive the "post not covered" warning).
+  const skills: Record<number, number[]> = {};
+  const sIds = [...ids];
+  if (sIds.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, post_id FROM staff_post_skills WHERE staff_id IN (${sIds.map(() => "?").join(",")})`).bind(...sIds).all<{ staff_id: number; post_id: number }>()).results) (skills[r.staff_id] ??= []).push(r.post_id);
+  const anySkills = !!(await c.env.DB.prepare("SELECT 1 FROM staff_post_skills LIMIT 1").first());
+  // Delivery staff on duty (times only, no names): they can take the kitchen's out-of-the-oven post.
+  const delivery_presence = department === "kitchen"
+    ? (await c.env.DB.prepare(
+        `SELECT sh.start_at, sh.end_at FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
+           WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery'
+         UNION SELECT sh.start_at, sh.end_at FROM shifts sh JOIN shift_roles x ON x.shift_id = sh.id JOIN roles ro ON ro.id = x.role_id
+           WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery'
+         UNION SELECT g.start_at, g.end_at FROM shift_segments g JOIN shifts sh ON sh.id = g.shift_id JOIN roles ro ON ro.id = g.role_id
+           WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery'`,
+      ).bind(restaurantId, bounds.start, bounds.end).all()).results
+    : [];
   const days_off: Record<number, number[]> = {};
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, dow FROM staff_availability WHERE kind = 'day_off' AND staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; dow: number }>()).results) (days_off[r.staff_id] ??= []).push(r.dow);
   const personal: Record<number, number> = {};
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; max_weekly_hours: number }>()).results) personal[r.staff_id] = r.max_weekly_hours;
-  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, days_off, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
+  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, days_off, skills, any_skills: anySkills, delivery_presence, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
 });
 
 // The caller's own shifts across every restaurant and department.

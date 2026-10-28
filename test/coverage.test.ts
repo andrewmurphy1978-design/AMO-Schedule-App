@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-ignore plain JS module shared with the browser
-import { DEFAULT_BOUNDARIES, periodWindows, remapPeriods, validBoundaries, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses, shiftSpan, toMin } from "../public/coverage.js";
+import { postGaps, DEFAULT_BOUNDARIES, periodWindows, remapPeriods, validBoundaries, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses, shiftSpan, toMin } from "../public/coverage.js";
 
 const sh = (a: string, b: string) => ({ start_at: a, end_at: b });
 const DAY = "2026-10-27";
@@ -99,4 +99,51 @@ test("no target means neither a shortage nor a surplus", () => {
   const buckets = coverage([sh(`${DAY}T11:00`, `${DAY}T15:00`)], DAY, toMin("11:00"), toMin("15:00"));
   assert.deepEqual(surpluses(buckets, []), []);
   assert.deepEqual(shortages(buckets, []), []);
+});
+
+test("kitchen posts with few people: each post needs someone competent present; a runner covers every post", () => {
+  const posts = [{ id: 1, code: "subs", all_posts: 0 }, { id: 2, code: "starters", all_posts: 0 }, { id: 3, code: "pasta", all_posts: 0 }, { id: 4, code: "pizza", all_posts: 0 }, { id: 5, code: "oven", all_posts: 0 }, { id: 9, code: "runner", all_posts: 1 }];
+  const m = (h: string) => toMin(h);
+  // Anna (subs, starters) 09:00-17:00; Ben (pasta) 12:00-14:00
+  const people = [{ skills: new Set([1, 2]), a: m("09:00"), b: m("17:00") }, { skills: new Set([3]), a: m("12:00"), b: m("14:00") }];
+  const g = postGaps(people, posts, m("09:00"), m("17:00"));
+  assert.deepEqual(g[1], []);
+  assert.deepEqual(g[3], [{ from: m("09:00"), to: m("12:00") }, { from: m("14:00"), to: m("17:00") }]); // only Ben knows pasta
+  assert.deepEqual(g[4], [{ from: m("09:00"), to: m("17:00") }]);  // nobody can pizza: pizza flagged all day
+  assert.deepEqual(g[5], []);                                        // the oven is covered by whoever does subs/pasta
+  assert.deepEqual(postGaps([], posts, m("09:00"), m("10:00"))[1], []);
+  const solo = postGaps([{ skills: new Set([9]), a: m("09:00"), b: m("10:00") }], posts, m("09:00"), m("10:00"));
+  assert.deepEqual([solo[1], solo[2], solo[3], solo[4], solo[5]], [[], [], [], [], []]);
+});
+
+test("kitchen posts with 4 people: one person per principal post (oven is done by pizza/subs/pasta)", () => {
+  const posts = [{ id: 1, code: "subs", all_posts: 0 }, { id: 2, code: "starters", all_posts: 0 }, { id: 3, code: "pasta", all_posts: 0 }, { id: 4, code: "pizza", all_posts: 0 }, { id: 5, code: "oven", all_posts: 0 }, { id: 9, code: "runner", all_posts: 1 }];
+  const m = (h: string) => toMin(h);
+  const at = (skills: number[]) => ({ skills: new Set(skills), a: m("17:00"), b: m("18:00") });
+  // Everyone can do pizza and pasta, but nobody can do subs or starters: 4 people, yet subs and starters are uncovered
+  let g = postGaps([at([3, 4]), at([3, 4]), at([3, 4]), at([3, 4])], posts, m("17:00"), m("18:00"));
+  assert.equal(g[1].length + g[2].length, 2);
+  assert.deepEqual([g[3], g[4], g[5]], [[], [], []]);
+  // A proper team: one person per post
+  g = postGaps([at([1]), at([2]), at([3]), at([4])], posts, m("17:00"), m("18:00"));
+  assert.deepEqual(Object.values(g).flat(), []);
+  // Three people can each do several posts but only 2 distinct people can do subs/starters/pasta/pizza -> one person must be doing two:
+  // with 4 present, a runner is needed to fill the gap
+  g = postGaps([at([1, 2]), at([1, 2]), at([3, 4]), at([9])], posts, m("17:00"), m("18:00"));
+  assert.deepEqual(Object.values(g).flat(), []);
+  // 5 people, one of them a pizza-only person in surplus: still fine if the four principal posts can be matched
+  g = postGaps([at([1]), at([2]), at([3]), at([4]), at([4])], posts, m("17:00"), m("18:00"));
+  assert.deepEqual(Object.values(g).flat(), []);
+  // Only one person can do pasta and he is also the only one who can do subs: with 4 people, one of the two is flagged
+  g = postGaps([at([1, 3]), at([2]), at([2]), at([4])], posts, m("17:00"), m("18:00"));
+  assert.equal(g[1].length + g[3].length, 1);
+});
+
+test("the oven post can also be covered by delivery staff", () => {
+  const posts = [{ id: 1, code: "subs", all_posts: 0 }, { id: 2, code: "starters", all_posts: 0 }, { id: 3, code: "pasta", all_posts: 0 }, { id: 4, code: "pizza", all_posts: 0 }, { id: 5, code: "oven", all_posts: 0 }];
+  const m = (h: string) => toMin(h);
+  const people = [{ skills: new Set([2]), a: m("17:00"), b: m("18:00") }]; // one starters person: pizza/subs/pasta/oven would be uncovered
+  assert.equal(postGaps(people, posts, m("17:00"), m("18:00"))[5].length, 1);
+  assert.deepEqual(postGaps(people, posts, m("17:00"), m("18:00"), 30, [{ a: m("17:00"), b: m("19:00") }])[5], []);
+  assert.equal(postGaps(people, posts, m("17:00"), m("18:00"), 30, [{ a: m("17:00"), b: m("19:00") }])[4].length, 1); // pizza still needs its own person
 });
