@@ -202,8 +202,24 @@ function weekTimeOffPanel(data) {
 }
 // A shift can cover several roles (cook + dishwasher): the main role first, then the extra ones.
 const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])].map((r) => ({ ...r, sex: s.sex }));
-const shiftRoleLabel = (s) => shiftRoles(s).map((r) => roleName(r) + (r.no_count ? "*" : "")).join(" + ");
-const shiftRoleIcons = (s) => shiftRoles(s).map(roleIcon).join("");
+// Different roles by hour (Prep 10:30-11, Delivery + Dish 11-14, Cook 14-19:30): the shift is cut into slices, each with its own roles.
+function shiftSlices(s) {
+  const base = shiftRoles(s);
+  const segs = s.segments ?? [];
+  if (!segs.length) return [{ a: s.start_at, b: s.end_at, roles: base, custom: false }];
+  const pts = [...new Set([s.start_at, s.end_at, ...segs.flatMap((g) => [g.start_at, g.end_at])])].filter((x) => x >= s.start_at && x <= s.end_at).sort();
+  const out = [];
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const seg = segs.find((g) => g.start_at <= pts[i] && pts[i + 1] <= g.end_at);
+    out.push({ a: pts[i], b: pts[i + 1], roles: seg ? seg.roles.map((r) => ({ ...r, sex: s.sex })) : base, custom: !!seg });
+  }
+  return out;
+}
+const roleText = (roles) => roles.map((r) => roleName(r) + (r.no_count ? "*" : "")).join(" + ");
+const shiftRoleLabel = (s) => (s.segments?.length ? shiftSlices(s).map((sl) => `${hhmm(sl.a)}–${hhmm(sl.b)} ${roleText(sl.roles)}`).join(" · ") : roleText(shiftRoles(s)));
+const shiftRoleIcons = (s) => [...new Set((s.segments?.length ? shiftSlices(s).flatMap((sl) => sl.roles) : shiftRoles(s)).map(roleIcon))].join("");
+// One line per time range when the roles change during the shift, otherwise a single label.
+const roleLines = (s) => (s.segments?.length ? shiftSlices(s).map((sl) => h("div", { class: "seg-line", title: roleText(sl.roles) }, `${hhmm(sl.a)}–${hhmm(sl.b)} ${sl.roles.map(roleIcon).join("")}`)) : [h("span", { class: "role-label" }, shiftRoleLabel(s))]);
 // Overlapping shifts of the same person (here or at another restaurant/department) are shown in red.
 function conflictSets(data) {
   const byPerson = new Map();
@@ -455,7 +471,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), ` ${shiftRoleIcons(s)} `, h("span", { class: "role-label" }, shiftRoleLabel(s)), sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -565,11 +581,12 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
   const dayCols = perDay.map((d) => {
     if (d.wins.length) anyTargets = true;
     // A shift covering several of the selected departments (main role Delivery + Plonge) meets the requirement of each: it counts once per department.
-    const present = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) => {
-      // roles marked "don't count for targets" do not count toward their department
-      const n = new Set(shiftRoles(x).filter((r) => !r.no_count).map((r) => r.department_id).filter((dep) => sel.departments.includes(dep))).size;
-      return Array(n).fill(x);
-    });
+    const present = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) =>
+      shiftSlices(x).flatMap((sl) => {
+        // roles marked "don't count for targets" do not count toward their department
+        const n = new Set(sl.roles.filter((r) => !r.no_count).map((r) => r.department_id).filter((dep) => sel.departments.includes(dep))).size;
+        return Array(n).fill({ start_at: sl.a, end_at: sl.b });
+      }));
     const buckets = coverage(present, d.day, startMin, endMin);
     const dayLabel = shown.length > 1 ? `${fmt(d.day, { weekday: "short", day: "numeric", month: "short" })} · ` : "";
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
@@ -600,12 +617,18 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
       const pic = height >= size + 14 ? avatar(x.s.staff_id, x.s.staff_name, x.s.staff_color, x.s.photo_v, size) : null;
       // Role icon (plate = dishwasher, pizza = cook, car = delivery, knife = prep…); the full name is in the tooltip.
       const icon = h("span", { class: "role-icon", "aria-hidden": "true" }, shiftRoleIcons(x.s));
+      // different roles during the shift: a marker with the roles' icons where each new range starts
+      const marks = x.s.segments?.length ? shiftSlices(x.s).map((sl, i) => {
+        const sp = shiftSpan({ start_at: sl.a, end_at: sl.b }, d.day);
+        const top = y(Math.max(sp.s, x.from)) - y(x.from);
+        return top >= 0 && sp.e > x.from && sp.s < x.to ? h("span", { class: `seg-mark ${i ? "split" : ""}`, style: `top:${top}px`, title: `${hhmm(sl.a)}–${hhmm(sl.b)} ${roleText(sl.roles)}` }, sl.roles.map(roleIcon).join("")) : null;
+      }) : [];
       const body = zoom
         ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), `${range} · ${shiftRoleLabel(x.s)}`, x.s.notes ? h("em", {}, x.s.notes) : null]
         : wide
         ? [h("b", { class: "bar-name" }, pic, shortOf.get(x.s.staff_id), icon), range]
         : [pic, icon, h("span", { class: "bar-text" }, `${shortOf.get(x.s.staff_id)} ${range}`)];
-      return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body) : h("div", props, body);
+      return data.editable ? h("button", { ...props, type: "button", onClick: () => openEditor(x.s) }, body, marks) : h("div", props, body, marks);
     });
     // Roles that arrive before opening (cook, waiter…): the closed hatching stops earlier and a lighter "setup" band marks that time.
     const lead = Math.max(0, ...state.roles.filter((r) => sel.departments.includes(r.department_id)).map((r) => r.pre_open_minutes || 0));
@@ -734,13 +757,32 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     drawAlso();
   };
   roleSel.addEventListener("change", () => { alsoChecked.delete(Number(roleSel.value)); drawAlso(); });
-  staffSel.addEventListener("change", () => { alsoChecked = new Set(); noCount = new Set(); fillRoles(); applyPreOpen(); });
+  staffSel.addEventListener("change", () => { alsoChecked = new Set(); noCount = new Set(); segs = []; drawSegs(); fillRoles(); applyPreOpen(); });
   fillRoles();
   const date = h("input", { type: "date", value: initial.date, required: true });
   const start = timeField(initial.start);
   const end = timeField(initial.end);
   const notes = h("textarea", { value: initial.notes, maxLength: 200 });
   const untilClose = h("input", { type: "checkbox", checked: initial.until_close });
+  // Different roles at different hours (Prep 10:30-11, Delivery + Dish 11-14, Cook 14-19:30).
+  const segBox = h("div", { class: "seg-box" });
+  let segs = (shift?.segments ?? []).map((g) => ({ from: timeField(hhmm(g.start_at)), to: timeField(hhmm(g.end_at)), roles: new Set(g.roles.map((r) => r.id)) }));
+  const isoOf = (hm) => `${hm >= start.value ? date.value : addDays(date.value, 1)}T${hm}`;
+  const drawSegs = () => {
+    const person = roster.find((r) => r.staff_id === Number(staffSel.value));
+    const mine = state.roles.filter((r) => (person?.all_role_ids ?? person?.role_ids ?? []).includes(r.id));
+    segBox.replaceChildren(
+      h("div", { class: "seg-head" }, h("b", {}, t("rolesByHour")), h("span", { class: "meta" }, t("rolesByHourHelp"))),
+      ...segs.map((g, i) => h("div", { class: "seg-row" },
+        h("div", { class: "times" }, h("label", { class: "field" }, h("span", {}, t("from")), g.from), h("label", { class: "field" }, h("span", {}, t("to")), g.to),
+          h("button", { class: "btn sm danger", type: "button", onClick: () => { segs.splice(i, 1); drawSegs(); } }, t("delete"))),
+        h("div", {}, mine.map((r) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: g.roles.has(r.id), onChange: (e) => { e.target.checked ? g.roles.add(r.id) : g.roles.delete(r.id); } }), `${roleIcon(r)} ${roleName(r, person?.sex)}`))))),
+      h("button", { class: "btn sm", type: "button", onClick: () => {
+        const lastEnd = segs.length ? segs[segs.length - 1].to.value : start.value;
+        segs.push({ from: timeField(lastEnd), to: timeField(untilClose.checked ? closeOf(sel.restaurant, dowOf(date.value)) : end.value), roles: new Set() }); drawSegs();
+      } }, `+ ${t("addTimeRange")}`));
+  };
+  drawSegs();
   // New shifts start before opening for roles that must arrive early (cook, waiter: 30 min), unless the start was edited by hand.
   let startTouched = !!shift;
   start.addEventListener("change", () => { startTouched = true; });
@@ -767,6 +809,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
+      segments: segs.filter((g) => g.roles.size).map((g) => ({ start_at: isoOf(g.from.value), end_at: isoOf(g.to.value), role_ids: [...g.roles] })),
       extra_role_ids: [...alsoChecked].filter((id) => id !== Number(roleSel.value)),
       no_count_role_ids: [...noCount].filter((id) => alsoChecked.has(id)),
       start_at: `${date.value}T${start.value}`, end_at: `${endDate}T${endTime}`, until_close: untilClose.checked, notes: notes.value || undefined, force: force || undefined,
@@ -816,7 +859,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const form = h("form", { id: "shift-form", class: "modal-body shift-dialog", method: "dialog", onSubmit: (e) => { e.preventDefault(); save(false); } },
     h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, shift ? t("editShift") : t("addShift")), actions), alertBox),
     h("label", { class: "field" }, h("span", {}, t("employee")), staffSel),
-    h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox,
+    h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox, segBox,
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),
     h("label", { class: "check" }, untilClose, t("untilClose")),
