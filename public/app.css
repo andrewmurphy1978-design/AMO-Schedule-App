@@ -618,3 +618,9 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .rate-item input{width:9rem}
 .staff-head{display:flex;align-items:center;justify-content:space-between;gap:1rem}.staff-head h2{margin:0}
 .avail-row{flex-direction:row;align-items:center;justify-content:space-between;gap:8px}.avail-text{display:flex;flex-direction:column;gap:2px;min-width:0}.avail-del{flex:none;width:36px;min-height:36px;padding:0}
+.row-icons{display:flex;gap:6px;flex:none}
+.cov-row.avail-row{display:flex}
+.time-pair{display:contents}.time-pair[hidden]{display:none}
+.day-time-line{grid-template-columns:1fr 1fr 1fr}.date-time-line{grid-template-columns:1fr 1fr 1fr 1fr}
+.day-time-line,.date-time-line{align-items:end}
+@media (max-width:699px){.day-time-line,.date-time-line{grid-template-columns:1fr 1fr}.day-time-line>label:first-child{grid-column:1/-1}}

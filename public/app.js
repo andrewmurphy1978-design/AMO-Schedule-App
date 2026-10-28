@@ -1095,24 +1095,25 @@ function staffTimeOff(person) {
     const from = h("input", { type: "date", value: today }), to = h("input", { type: "date", value: today });
     const allDay = h("input", { type: "checkbox", checked: true });
     const ts = timeField("14:00"), te = timeField("21:00");
-    const timeBox = h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), ts), h("label", { class: "field" }, h("span", {}, t("end")), te));
+    const timeBox = h("div", { class: "time-pair", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), ts), h("label", { class: "field" }, h("span", {}, t("end")), te));
     allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
     const label = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
     const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short", year: "numeric" })}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
     const act = async (fn) => { try { await fn(); load(); } catch (e) { toast(errorText(e)); } };
     box.replaceChildren(
-      rows.length ? rows.map((r) => h("div", { class: "cov-row" },
-        h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
-        h("div", { class: "meta" }, `${label[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`),
-        h("div", { class: "actions" },
-          r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, t("approve")) : null,
-          r.status !== "denied" ? h("button", { class: "btn", type: "button", onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, t("deny")) : null,
-          h("button", { class: "btn danger", type: "button", onClick: () => { if (confirm(t("confirmCancelOff"))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, t("delete")))))
+      rows.length ? rows.map((r) => h("div", { class: "cov-row avail-row" },
+        h("div", { class: "avail-text" },
+          h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
+          h("div", { class: "meta" }, `${label[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`)),
+        h("div", { class: "row-icons" },
+          r.status !== "approved" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("approve"), "aria-label": t("approve"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, "✅") : null,
+          r.status !== "denied" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("deny"), "aria-label": t("deny"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, "❌") : null,
+          h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: () => { if (confirm(t("confirmCancelOff"))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️"))))
         : h("p", { class: "meta" }, t("noTimeOff")),
       h("h4", {}, t("addLeaveFor")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
-        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to)),
-        h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))), timeBox,
+        h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))),
+        h("div", { class: "inline-form date-time-line" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to), timeBox),
         h("button", { class: "btn primary", type: "button", onClick: () => act(async () => {
           const body = { staff_id: person.id, start_date: from.value, end_date: to.value || from.value };
           if (!allDay.checked) { body.start_time = ts.value; body.end_time = te.value; }
@@ -1160,8 +1161,7 @@ function availabilityEditor(staffId, part = "both") {
           r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ?? "…"} → ${r.valid_to ?? "…"}`) : null),
         h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, "🗑️")))) : h("p", { class: "meta" }, t("noUnavailable")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
-        h("label", { class: "field" }, h("span", {}, t("weekday")), dow),
-        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
+        h("div", { class: "inline-form day-time-line" }, h("label", { class: "field" }, h("span", {}, t("weekday")), dow), h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
         h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("validFrom")), vf), h("label", { class: "field" }, h("span", {}, t("validTo")), vt)),
         h("label", { class: "field" }, h("span", {}, t("note")), note),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
