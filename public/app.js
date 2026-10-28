@@ -1125,6 +1125,8 @@ function staffTimeOff(person) {
 }
 
 // Weekly fixed day(s) off and recurring unavailable times (school, other job…), for one employee.
+// Dates last used for an unavailability, per employee: they become the default for the next one.
+const availDates = new Map();
 function availabilityEditor(staffId, part = "both") {
   const box = h("div", { class: "availability" });
   async function load() {
@@ -1141,7 +1143,8 @@ function availabilityEditor(staffId, part = "both") {
     const dow = h("select", {}, Array.from({ length: 7 }, (_, i) => h("option", { value: i }, weekdayName(i))));
     const st = timeField("08:00"), en = timeField("15:30");
     const note = h("input", { maxLength: 120, placeholder: t("availabilityNote") });
-    const vf = h("input", { type: "date" }), vt = h("input", { type: "date" });
+    const lastDates = availDates.get(staffId) ?? {};
+    const vf = h("input", { type: "date", value: lastDates.from ?? "" }), vt = h("input", { type: "date", value: lastDates.to ?? "" });
     const list = rows.filter((r) => r.kind !== "day_off");
     const daysPart = [
       h("h4", {}, t("fixedDaysOff")), h("p", { class: "meta" }, t("fixedDaysOffHelp")), days,
@@ -1151,17 +1154,18 @@ function availabilityEditor(staffId, part = "both") {
         h("span", {}, `${weekdayName(i)} : ${t("replacementOk")}`)))];
     const timesPart = [
       h("h4", {}, t("unavailableTimes")), h("p", { class: "meta" }, t("unavailableHelp")),
-      list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row" },
-        h("span", {}, h("b", {}, weekdayName(r.dow)), ` ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
-        r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ?? "…"} → ${r.valid_to ?? "…"}`) : null,
-        h("button", { class: "btn danger", type: "button", onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, t("delete"))))) : h("p", { class: "meta" }, t("noUnavailable")),
+      list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row avail-row" },
+        h("div", { class: "avail-text" },
+          h("span", {}, h("b", {}, weekdayName(r.dow)), ` ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
+          r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ?? "…"} → ${r.valid_to ?? "…"}`) : null),
+        h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, "🗑️")))) : h("p", { class: "meta" }, t("noUnavailable")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
         h("label", { class: "field" }, h("span", {}, t("weekday")), dow),
         h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
         h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("validFrom")), vf), h("label", { class: "field" }, h("span", {}, t("validTo")), vt)),
         h("label", { class: "field" }, h("span", {}, t("note")), note),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
-          try { await api("/availability", { method: "POST", body: { staff_id: staffId, dow: Number(dow.value), start_time: st.value, end_time: en.value, note: note.value, valid_from: vf.value || undefined, valid_to: vt.value || undefined } }); load(); }
+          try { await api("/availability", { method: "POST", body: { staff_id: staffId, dow: Number(dow.value), start_time: st.value, end_time: en.value, note: note.value, valid_from: vf.value || undefined, valid_to: vt.value || undefined } }); availDates.set(staffId, { from: vf.value, to: vt.value }); load(); }
           catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("add")))];
     box.replaceChildren(...(part === "daysoff" ? daysPart : part === "times" ? timesPart : [...daysPart, ...timesPart]));
