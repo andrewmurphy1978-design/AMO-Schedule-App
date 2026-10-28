@@ -502,3 +502,4 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 .grid td.name .n2 { max-width: 9ch; overflow-wrap: normal; word-break: normal; }
 .grid td.name .n1 { max-width: 12ch; }
 @media print { .grid td.name .n2 { max-width: 9ch; } .grid td.name .n1 { max-width: 12ch; } }
+.also-row{display:grid;gap:2px}.check.sub{margin-left:1.8rem;font-size:.9rem;color:var(--muted,#666)}

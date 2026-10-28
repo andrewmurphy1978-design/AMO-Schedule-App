@@ -202,7 +202,7 @@ function weekTimeOffPanel(data) {
 }
 // A shift can cover several roles (cook + dishwasher): the main role first, then the extra ones.
 const shiftRoles = (s) => [{ name_fr: s.name_fr, name_en: s.name_en, department_id: s.department_id }, ...(s.extra_roles ?? [])].map((r) => ({ ...r, sex: s.sex }));
-const shiftRoleLabel = (s) => shiftRoles(s).map((r) => roleName(r)).join(" + ");
+const shiftRoleLabel = (s) => shiftRoles(s).map((r) => roleName(r) + (r.no_count ? "*" : "")).join(" + ");
 const shiftRoleIcons = (s) => shiftRoles(s).map(roleIcon).join("");
 // Overlapping shifts of the same person (here or at another restaurant/department) are shown in red.
 function conflictSets(data) {
@@ -566,7 +566,8 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     if (d.wins.length) anyTargets = true;
     // A shift covering several of the selected departments (main role Delivery + Plonge) meets the requirement of each: it counts once per department.
     const present = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) => {
-      const n = new Set(shiftRoles(x).map((r) => r.department_id).filter((dep) => sel.departments.includes(dep))).size || 1;
+      // roles marked "don't count for targets" do not count toward their department
+      const n = new Set(shiftRoles(x).filter((r) => !r.no_count).map((r) => r.department_id).filter((dep) => sel.departments.includes(dep))).size;
       return Array(n).fill(x);
     });
     const buckets = coverage(present, d.day, startMin, endMin);
@@ -713,12 +714,16 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   // "Also covers": other roles this person holds, checked when the same shift covers them too (e.g. cook + dishwasher).
   const alsoBox = h("div", { class: "also-roles" });
   let alsoChecked = new Set((shift?.extra_roles ?? []).map((r) => r.id));
+  let noCount = new Set((shift?.extra_roles ?? []).filter((r) => r.no_count).map((r) => r.id));
   const drawAlso = () => {
     const person = roster.find((r) => r.staff_id === Number(staffSel.value));
     const main = Number(roleSel.value);
     const others = state.roles.filter((r) => (person?.all_role_ids ?? person?.role_ids ?? []).includes(r.id) && r.id !== main);
     alsoBox.replaceChildren(...(others.length ? [h("span", { class: "meta" }, t("alsoCovers"))] : []), ...others.map((r) =>
-      h("label", { class: "check" }, h("input", { type: "checkbox", checked: alsoChecked.has(r.id), onChange: (e) => { e.target.checked ? alsoChecked.add(r.id) : alsoChecked.delete(r.id); } }), `${roleIcon(r)} ${roleName(r, person?.sex)}`)));
+      h("div", { class: "also-row" },
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: alsoChecked.has(r.id), onChange: (e) => { e.target.checked ? alsoChecked.add(r.id) : (alsoChecked.delete(r.id), noCount.delete(r.id)); drawAlso(); } }), `${roleIcon(r)} ${roleName(r, person?.sex)}`),
+        // when the extra role is only a possibility for the day: list it, but keep it out of the targets (no false surplus)
+        alsoChecked.has(r.id) ? h("label", { class: "check sub" }, h("input", { type: "checkbox", checked: noCount.has(r.id), onChange: (e) => { e.target.checked ? noCount.add(r.id) : noCount.delete(r.id); } }), t("dontCountTargets")) : null)));
   };
   const fillRoles = () => {
     const person = roster.find((r) => r.staff_id === Number(staffSel.value));
@@ -729,7 +734,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     drawAlso();
   };
   roleSel.addEventListener("change", () => { alsoChecked.delete(Number(roleSel.value)); drawAlso(); });
-  staffSel.addEventListener("change", () => { alsoChecked = new Set(); fillRoles(); applyPreOpen(); });
+  staffSel.addEventListener("change", () => { alsoChecked = new Set(); noCount = new Set(); fillRoles(); applyPreOpen(); });
   fillRoles();
   const date = h("input", { type: "date", value: initial.date, required: true });
   const start = timeField(initial.start);
@@ -763,6 +768,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
       extra_role_ids: [...alsoChecked].filter((id) => id !== Number(roleSel.value)),
+      no_count_role_ids: [...noCount].filter((id) => alsoChecked.has(id)),
       start_at: `${date.value}T${start.value}`, end_at: `${endDate}T${endTime}`, until_close: untilClose.checked, notes: notes.value || undefined, force: force || undefined,
     };
   };

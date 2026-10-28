@@ -26,6 +26,7 @@ import m0023 from "../migrations/0023_shift_roles.sql";
 import m0024 from "../migrations/0024_target_periods.sql";
 import m0025 from "../migrations/0025_sex.sql";
 import m0026 from "../migrations/0026_print_order.sql";
+import m0027 from "../migrations/0027_shift_roles_no_count.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -54,6 +55,7 @@ const MIGRATIONS: [string, string][] = [
   ["0024_target_periods", m0024],
   ["0025_sex", m0025],
   ["0026_print_order", m0026],
+  ["0027_shift_roles_no_count", m0027],
 ];
 
 const statements = (sql: string) =>

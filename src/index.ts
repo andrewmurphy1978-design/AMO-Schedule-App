@@ -1268,10 +1268,10 @@ app.get("/api/schedule", async (c) => {
     .bind(restaurantId, department, department, bounds.start, bounds.end)
     .all<any>();
   // Extra roles of multi-role shifts (cook + dishwasher…)
-  const extraRoles = new Map<number, { id: number; name_fr: string; name_en: string; department_id: string }[]>();
+  const extraRoles = new Map<number, { id: number; name_fr: string; name_en: string; department_id: string; no_count: boolean }[]>();
   if (shifts.results.length) {
     const sids = shifts.results.map((x: any) => x.id);
-    for (const r of (await c.env.DB.prepare(`SELECT x.shift_id, ro.id, ro.name_fr, ro.name_en, ro.department_id FROM shift_roles x JOIN roles ro ON ro.id = x.role_id WHERE x.shift_id IN (${sids.map(() => "?").join(",")})`).bind(...sids).all<any>()).results) extraRoles.set(r.shift_id, [...(extraRoles.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en, department_id: r.department_id }]);
+    for (const r of (await c.env.DB.prepare(`SELECT x.shift_id, ro.id, ro.name_fr, ro.name_en, ro.department_id, x.no_count FROM shift_roles x JOIN roles ro ON ro.id = x.role_id WHERE x.shift_id IN (${sids.map(() => "?").join(",")})`).bind(...sids).all<any>()).results) extraRoles.set(r.shift_id, [...(extraRoles.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en, department_id: r.department_id, no_count: r.no_count === 1 }]);
     for (const sh of shifts.results as any[]) sh.extra_roles = extraRoles.get(sh.id) ?? [];
   }
   const editable = await canManage(c.env.DB, me, restaurantId, department);
@@ -1427,6 +1427,7 @@ interface ShiftInput {
   until_close?: boolean;
   force?: boolean;
   extra_role_ids?: number[];  // other roles covered by the same shift (e.g. cook + dishwasher)
+  no_count_role_ids?: number[]; // extra roles that must not count toward that department's targets
 }
 
 async function validateShift(c: any, b: ShiftInput, ignoreShiftId?: number) {
@@ -1491,7 +1492,7 @@ async function saveExtraRoles(db: D1Database, shiftId: number, b: ShiftInput) {
   const extras = [...new Set(b.extra_role_ids ?? [])].filter((r) => r !== b.role_id);
   await db.batch([
     db.prepare("DELETE FROM shift_roles WHERE shift_id = ?").bind(shiftId),
-    ...extras.map((rid) => db.prepare("INSERT INTO shift_roles (shift_id, role_id) VALUES (?, ?)").bind(shiftId, rid)),
+    ...extras.map((rid) => db.prepare("INSERT INTO shift_roles (shift_id, role_id, no_count) VALUES (?, ?, ?)").bind(shiftId, rid, (b.no_count_role_ids ?? []).includes(rid) ? 1 : 0)),
   ]);
 }
 
