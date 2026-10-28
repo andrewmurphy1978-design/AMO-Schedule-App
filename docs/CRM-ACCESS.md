@@ -4,7 +4,7 @@
 > reach the schedule app. It is kept up to date with the app: the date and the change log at the bottom say
 > what changed last. **Never paste secrets into this file.**
 
-Last updated: 2026-10-28 · App version: commit `51c92d6` and later (multi-client, in-app sign-in).
+Last updated: 2026-10-28 · App version: API tokens (migration 0035) and later.
 
 ## 1. What the app is
 
@@ -19,7 +19,7 @@ Last updated: 2026-10-28 · App version: commit `51c92d6` and later (multi-clien
 
 ## 2. How people and systems authenticate today
 
-There is **no API key / service-token login in the app itself yet** (see section 7). Two human sign-in paths exist:
+There are **two human sign-in paths** and **API tokens for other systems (section 6)**:
 
 1. **Cloudflare Access (currently in front of the site).** Cloudflare adds a signed header
    `Cf-Access-Jwt-Assertion` to every request. The app verifies its signature, issuer
@@ -31,7 +31,9 @@ There is **no API key / service-token login in the app itself yet** (see section
    - `POST /api/auth/logout` clears it.
    - Needs SMTP configured for the client (or for client 1 as the fallback).
 
-In both cases the **email must belong to an active employee** (`staff.email`) of some client. Unknown emails get `403 unknown_user`.
+3. **API token (for the CRM).** `Authorization: Bearer ams_...` — see section 6. No cookie, no Cloudflare Access login needed once the site is reachable (see "Cloudflare Access" below).
+
+For the two human paths, the **email must belong to an active employee** (`staff.email`) of some client. Unknown emails get `403 unknown_user`.
 `ADMIN_EMAIL` / `SUPER_ADMIN_EMAILS` (Worker variables) are platform owners and are created automatically on first sign-in.
 
 Local development only: `DEV_MODE=true` accepts an `X-Dev-User: email` header. **Never enabled in production.**
@@ -66,6 +68,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Branding (A) | `GET /auth/branding` (public), `PUT /admin/branding`, `PUT/DELETE /admin/branding/logo` |
 | AI | `POST /admin/ai-schedule`, `/admin/ai-schedule/apply` |
 | Clients (platform owner) | `GET /clients`, `POST /clients`, `PUT /clients/:id` |
+| API tokens (admin, browser only) | `GET/POST /admin/tokens`, `DELETE /admin/tokens/:id` |
 
 Public endpoints (no sign-in, secret token in the URL): `/cal/<token>.ics` (employee calendar feed),
 `/r/<token>` and `POST /hooks/offer/<token>` (replacement offers), `POST /hooks/twilio` (inbound SMS, verified by Twilio signature).
@@ -79,24 +82,45 @@ The CRM's AI should ask the owner these questions and record the answers here (a
 
 | Question | Answer |
 |---|---|
-| Direction: CRM reads schedule data, writes data, or both? | _to fill_ |
+| Direction: CRM reads schedule data, writes data, or both? | _to fill_ → choose token scope `read` or `write` |
 | Which data: employees / shifts / time off / payroll? | _to fill_ |
-| Which client(s) (id)? | _to fill_ (Mikes = 1) |
-| Machine identity to use (see section 7) | _to fill_ |
+| Which client(s) (id)? | _to fill_ (Mikes = 1). A token belongs to exactly one client. |
 | Where the CRM stores the credential | _to fill_ (CRM secret store; never in git) |
 
-## 6. Steps available right now (no code change)
+## 6. API tokens (built)
 
-1. **Human-in-browser access:** add the person as an employee (Administration → Employés → `+ Ajouter`, with email), make them admin if needed, they sign in with their email.
-2. **Read-only feeds:** each employee can create a personal iCalendar link (Mon compte → Calendrier). The CRM can poll that `.ics` URL with no login. One link per employee.
-3. **Cloudflare Access service token (machine access while Access is in front):** in Zero Trust → Access → Service auth create a token, add a policy "Service Auth" on the app. The CRM then sends headers `CF-Access-Client-Id` and `CF-Access-Client-Secret`; Access mints the JWT. **Limitation:** the JWT of a service token has no email, so the app currently answers `unauthenticated`. Section 7 lists what must be added.
+**Create** (a client administrator, in the browser): Administration → **Accès API** → name (e.g. `CRM`) → permissions
+`Lecture seule` (read) or `Lecture et écriture` (write) → **Créer le jeton**. The token (`ams_` + 43 characters) is shown **once**; copy it into the CRM's secret store.
+Only a hash is kept; list shows name, scope, last 4 characters, creation date and last use. **Révoquer** kills it immediately (max 20 active per client).
 
-## 7. Gaps / proposed work (so the CRM can call the API as a machine)
+**Use** (from the CRM):
 
-- [ ] **API tokens per client** (`Authorization: Bearer ams_...`, hashed in D1, scoped read/write, revocable, created by a client admin in Administration).
-- [ ] Map a Cloudflare Access **service token** to a client + scope (JWT `common_name`) instead of an email.
+```
+GET https://mikes.andrewmurphy.online/api/admin/overview
+Authorization: Bearer ams_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Rules:
+- A token acts as an **administrator of its own client** (it can read wages and employee data of that client): treat it like a password.
+- Scope `read` allows only `GET`/`HEAD`; any other method answers `403 {"error":"forbidden","reason":"token_is_read_only"}`.
+- A token can **never** call: `/api/clients*`, `/api/admin/tokens*`, `/api/auth/*`, `/api/account*`, `/api/payslips*` (own pay slips of the person who created it). It cannot see another client's data (`404`).
+- Invalid or revoked token: `401 {"error":"unauthenticated","reason":"invalid_token"}`. Disabled client: `403 client_inactive`.
+- Dates/weeks: `week` is the Monday `YYYY-MM-DD`; shift times are local `YYYY-MM-DDTHH:MM` (restaurant time zone, `America/Toronto`).
+- Typical CRM calls: `GET /api/admin/overview` (employees, roles, restaurants), `GET /api/schedule?restaurant=&department=&week=`, `GET /api/time-off/review`, `GET /api/admin/payroll?restaurant=&department=&week=`, `POST /api/staff`, `POST /api/shifts` (write scope).
+
+**Cloudflare Access.** While Access protects the whole hostname, the CRM's request is stopped at Cloudflare *before* it reaches the app. Pick one:
+1. Add an Access **bypass** policy for the path `/api/*` (the app still checks the Bearer token itself), or
+2. Keep Access and create an Access **Service Token**; the CRM sends `CF-Access-Client-Id` + `CF-Access-Client-Secret` **and** the `Authorization: Bearer` header.
+
+Other no-code options: personal iCalendar link per employee (`Mon compte → Calendrier`), a normal employee account for a person.
+
+## 7. Gaps / proposed work
+
+- [x] API tokens per client (read/write, revocable, hashed).
+- [ ] Per-token restriction to areas (e.g. employees only, no wages) and to restaurants.
 - [ ] Webhooks out of the app (shift created/changed, time off decided) for the CRM to subscribe to.
 - [ ] Rate limits and an audit log of API calls.
+- [ ] Pagination / `updated_since` filters for large exports.
 
 Tell the maintainer which of these the CRM needs and this file will be updated.
 
@@ -110,4 +134,5 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-28 | **API tokens** (Administration → Accès API; `Authorization: Bearer ams_...`; read/write; migration 0035). |
 | 2026-10-28 | File created. In-app sign-in, per-client branding, multi-client (clients, tenant guard), migration 0034 fix. |

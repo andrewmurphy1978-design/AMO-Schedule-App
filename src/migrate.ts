@@ -34,6 +34,7 @@ import m0031 from "../migrations/0031_ai_schedule.sql";
 import m0032 from "../migrations/0032_remove_repeated_roles.sql";
 import m0033 from "../migrations/0033_login.sql";
 import m0034 from "../migrations/0034_clients.sql";
+import m0035 from "../migrations/0035_api_tokens.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -70,6 +71,7 @@ const MIGRATIONS: [string, string][] = [
   ["0032_remove_repeated_roles", m0032],
   ["0033_login", m0033],
   ["0034_clients", m0034],
+  ["0035_api_tokens", m0035],
 ];
 
 const statements = (sql: string) =>

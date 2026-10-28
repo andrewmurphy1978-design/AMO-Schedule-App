@@ -236,7 +236,7 @@ function confirmDialog({ title, message, yes, no }) {
     dlg.replaceChildren(h("div", { class: "modal-body" },
       h("h2", {}, title), h("p", {}, message),
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => answer(false) }, no), h("button", { class: "btn primary", type: "button", onClick: () => answer(true) }, yes))));
-    dlg.addEventListener("close", () => { if (activeChanged) render(); if (!answered) { answered = true; resolve(false); } }, { once: true });
+    dlg.addEventListener("close", () => { if (!answered) { answered = true; resolve(false); } }, { once: true });
     dlg.showModal();
   });
 }
@@ -1526,6 +1526,42 @@ function payslipsAdminPanel(ov) {
   return box;
 }
 
+// API tokens for other systems (the CRM): created here, shown once, revocable.
+function apiPanel() {
+  const box = h("div", {});
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short" });
+  async function load(fresh) {
+    const rows = await api("/admin/tokens");
+    const name = h("input", { required: true, maxLength: 60, placeholder: t("apiName") });
+    const scope = radioGroup("api-scope", [["read", t("apiRead")], ["write", t("apiWrite")]], "read");
+    const base = location.origin;
+    const reveal = fresh ? h("div", { class: "panel token-reveal", role: "status" },
+      h("b", {}, t("apiShownOnce")),
+      h("input", { readonly: true, value: fresh.token, onClick: (e) => e.target.select(), "aria-label": fresh.name }),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => { try { await navigator.clipboard.writeText(fresh.token); toast(t("copied")); } catch { toast(fresh.token); } } }, t("apiCopy")))) : null;
+    box.replaceChildren(
+      h("section", { class: "panel" }, h("h2", {}, t("adminApi")), h("p", { class: "meta" }, t("apiHelp")), reveal,
+        rows.length ? rows.map((r) => h("div", { class: `cov-row avail-row ${r.revoked_at ? "inactive" : ""}` },
+          h("div", { class: "avail-text" },
+            h("div", {}, h("b", {}, r.name), h("span", { class: "badge", style: "margin-left:.4rem" }, r.scope === "read" ? t("apiRead") : t("apiWrite")), r.revoked_at ? h("span", { class: "badge", style: "margin-left:.4rem" }, t("apiRevoked")) : null),
+            h("div", { class: "meta" }, `ams_…${r.hint} · ${when(r.created_at)} · ${t("apiLastUsed")} : ${r.last_used_at ? when(r.last_used_at) : t("apiNeverUsed")}`)),
+          h("div", { class: "row-icons" }, r.revoked_at ? null : h("button", { class: "btn danger", type: "button", onClick: async () => {
+            if (!(await confirmDialog({ title: t("apiRevoke"), message: t("apiRevokeConfirm"), yes: t("apiRevoke"), no: t("cancel") }))) return;
+            try { await api(`/admin/tokens/${r.id}`, { method: "DELETE" }); load(); } catch (e) { toast(errorText(e)); }
+          } }, t("apiRevoke"))))) : h("p", { class: "meta" }, t("apiNone"))),
+      h("section", { class: "panel" }, h("h3", {}, t("apiNew")),
+        h("form", { class: "acc-form", onSubmit: async (e) => {
+          e.preventDefault();
+          try { load(await api("/admin/tokens", { method: "POST", body: { name: name.value, scope: scope.value } })); }
+          catch (err) { toast(err.body?.error === "too_many_tokens" ? t("apiTooMany") : errorText(err)); }
+        } }, h("label", { class: "field" }, h("span", {}, t("apiName")), name), h("div", { class: "field" }, h("span", {}, t("apiScope")), scope), h("button", { class: "btn primary", type: "submit" }, t("apiCreate")))),
+      h("section", { class: "panel" }, h("h3", {}, t("apiUsage")), h("p", { class: "meta" }, t("apiUsageHelp")),
+        h("pre", { class: "code" }, `curl -H "Authorization: Bearer ams_..." ${base}/api/admin/overview`)));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // Per-client branding: name, colour, logo, sender name and the texts of the sign-in screen.
 function brandingPanel() {
   const b = state.brand;
@@ -1608,7 +1644,7 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"], ["api", "adminApi"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -1655,6 +1691,7 @@ async function renderAdmin() {
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     branding: () => [brandingPanel()],
+    api: () => [apiPanel()],
     clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
@@ -2222,7 +2259,7 @@ function staffCard(s, ov) {
       adminMsg.textContent = "";
       try {
         const r = await api(`/staff/${s.id}/active`, { method: "PUT", body: { active: want } });
-        s.active = want; rowEl.classList.toggle("inactive", !want); activeChanged = false; render(); // the list behind the dialog moves the employee to the other group right away
+        s.active = want; rowEl.classList.toggle("inactive", !want); render(); // the list behind the dialog moves the employee to the other group right away
         toast(!want && r.upcoming_shifts ? `${t("saved")} — ⚠ ${r.upcoming_shifts} ${t("upcomingShiftsKept")}` : t("saved"));
       } catch (err) { e.target.checked = !want; adminMsg.textContent = { cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err); }
     } }), h("span", {}, t("activeLabel"))),
@@ -2341,7 +2378,6 @@ function staffCard(s, ov) {
     dlg.addEventListener("close", () => { s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };
-  let activeChanged = false;
   const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
     h("span", { class: "who-row" }, summaryAvatar, nameEl), iconBlock,
     h("span", { class: "inactive-badge badge" }, t("inactive")),

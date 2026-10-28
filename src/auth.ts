@@ -54,3 +54,16 @@ export function loginMessage(lang: "fr" | "en", code: string, brand = "Mikes"): 
     ? { subject: `Your ${brand} sign-in code: ${code}`, text: `Your sign-in code is ${code}.\nIt is valid for 10 minutes. If you did not ask for it, ignore this message.` }
     : { subject: `Ton code de connexion ${brand} : ${code}`, text: `Ton code de connexion est ${code}.\nIl est valide 10 minutes. Si tu ne l’as pas demandé, ignore ce message.` };
 }
+
+// ---------- API tokens (machine access) ----------
+export const API_TOKEN_PREFIX = "ams_";
+export const MAX_ACTIVE_TOKENS = 20;
+export const newApiToken = () => API_TOKEN_PREFIX + newSessionToken();
+export const looksLikeApiToken = (s: string) => /^ams_[A-Za-z0-9_-]{40,60}$/.test(s);
+export function bearerToken(header: string | null | undefined): string | null {
+  const m = /^Bearer\s+(\S+)$/i.exec(header ?? "");
+  return m && looksLikeApiToken(m[1]) ? m[1] : null;
+}
+/** Paths a token may never use, whatever its scope: clients, token management, sign-in, and the personal data of the person who created it. */
+export const tokenForbidden = (path: string) =>
+  ["/api/clients", "/api/admin/tokens", "/api/auth/", "/api/account", "/api/payslips"].some((p) => path === p || path.startsWith(p.endsWith("/") ? p : `${p}/`));

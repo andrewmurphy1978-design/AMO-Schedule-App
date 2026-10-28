@@ -633,3 +633,4 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .login-card .btn{min-height:44px}
 .brand-logo{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.brand-logo img{max-width:160px;object-fit:contain;background:#fff;border:1px solid #e3dfd9;border-radius:8px;padding:4px}input[type=color]{width:64px;min-height:44px;padding:2px}
 .client-bar{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.4rem 16px;background:#fff3cd;border-bottom:1px solid #e0c96a;font-size:.9rem}.client-bar .btn{min-height:32px;padding:0 .7rem}
+.token-reveal{background:#fff8e1;border-color:#e0c96a}.token-reveal input{font-family:ui-monospace,monospace;width:100%}.code{background:#f1efeb;border-radius:8px;padding:.6rem .8rem;overflow-x:auto;font-size:.85rem}

@@ -24,3 +24,17 @@ test("safeEqual, cookies and email shape", () => {
   assert.match(loginMessage("fr", "123456").subject, /123456/);
   assert.match(loginMessage("en", "123456").text, /10 minutes/);
 });
+
+import { newApiToken, bearerToken, looksLikeApiToken, tokenForbidden } from "../src/auth.ts";
+
+test("API tokens: format, header parsing and forbidden paths", () => {
+  const t = newApiToken();
+  assert.ok(t.startsWith("ams_") && looksLikeApiToken(t));
+  assert.notEqual(t, newApiToken());
+  assert.equal(bearerToken(`Bearer ${t}`), t);
+  assert.equal(bearerToken(`bearer ${t}`), t);
+  assert.equal(bearerToken("Bearer nope"), null);
+  assert.equal(bearerToken(null), null);
+  for (const p of ["/api/clients", "/api/clients/2", "/api/admin/tokens", "/api/admin/tokens/3", "/api/auth/verify", "/api/account", "/api/payslips", "/api/payslips/4/pdf"]) assert.ok(tokenForbidden(p), p);
+  for (const p of ["/api/me", "/api/admin/overview", "/api/admin/payslips", "/api/schedule", "/api/accounting"]) assert.ok(!tokenForbidden(p), p);
+});

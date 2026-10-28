@@ -18,7 +18,7 @@ import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
-import { CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
+import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { parseBrand, validateBrandPatch, senderAddress, LOGO_TYPES, MAX_LOGO_BYTES, type Brand } from "./brand.ts";
 import { settingKey, clientSettingRows, getSetting, putSettingStmt, delSettingStmt } from "./tenant.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
@@ -55,6 +55,7 @@ interface Me {
   email: string;
   is_admin: boolean;
   client_id: number;
+  via_token?: boolean; // signed in with an API token (never allowed to manage tokens or clients)
   home_client: number; // the client the person belongs to (client_id changes when a platform owner works inside another one)
   is_super: boolean;
 }
@@ -98,6 +99,20 @@ async function identify(c: Context<any>): Promise<{ email?: string; reason?: str
 app.use("/api/*", async (c, next) => {
   await ensureMigrated(c.env.DB);
   if (c.req.path.startsWith("/api/auth/")) return next(); // sign-in endpoints are public
+  // API token (another system): acts as an administrator of its own client, within its scope.
+  const bearer = bearerToken(c.req.header("authorization"));
+  if (bearer) {
+    const tk = await c.env.DB.prepare("SELECT id, client_id, name, scope, created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL").bind(await sha256Hex(bearer)).first<{ id: number; client_id: number; name: string; scope: string; created_by: number }>();
+    if (!tk) return c.json({ error: "unauthenticated", reason: "invalid_token" }, 401);
+    const client = await c.env.DB.prepare("SELECT active FROM clients WHERE id = ?").bind(tk.client_id).first<{ active: number }>();
+    if (!client || client.active === 0) return c.json({ error: "client_inactive" }, 403);
+    if (tokenForbidden(c.req.path)) return c.json({ error: "forbidden", reason: "not_for_tokens" }, 403);
+    if (tk.scope === "read" && c.req.method !== "GET" && c.req.method !== "HEAD") return c.json({ error: "forbidden", reason: "token_is_read_only" }, 403);
+    const now = Date.now();
+    c.executionCtx.waitUntil(c.env.DB.prepare("UPDATE api_tokens SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)").bind(now, tk.id, now - 60_000).run().then(() => {}));
+    c.set("me", { id: tk.created_by, name: `API: ${tk.name}`, email: "", is_admin: true, client_id: tk.client_id, home_client: tk.client_id, is_super: false, via_token: true });
+    return next();
+  }
   const { email, reason } = await identify(c);
   if (!email) return c.json({ error: "unauthenticated", reason }, 401);
   let row = await c.env.DB.prepare("SELECT id, name, email, is_admin, active, client_id FROM staff WHERE lower(email) = ?")
@@ -243,6 +258,40 @@ const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : 
 // ---------- Me ----------
 // Ids of all employees (no names): the browser ranks them to give everyone a distinct automatic colour.
 app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT id FROM staff WHERE client_id = ? ORDER BY id").bind(c.get("me").client_id).all<{ id: number }>()).results.map((r) => r.id)));
+
+// ---------- API tokens (client administrators, signed in with a person, never with a token) ----------
+const requireHuman = async (c: any, next: any) => {
+  const me = c.get("me");
+  if (!me.is_admin || me.via_token) return c.json({ error: "forbidden" }, 403);
+  await next();
+};
+app.get("/api/admin/tokens", requireHuman, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT t.id, t.name, t.scope, t.hint, t.created_at, t.last_used_at, t.revoked_at, s.name AS created_by_name
+     FROM api_tokens t LEFT JOIN staff s ON s.id = t.created_by WHERE t.client_id = ? ORDER BY t.id DESC`,
+  ).bind(c.get("me").client_id).all();
+  return c.json(rows.results);
+});
+app.post("/api/admin/tokens", requireHuman, async (c) => {
+  const me = c.get("me");
+  const b = await c.req.json<{ name?: string; scope?: string }>().catch(() => ({} as { name?: string; scope?: string }));
+  const name = (b.name ?? "").trim();
+  if (!name || name.length > 60) return c.json({ error: "name_required" }, 400);
+  if (b.scope !== "read" && b.scope !== "write") return c.json({ error: "invalid_scope" }, 400);
+  const n = await c.env.DB.prepare("SELECT count(*) AS n FROM api_tokens WHERE client_id = ? AND revoked_at IS NULL").bind(me.client_id).first<{ n: number }>();
+  if ((n?.n ?? 0) >= MAX_ACTIVE_TOKENS) return c.json({ error: "too_many_tokens" }, 409);
+  const token = newApiToken();
+  const r = await c.env.DB.prepare("INSERT INTO api_tokens (client_id, name, token_hash, hint, scope, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(me.client_id, name, await sha256Hex(token), token.slice(-4), b.scope, me.id, Date.now()).run();
+  // The only time the token is ever shown.
+  return c.json({ id: r.meta.last_row_id, token, name, scope: b.scope }, 201);
+});
+app.delete("/api/admin/tokens/:id", requireHuman, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const r = await c.env.DB.prepare("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND client_id = ? AND revoked_at IS NULL").bind(Date.now(), id, c.get("me").client_id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
 
 // ---------- Clients (platform owners only) ----------
 const requireSuper = async (c: any, next: any) => {
