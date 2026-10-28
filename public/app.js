@@ -1244,8 +1244,10 @@ async function renderTimeOff() {
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
-  const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: acc.lang === l }, l === "fr" ? "Français" : "English")));
-  const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: acc.notify_channel === v }, l)));
+  phone.value = formatPhone(acc.phone);
+  phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
+  const lang = radioGroup("acc-lang", [["fr", "Français"], ["en", "English"]], acc.lang);
+  const channel = radioGroup("acc-chan", [["sms", t("sms")], ["email", t("emailCh")]], acc.notify_channel);
   const save = async (e) => {
     e.preventDefault();
     try { await api("/account", { method: "PUT", body: { phone: phone.value, lang: lang.value, notify_channel: channel.value } }); toast(t("saved")); }
@@ -1268,18 +1270,29 @@ async function renderAccount() {
   api("/payslips").then((rows) => slipsBox.replaceChildren(rows.length ? h("div", { class: "log" }, rows.map((r) =>
     h("a", { class: "log-row slip-link", href: `/api/payslips/${r.id}/pdf`, target: "_blank", rel: "noopener" }, h("span", {}, r.pay_date ?? r.filename), h("span", { class: "meta" }, `${r.period_label ?? ""} · PDF`)))) : h("p", { class: "meta" }, t("noPayslips"))))
     .catch(() => slipsBox.replaceChildren(h("p", { class: "meta" }, t("genericError"))));
-  $app.replaceChildren(h("div", { class: "account" },
-    h("h2", {}, t("account")),
-    h("section", { class: "panel" }, h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
-      h("form", { class: "inline-form", style: "grid-template-columns:1fr", onSubmit: save },
-        h("label", { class: "field" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
-        h("label", { class: "field" }, h("span", {}, t("language")), lang),
-        h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
-        h("button", { class: "btn primary", type: "submit" }, t("save")))),
-    h("section", { class: "panel" }, h("h3", {}, t("calendarTitle")), h("p", { class: "meta" }, t("calendarHelp")), calBox),
-    h("section", { class: "panel" }, h("h3", {}, t("myAvailability")), availabilityEditor(state.me.me.id)),
-    h("section", { class: "panel" }, h("h3", {}, t("myPayslips")), slipsBox),
-    h("section", { class: "panel" }, h("h3", {}, t("passwordTitle")), h("p", { class: "meta" }, t("passwordHelp")))));
+  // Mobile-first, tab-based screen (same tabs as the employee dialog, limited to what the employee may change).
+  const profile = h("form", { class: "acc-form", onSubmit: save },
+    h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
+    h("label", { class: "field" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
+    h("div", { class: "field" }, h("span", {}, t("language")), lang),
+    h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("button", { class: "btn primary", type: "submit" }, t("save")));
+  const tabs = [
+    ["profile", t("details"), () => [profile]],
+    ["daysoff", t("fixedDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
+    ["availability", t("availability"), () => [availabilityEditor(state.me.me.id, "times")]],
+    ["calendar", t("calendarTitle"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
+    ["payslips", t("myPayslips"), () => [slipsBox]],
+  ];
+  state.accountTab = tabs.some(([id]) => id === state.accountTab) ? state.accountTab : "profile";
+  const bar = h("div", { class: "dlg-tabs acc-tabs", role: "tablist" });
+  const content = h("div", { class: "acc-content" });
+  const draw = () => {
+    bar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.accountTab === id), onClick: () => { state.accountTab = id; draw(); } }, label)));
+    content.replaceChildren(...tabs.find(([id]) => id === state.accountTab)[2]());
+  };
+  draw();
+  $app.replaceChildren(h("div", { class: "account" }, h("h2", {}, t("account")), bar, content));
 }
 
 async function renderMine() {

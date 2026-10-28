@@ -624,3 +624,7 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .day-time-line{grid-template-columns:1fr 1fr 1fr}.date-time-line{grid-template-columns:1fr 1fr 1fr 1fr}
 .day-time-line,.date-time-line{align-items:end}
 @media (max-width:699px){.day-time-line,.date-time-line{grid-template-columns:1fr 1fr}.day-time-line>label:first-child{grid-column:1/-1}}
+.acc-tabs{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid #e3dfd9;margin:0 -1rem 1rem;padding:0 1rem;-webkit-overflow-scrolling:touch}
+.acc-content{display:grid;gap:.9rem}.acc-form{display:grid;gap:1rem}
+.acc-content input,.acc-content select{min-height:44px;font-size:16px}
+.acc-content .btn{min-height:44px}.acc-form .btn.primary{width:100%}
