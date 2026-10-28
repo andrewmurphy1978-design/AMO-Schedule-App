@@ -952,11 +952,11 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 // ---------- time off ----------
 // Kitchen competencies of one employee: the posts they can work (a runner can work all of them).
 const KITCHEN_SKILL_ROLES = ["chef", "cook"];
+function hasKitchenRole(person) {
+  return (person.roles ?? []).some((r) => KITCHEN_SKILL_ROLES.includes((state.roles.find((x) => x.id === r.role_id)?.name_en ?? "").toLowerCase()));
+}
 function skillsBox(person) {
   const box = h("div", { class: "skills-box" });
-  const eligible = () => (person.roles ?? []).some((r) => KITCHEN_SKILL_ROLES.includes((state.roles.find((x) => x.id === r.role_id)?.name_en ?? "").toLowerCase()));
-  box.refresh = () => { box.hidden = !eligible(); };
-  box.refresh();
   const posts = state.posts.filter((p) => p.department_id === "kitchen");
   api(`/staff/${person.id}/skills`).then((have) => {
     const set = new Set(have);
@@ -1494,17 +1494,20 @@ async function renderAdmin() {
       } }, h("label", { class: "field" }, h("span", {}, t("addRestaurant")), name), h("span"), h("button", { class: "btn primary", type: "submit" }, t("add")));
     })());
 
-  const addStaff = (() => {
+  // One "+ Add" button; the new employee's name goes in a small dialog.
+  const addStaff = h("button", { class: "btn primary", type: "button", onClick: () => {
+    const dlg = document.getElementById("modal");
     const first = h("input", { required: true, maxLength: 80, autocomplete: "off" });
     const last = h("input", { maxLength: 80, autocomplete: "off" });
-    const email = h("input", { type: "email" });
-    return h("form", { class: "inline-form", onSubmit: async (e) => {
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
       e.preventDefault();
-      try { await api("/staff", { method: "POST", body: { first_name: first.value, last_name: last.value, email: email.value || undefined } }); render(); } catch (err) { toast(errorText(err)); }
-    } }, h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last), h("label", { class: "field" }, h("span", {}, t("email")), email),
-    h("button", { class: "btn primary", type: "submit" }, t("add")));
-  })();
-  const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
+      try { await api("/staff", { method: "POST", body: { first_name: first.value, last_name: last.value } }); dlg.close(); render(); } catch (err) { toast(errorText(err)); }
+    } }, h("h2", {}, t("addStaff")),
+      h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("add")))));
+    dlg.showModal(); first.focus();
+  } }, `+ ${t("add")}`);
+  const staffPanel = h("section", { class: "panel staff-head" }, h("h2", {}, t("staff")), addStaff);
   // Active employees first, then the inactive ones.
   const activeStaff = ov.staff.filter((x) => x.active !== false), inactiveStaff = ov.staff.filter((x) => x.active === false);
   const staffLists = ov.staff.length ? [
@@ -2161,7 +2164,8 @@ function staffCard(s, ov) {
     let dlg = document.getElementById("staff-modal");
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
-    const tabs = [["details", t("details")], ["roles", t("rolesTab")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
+    // the kitchen tab only exists for Chef, Cook and Assistant cook
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
@@ -2171,21 +2175,25 @@ function staffCard(s, ov) {
       details: () => [details],
       roles: () => {
         const sideBySide = h("div", { class: "resto-cols" }, blocks);
-        // the kitchen competencies only concern Chef, Cook and Assistant cook: shown/hidden as the roles change
-        const box = skillsBox(s);
-        const wrap = h("div", { class: "roles-tab" }, box, sideBySide);
-        wrap.addEventListener("change", () => { setTimeout(() => box.refresh(), 700); });
-        return [wrap];
+        return [h("div", { class: "roles-tab" }, sideBySide)];
       },
+      kitchen: () => [skillsBox(s)],
       availability: () => [availabilityEditor(s.id)],
       timeoff: () => [staffTimeOff(s)],
       planning: () => [planningForm(s)],
     };
+    const drawTabs = () => {
+      if (!tabList().some(([id]) => id === tab)) tab = "roles";
+      tabBar.replaceChildren(...tabList().map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label)));
+    };
     const draw = () => {
       saveTarget();
-      tabBar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label)));
+      drawTabs();
       content.replaceChildren(...panes[tab]());
     };
+    // roles are saved as they change: show or hide the kitchen tab
+    content.addEventListener("change", () => { if (tab === "roles") setTimeout(drawTabs, 400); });
+    content.addEventListener("change", () => { if (tab === "roles") setTimeout(() => { if (hasKitchenRole(s) !== tabList().some(([id]) => id === "kitchen")) { const keep = content.firstChild; tabBar.replaceChildren(...tabList().map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label))); void keep; } }, 700); });
     dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
       // Sticky header: Save submits the details form (form= attribute), Close just closes.
       h("div", { class: "dlg-top" },

@@ -616,3 +616,4 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .dlg-tabs { background: #fff; }
 .staff-dialog, .shift-dialog, .ai-dialog { padding-top: 0 !important; }
 .rate-item input{width:9rem}
+.staff-head{display:flex;align-items:center;justify-content:space-between;gap:1rem}.staff-head h2{margin:0}
