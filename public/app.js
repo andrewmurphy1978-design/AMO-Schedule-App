@@ -127,6 +127,7 @@ const dowOf = (ymdStr) => (parseYmd(ymdStr).getDay() + 6) % 7;
 const openOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.open_by_dow?.[dow] ?? r?.open_time ?? "07:00"; };
 const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
 const dayOf = (iso) => iso.slice(0, 10);
+const longDate = (s) => fmt(s, { day: "numeric", month: "long", year: "numeric" });
 const fmt = (s, opts) => new Intl.DateTimeFormat(locale(), opts).format(parseYmd(s));
 const weekLabel = (mon) => {
   const sun = addDays(mon, 6);
@@ -1112,7 +1113,7 @@ function staffTimeOff(person) {
     const timeBox = h("div", { class: "time-pair", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), ts), h("label", { class: "field" }, h("span", {}, t("end")), te));
     allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
     const label = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
-    const dates = (r) => (r.start_date === r.end_date ? fmt(r.start_date, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : `${fmt(r.start_date, { day: "numeric", month: "short" })} → ${fmt(r.end_date, { day: "numeric", month: "short", year: "numeric" })}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
+    const dates = (r) => (r.start_date === r.end_date ? longDate(r.start_date) : `${longDate(r.start_date)} → ${longDate(r.end_date)}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
     const act = async (fn) => { try { await fn(); load(); } catch (e) { toast(errorText(e)); } };
     box.replaceChildren(
       rows.length ? rows.map((r) => h("div", { class: "cov-row avail-row" },
@@ -1172,7 +1173,7 @@ function availabilityEditor(staffId, part = "both") {
       list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row avail-row" },
         h("div", { class: "avail-text" },
           h("span", {}, h("b", {}, weekdayName(r.dow)), ` ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
-          r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ?? "…"} → ${r.valid_to ?? "…"}`) : null),
+          r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ? longDate(r.valid_from) : "…"} → ${r.valid_to ? longDate(r.valid_to) : "…"}`) : null),
         h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, "🗑️")))) : h("p", { class: "meta" }, t("noUnavailable")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
         h("div", { class: "inline-form day-time-line" }, h("label", { class: "field" }, h("span", {}, t("weekday")), dow), h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
