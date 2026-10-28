@@ -49,8 +49,8 @@ export const clearCookie = (secure: boolean) => `${COOKIE_NAME}=; Path=/; HttpOn
 
 export const looksLikeEmail = (s: string) => s.length <= 200 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
 
-export function loginMessage(lang: "fr" | "en", code: string): { subject: string; text: string } {
+export function loginMessage(lang: "fr" | "en", code: string, brand = "Mikes"): { subject: string; text: string } {
   return lang === "en"
-    ? { subject: `Your Mikes sign-in code: ${code}`, text: `Your sign-in code is ${code}.\nIt is valid for 10 minutes. If you did not ask for it, ignore this message.` }
-    : { subject: `Ton code de connexion Mikes : ${code}`, text: `Ton code de connexion est ${code}.\nIl est valide 10 minutes. Si tu ne l’as pas demandé, ignore ce message.` };
+    ? { subject: `Your ${brand} sign-in code: ${code}`, text: `Your sign-in code is ${code}.\nIt is valid for 10 minutes. If you did not ask for it, ignore this message.` }
+    : { subject: `Ton code de connexion ${brand} : ${code}`, text: `Ton code de connexion est ${code}.\nIl est valide 10 minutes. Si tu ne l’as pas demandé, ignore ce message.` };
 }

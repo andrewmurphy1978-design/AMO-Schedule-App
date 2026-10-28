@@ -19,6 +19,7 @@ import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
+import { parseBrand, validateBrandPatch, senderAddress, LOGO_TYPES, MAX_LOGO_BYTES, type Brand } from "./brand.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
 import { localNow, mondayOfDate } from "./week.ts";
 import { overlapsTimeOff, findUnavailable, type Unavailable } from "./availability.ts";
@@ -167,7 +168,7 @@ async function withOpenHours<T extends { id: number; open_time: string; close_ti
 }
 
 async function loadSettings(db: D1Database): Promise<Settings> {
-  return parseSettings((await db.prepare("SELECT key, value FROM settings").all<{ key: string; value: string }>()).results);
+  return parseSettings((await db.prepare("SELECT key, value FROM settings WHERE key != 'brand_logo'").all<{ key: string; value: string }>()).results);
 }
 
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
@@ -178,6 +179,44 @@ app.get("/api/staff-order", async (c) => c.json((await c.env.DB.prepare("SELECT 
 
 // ---------- In-app sign-in: email one-time code -> session cookie ----------
 const isSecure = (c: Context<any>) => new URL(c.req.url).protocol === "https:";
+
+// ---------- Branding (per client): public read for the sign-in screen, admin write ----------
+async function loadBrand(db: D1Database): Promise<Brand> {
+  const rows = await db.prepare("SELECT key, value FROM settings WHERE key LIKE 'brand\\_%' ESCAPE '\\' AND key NOT IN ('brand_logo')").all<{ key: string; value: string }>();
+  return parseBrand(rows.results);
+}
+app.get("/api/auth/branding", async (c) => c.json(await loadBrand(c.env.DB)));
+app.get("/api/auth/logo", async (c) => {
+  const [d, t] = await Promise.all([
+    c.env.DB.prepare("SELECT value FROM settings WHERE key = 'brand_logo'").first<{ value: string }>(),
+    c.env.DB.prepare("SELECT value FROM settings WHERE key = 'brand_logo_type'").first<{ value: string }>(),
+  ]);
+  if (!d || !t) return c.body(null, 404);
+  const bytes = Uint8Array.from(atob(d.value), (ch) => ch.charCodeAt(0));
+  return new Response(bytes, { headers: { "content-type": t.value, "cache-control": "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } });
+});
+app.put("/api/admin/branding", requireAdmin, async (c) => {
+  const v = validateBrandPatch(await c.req.json<Record<string, unknown>>().catch(() => ({})));
+  if ("error" in v) return c.json({ error: v.error }, 400);
+  await c.env.DB.batch(Object.entries(v.values).map(([k, val]) =>
+    val === "" && k !== "brand_name" ? c.env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(k) : c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, val)));
+  return c.json(await loadBrand(c.env.DB));
+});
+app.put("/api/admin/branding/logo", requireAdmin, async (c) => {
+  const b = await c.req.json<{ type?: string; data?: string }>().catch(() => ({} as { type?: string; data?: string }));
+  if (!b.type || !(LOGO_TYPES as readonly string[]).includes(b.type)) return c.json({ error: "invalid_type" }, 400);
+  if (!b.data || !/^[A-Za-z0-9+/]+=*$/.test(b.data) || b.data.length * 0.75 > MAX_LOGO_BYTES) return c.json({ error: "invalid_or_too_large" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo', ?)").bind(b.data),
+    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo_type', ?)").bind(b.type),
+    c.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_logo_v', ?)").bind(String(Date.now())),
+  ]);
+  return c.json(await loadBrand(c.env.DB));
+});
+app.delete("/api/admin/branding/logo", requireAdmin, async (c) => {
+  await c.env.DB.prepare("DELETE FROM settings WHERE key IN ('brand_logo', 'brand_logo_type', 'brand_logo_v')").run();
+  return c.json(await loadBrand(c.env.DB));
+});
 
 app.post("/api/auth/request", async (c) => {
   const b = await c.req.json<{ email?: string; lang?: string }>().catch(() => ({} as { email?: string; lang?: string }));
@@ -199,7 +238,9 @@ app.post("/api/auth/request", async (c) => {
     .bind(email, allowed ? await codeHash(pepper, email, code) : await sha256Hex(crypto.randomUUID()), now + CODE_TTL_MS, now).run();
   if (allowed) {
     const lang = staff?.lang === "en" || (!staff && b.lang === "en") ? "en" : "fr";
-    c.executionCtx.waitUntil(deliver(db, conn, "email", email, loginMessage(lang, code), "login_code", staff?.id ?? null).then(() => {}));
+    const brand = await loadBrand(db);
+    const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name) } };
+    c.executionCtx.waitUntil(deliver(db, smtp, "email", email, loginMessage(lang, code, brand.name), "login_code", staff?.id ?? null).then(() => {}));
   }
   return c.json({ ok: true });
 });

@@ -631,3 +631,4 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .login-card{max-width:420px;margin:2rem auto;display:grid;gap:1rem;padding:0 .5rem}
 .login-card input{min-height:48px;font-size:16px}.login-code{text-align:center;font-size:28px!important;letter-spacing:.4em;font-weight:700}
 .login-card .btn{min-height:44px}
+.brand-logo{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.brand-logo img{max-width:160px;object-fit:contain;background:#fff;border:1px solid #e3dfd9;border-radius:8px;padding:4px}input[type=color]{width:64px;min-height:44px;padding:2px}

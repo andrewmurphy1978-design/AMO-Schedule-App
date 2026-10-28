@@ -172,8 +172,8 @@ const $app = document.getElementById("app");
 
 function renderChrome() {
   document.getElementById("lang-toggle").textContent = mqDesktop.matches ? (getLang() === "fr" ? "English" : "Français") : (getLang() === "fr" ? "EN" : "FR");
-  document.getElementById("footer").textContent = t("footer");
-  document.title = `Mikes · ${t("app")}`;
+  document.getElementById("footer").textContent = brandText("footer") || (state.brand.name === DEFAULT_BRAND.name ? t("footer") : state.brand.name);
+  document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
     ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["timeoff", t("timeOff")], ["account", t("account")]]
@@ -1514,8 +1514,47 @@ function payslipsAdminPanel(ov) {
   return box;
 }
 
+// Per-client branding: name, colour, logo, sender name and the texts of the sign-in screen.
+function brandingPanel() {
+  const b = state.brand;
+  const text = (key, max = 80) => h("input", { value: b[key] ?? "", maxLength: max });
+  const name = text("name"), sender = text("sender_name");
+  const color = h("input", { type: "color", value: b.color, "aria-label": t("brandColor") });
+  const f = { title_fr: text("title_fr"), title_en: text("title_en"), intro_fr: text("intro_fr", 300), intro_en: text("intro_en", 300), footer_fr: text("footer_fr", 300), footer_en: text("footer_en", 300) };
+  const logoBox = h("div", { class: "brand-logo" });
+  const drawLogo = () => logoBox.replaceChildren(
+    state.brand.logo ? h("img", { src: `/api/auth/logo?v=${state.brand.logo_v}`, alt: "", height: 56 }) : h("span", { class: "meta" }, "—"),
+    h("label", { class: "btn" }, t("brandLogoUpload"), h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", hidden: true, onChange: async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      if (file.size > 300 * 1024) { toast(t("brandLogoTooBig")); return; }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      const data = btoa(bin);
+      try { state.brand = { ...state.brand, ...(await api("/admin/branding/logo", { method: "PUT", body: { type: file.type, data } })) }; applyBrand(); drawLogo(); toast(t("saved")); } catch (err) { toast(errorText(err)); }
+    } })),
+    state.brand.logo ? h("button", { class: "btn", type: "button", onClick: async () => { state.brand = { ...state.brand, ...(await api("/admin/branding/logo", { method: "DELETE" })) }; applyBrand(); drawLogo(); } }, t("brandLogoRemove")) : null);
+  drawLogo();
+  const field = (label, ...inputs) => h("label", { class: "field" }, h("span", {}, label), ...inputs);
+  return h("section", { class: "panel" }, h("h2", {}, t("adminBranding")),
+    h("form", { class: "acc-form", onSubmit: async (e) => {
+      e.preventDefault();
+      try {
+        state.brand = { ...state.brand, ...(await api("/admin/branding", { method: "PUT", body: { name: name.value, color: color.value, sender_name: sender.value, ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value])) } })) };
+        applyBrand(); toast(t("saved"));
+      } catch (err) { toast(errorText(err)); }
+    } },
+      field(t("brandName"), name), field(t("brandColor"), color),
+      h("div", { class: "field" }, h("span", {}, t("brandLogo")), logoBox, h("span", { class: "meta" }, t("brandLogoHelp"))),
+      field(t("brandSender"), sender, h("span", { class: "meta" }, t("brandSenderHelp"))),
+      h("h3", {}, t("brandLoginTexts")), h("p", { class: "meta" }, t("brandBlankDefault")),
+      h("div", { class: "form-row r2" }, field(`${t("brandTitle")} (FR)`, f.title_fr), field(`${t("brandTitle")} (EN)`, f.title_en)),
+      field(`${t("brandIntro")} (FR)`, f.intro_fr), field(`${t("brandIntro")} (EN)`, f.intro_en),
+      field(`${t("brandFooter")} (FR)`, f.footer_fr), field(`${t("brandFooter")} (EN)`, f.footer_en),
+      h("button", { class: "btn primary", type: "submit" }, t("save"))));
+}
+
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -1561,6 +1600,7 @@ async function renderAdmin() {
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
+    branding: () => [brandingPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
   };
@@ -2255,6 +2295,29 @@ function staffCard(s, ov) {
 }
 
 // ---------- boot ----------
+// ---------- Per-client branding (name, colour, logo, texts), set in Administration ----------
+const DEFAULT_BRAND = { name: "Mikes", color: "#da291c", sender_name: "", title_fr: "", title_en: "", intro_fr: "", intro_en: "", footer_fr: "", footer_en: "", logo: false, logo_v: 0 };
+state.brand = { ...DEFAULT_BRAND };
+const darkenHex = (hex, f = 0.78) => { const n = parseInt(hex.slice(1), 16); const c = (sh) => Math.round(((n >> sh) & 255) * f).toString(16).padStart(2, "0"); return `#${c(16)}${c(8)}${c(0)}`; };
+const brandText = (key) => state.brand[`${key}_${getLang()}`] || "";
+function applyBrand() {
+  const b = state.brand, root = document.documentElement.style;
+  root.setProperty("--brand", b.color); root.setProperty("--brand-dark", darkenHex(b.color));
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", b.color);
+  const logo = document.getElementById("logo"), word = document.getElementById("wordmark");
+  const custom = b.logo, isDefault = b.name === DEFAULT_BRAND.name;
+  if (custom) { logo.hidden = false; word.hidden = true; logo.onerror = () => { logo.hidden = true; word.hidden = false; }; logo.src = `/api/auth/logo?v=${b.logo_v}`; }
+  else if (isDefault) { logo.hidden = false; word.hidden = true; if (!logo.src.endsWith("logo.png")) logo.src = "logo.png"; }
+  else { logo.hidden = true; word.hidden = false; }
+  logo.alt = b.name; word.textContent = b.name;
+  if (state.me || state.brandLoaded) renderChrome();
+}
+async function loadBrand() {
+  try { state.brand = { ...DEFAULT_BRAND, ...(await (await fetch("/api/auth/branding")).json()) }; } catch {}
+  state.brandLoaded = true;
+  applyBrand();
+}
+
 // Sign-in screen: email -> 6-digit code sent by email -> session cookie.
 function renderLogin(prefill = "") {
   renderChrome();
@@ -2265,7 +2328,7 @@ function renderLogin(prefill = "") {
   const fail = (e, fallback) => { msg.textContent = e?.body?.error === "too_many_requests" ? t("loginTooMany") : e?.body?.error === "email_not_configured" ? t("loginEmailOff") : fallback; };
   const stepEmail = () => {
     msg.textContent = "";
-    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, t("loginTitle")), h("p", { class: "meta" }, t("loginIntro")),
+    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, brandText("intro") || t("loginIntro")),
       h("form", { class: "acc-form", onSubmit: async (e) => {
         e.preventDefault();
         try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); stepCode(); }
@@ -2275,7 +2338,7 @@ function renderLogin(prefill = "") {
   };
   const stepCode = () => {
     msg.textContent = ""; code.value = "";
-    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, t("loginTitle")), h("p", { class: "meta" }, t("loginCodeSent")), h("p", {}, h("b", {}, email.value.trim())),
+    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, t("loginCodeSent")), h("p", {}, h("b", {}, email.value.trim())),
       h("form", { class: "acc-form", onSubmit: async (e) => {
         e.preventDefault();
         try { await api("/auth/verify", { method: "POST", body: { email: email.value, code: code.value } }); boot(); }
@@ -2290,6 +2353,7 @@ function renderLogin(prefill = "") {
 }
 
 async function boot() {
+  await loadBrand();
   try {
     state.me = await api("/me");
   } catch (e) {
