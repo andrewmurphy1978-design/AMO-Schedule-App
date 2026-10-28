@@ -18,8 +18,22 @@ function radioGroup(name, options, current) {
   Object.defineProperty(el, "value", { get: () => el.querySelector("input:checked")?.value ?? "" });
   return el;
 }
+// Date field: shows "25 octobre 2026" / "October 25, 2026" when idle and becomes a real date picker while it has focus.
+// .value stays the ISO "YYYY-MM-DD" string.
+function enhanceDateInput(el) {
+  const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+  let iso = "";
+  const show = () => { el.type = "text"; proto.set.call(el, iso ? fmt(iso, { day: "numeric", month: "long", year: "numeric" }) : ""); };
+  Object.defineProperty(el, "value", { get: () => iso, set: (v) => { iso = v || ""; if (el.type === "date") proto.set.call(el, iso); else show(); }, configurable: true });
+  el.addEventListener("focus", () => { if (el.type === "date") return; el.type = "date"; proto.set.call(el, iso); try { el.showPicker?.(); } catch {} });
+  el.addEventListener("change", () => { if (el.type === "date") iso = proto.get.call(el); });
+  el.addEventListener("blur", () => { if (el.type === "date") { iso = proto.get.call(el); show(); } });
+  el.setAttribute("autocomplete", "off");
+  show();
+}
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
+  if (tag === "input" && attrs?.type === "date") { attrs = { ...attrs }; delete attrs.type; enhanceDateInput(el); }
   for (const [k, v] of Object.entries(attrs ?? {})) {
     if (v === false || v == null) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2).toLowerCase(), v);
