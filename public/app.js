@@ -1125,7 +1125,7 @@ function staffTimeOff(person) {
 }
 
 // Weekly fixed day(s) off and recurring unavailable times (school, other job…), for one employee.
-function availabilityEditor(staffId) {
+function availabilityEditor(staffId, part = "both") {
   const box = h("div", { class: "availability" });
   async function load() {
     const rows = await api(`/availability?staff=${staffId}`);
@@ -1143,12 +1143,13 @@ function availabilityEditor(staffId) {
     const note = h("input", { maxLength: 120, placeholder: t("availabilityNote") });
     const vf = h("input", { type: "date" }), vt = h("input", { type: "date" });
     const list = rows.filter((r) => r.kind !== "day_off");
-    box.replaceChildren(
+    const daysPart = [
       h("h4", {}, t("fixedDaysOff")), h("p", { class: "meta" }, t("fixedDaysOffHelp")), days,
       // On each fixed day off: can this person still be asked to cover a sick colleague that day?
       [...dayOffs.entries()].sort((a, b) => a[0] - b[0]).map(([i, r]) => h("label", { class: "check" },
         h("input", { type: "checkbox", checked: !!r.replacement_ok, onChange: async (e) => { try { await api(`/availability/${r.id}`, { method: "PUT", body: { replacement_ok: e.target.checked } }); toast(t("saved")); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); } } }),
-        h("span", {}, `${weekdayName(i)} : ${t("replacementOk")}`))),
+        h("span", {}, `${weekdayName(i)} : ${t("replacementOk")}`)))];
+    const timesPart = [
       h("h4", {}, t("unavailableTimes")), h("p", { class: "meta" }, t("unavailableHelp")),
       list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row" },
         h("span", {}, h("b", {}, weekdayName(r.dow)), ` ${r.start_time}–${r.end_time}${r.note ? ` · ${r.note}` : ""}`),
@@ -1162,7 +1163,8 @@ function availabilityEditor(staffId) {
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try { await api("/availability", { method: "POST", body: { staff_id: staffId, dow: Number(dow.value), start_time: st.value, end_time: en.value, note: note.value, valid_from: vf.value || undefined, valid_to: vt.value || undefined } }); load(); }
           catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
-        } }, t("add"))));
+        } }, t("add")))];
+    box.replaceChildren(...(part === "daysoff" ? daysPart : part === "times" ? timesPart : [...daysPart, ...timesPart]));
   }
   load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
   return box;
@@ -2169,7 +2171,7 @@ function staffCard(s, ov) {
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
     // the kitchen tab only exists for Chef, Cook and Assistant cook
-    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
@@ -2182,7 +2184,8 @@ function staffCard(s, ov) {
         return [h("div", { class: "roles-tab" }, sideBySide)];
       },
       kitchen: () => [skillsBox(s)],
-      availability: () => [availabilityEditor(s.id)],
+      daysoff: () => [availabilityEditor(s.id, "daysoff")],
+      availability: () => [availabilityEditor(s.id, "times")],
       timeoff: () => [staffTimeOff(s)],
       planning: () => [planningForm(s)],
     };
