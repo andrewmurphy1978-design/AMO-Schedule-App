@@ -180,6 +180,20 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
   render();
 });
 
+// A small confirmation screen (yes / no) that resolves true or false.
+function confirmDialog({ title, message, yes, no }) {
+  return new Promise((resolve) => {
+    const dlg = document.getElementById("modal");
+    let answered = false;
+    const answer = (v) => { if (answered) return; answered = true; resolve(v); dlg.close(); };
+    dlg.replaceChildren(h("div", { class: "modal-body" },
+      h("h2", {}, title), h("p", {}, message),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => answer(false) }, no), h("button", { class: "btn primary", type: "button", onClick: () => answer(true) }, yes))));
+    dlg.addEventListener("close", () => { if (!answered) { answered = true; resolve(false); } }, { once: true });
+    dlg.showModal();
+  });
+}
+
 // ---------- schedule ----------
 // Long last names are folded so the name column stays narrow: a break opportunity after every 9 letters of a long word
 // ("Constantineau" -> "Constanti / neau"); hyphens and spaces already break lines ("Douville- / Bondu").
@@ -1464,7 +1478,7 @@ function periodDialog({ restaurantId, kind, set, onSaved }) {
 // Staffing targets as a week table (like the schedule): one column per date, one row per time slot.
 // Each cell shows the number that applies on that date (base, season and special days combined).
 function weeklyTargetsPanel(ov) {
-  const st = { restaurant: ov.restaurants[0]?.id, department: "kitchen", week: mondayOf(new Date()), scope: "week" };
+  const st = { restaurant: ov.restaurants[0]?.id, department: "kitchen", week: mondayOf(new Date()), scope: "always" };
   const box = h("section", { class: "panel" });
 
   async function load() {
@@ -1504,6 +1518,9 @@ function weeklyTargetsPanel(ov) {
 
     const save = async () => {
       try {
+        // Changes "for every week" reach all future weeks: ask first.
+        const anyChange = SLOTS.some((slot) => inputs.some((col) => col[slot] && col[slot].value !== col[slot].dataset.orig && col[slot].value !== ""));
+        if (st.scope === "always" && anyChange && !(await confirmDialog({ title: t("confirmFutureTitle"), message: t("confirmFutureTargets"), yes: t("yesApply"), no: t("cancel") }))) return;
         let touched = 0;
         for (let i = 0; i < 7; i++) {
           const changed = {};
@@ -1543,7 +1560,7 @@ function weeklyTargetsPanel(ov) {
         h("button", { class: "btn", type: "button", onClick: () => { st.week = mondayOf(new Date()); load(); } }, t("today"))),
       h("div", { class: "field" }, h("span", {}, t("applyChangesTo")),
         h("div", { class: "seg" },
-          [["week", t("scopeWeek")], ["always", t("scopeAlways")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(st.scope === v), onClick: () => { st.scope = v; load(); } }, l))),
+          [["always", t("scopeAlways")], ["week", t("scopeWeek")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(st.scope === v), onClick: () => { st.scope = v; load(); } }, l))),
         h("span", { class: "meta" }, st.scope === "week" ? t("scopeWeekHelp") : t("scopeAlwaysHelp"))),
       h("div", { class: "tw-scroll" }, h("table", { class: "tw" }, h("thead", {}, h("tr", {}, h("th"), head)), h("tbody", {}, body))),
       h("p", { class: "meta" }, `🏛 ${t("statutoryHoliday")} · ★ ${t("busyDay")} · ${t("closeHelp")}`),
