@@ -5,6 +5,19 @@ import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysO
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
 // ---------- helpers ----------
+// "+18194297404" / "819-429-7404" -> "+1 (819) 429-7404" (North American numbers); anything else is left as typed.
+function formatPhone(v) {
+  const d = String(v ?? "").replace(/\D/g, "");
+  const n = d.length === 11 && d[0] === "1" ? d.slice(1) : d;
+  return n.length === 10 ? `+1 (${n.slice(0, 3)}) ${n.slice(3, 6)}-${n.slice(6)}` : String(v ?? "");
+}
+// A group of radio buttons whose .value works like a select's.
+function radioGroup(name, options, current) {
+  const el = h("div", { class: "radio-group", role: "radiogroup" }, options.map(([v, label]) =>
+    h("label", { class: "radio" }, h("input", { type: "radio", name, value: v, checked: String(current ?? "") === String(v) }), h("span", {}, label))));
+  Object.defineProperty(el, "value", { get: () => el.querySelector("input:checked")?.value ?? "" });
+  return el;
+}
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs ?? {})) {
@@ -194,7 +207,7 @@ function confirmDialog({ title, message, yes, no }) {
     dlg.replaceChildren(h("div", { class: "modal-body" },
       h("h2", {}, title), h("p", {}, message),
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => answer(false) }, no), h("button", { class: "btn primary", type: "button", onClick: () => answer(true) }, yes))));
-    dlg.addEventListener("close", () => { if (!answered) { answered = true; resolve(false); } }, { once: true });
+    dlg.addEventListener("close", () => { if (activeChanged) render(); if (!answered) { answered = true; resolve(false); } }, { once: true });
     dlg.showModal();
   });
 }
@@ -967,9 +980,17 @@ function planningForm(person) {
   const chips = [10, 15, 20, 25, 30, 35, 40].map((n) => h("button", { type: "button", class: "chip-btn", onClick: () => setHours(n) }, `${n} h`));
   const markChips = () => chips.forEach((c, i) => c.setAttribute("aria-pressed", String(Number(hoursIn.value) === [10, 15, 20, 25, 30, 35, 40][i])));
   hoursIn.addEventListener("input", markChips); markChips();
+  // Maximum hours per week (e.g. 17 h under 16): never exceeded for replacements, warned when scheduling.
+  const maxIn = h("input", { type: "number", min: 1, max: 168, step: "0.5", inputMode: "decimal", placeholder: "—", value: person.max_weekly_hours ?? "", "aria-label": t("maxWeeklyHours") });
+  const maxChips = [17, 20, 25, 30, 35, 40].map((n) => h("button", { type: "button", class: "chip-btn", onClick: () => { maxIn.value = String(n); markMax(); } }, `${n} h`));
+  const markMax = () => maxChips.forEach((c, i) => c.setAttribute("aria-pressed", String(Number(maxIn.value) === [17, 20, 25, 30, 35, 40][i])));
+  maxIn.addEventListener("input", markMax); markMax();
   const form = h("form", { id: `planning-form-${person.id}`, class: "planning-form", onSubmit: async (e) => {
     e.preventDefault();
-    try { const r = await api(`/staff/${person.id}/planning`, { method: "PUT", body: { promised_hours: hoursIn.value, scheduling_notes: notes.value } }); person.promised_hours = r.promised_hours; person.scheduling_notes = notes.value || null; toast(t("saved")); }
+    try {
+      const r = await api(`/staff/${person.id}/planning`, { method: "PUT", body: { promised_hours: hoursIn.value, scheduling_notes: notes.value } }); person.promised_hours = r.promised_hours; person.scheduling_notes = notes.value || null;
+      const lim = await api(`/staff/${person.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxIn.value } }); person.max_weekly_hours = lim.max_weekly_hours;
+      toast(t("saved")); }
     catch (err) { toast(err.body?.error === "invalid_hours" ? t("genericError") : errorText(err)); }
   } },
     h("section", { class: "plan-card" },
@@ -977,6 +998,10 @@ function planningForm(person) {
       h("div", { class: "hours-stepper" },
         h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), hoursIn, h("span", { class: "unit" }, t("hoursPerWeek")), h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+")),
       h("div", { class: "chip-row" }, chips, h("button", { type: "button", class: "chip-btn", onClick: () => setHours(null) }, t("noPromisedHours")))),
+    h("section", { class: "plan-card" },
+      h("h4", {}, `🛑 ${t("maxWeeklyHours")}`), h("p", { class: "meta" }, t("maxWeeklyHoursHelp")),
+      h("div", { class: "hours-stepper" }, h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => { maxIn.value = String(Math.max(1, (Number(maxIn.value) || 0) - 1)); markMax(); } }, "−"), maxIn, h("span", { class: "unit" }, t("hoursPerWeek")), h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => { maxIn.value = String(Math.min(168, (Number(maxIn.value) || 0) + 1)); markMax(); } }, "+")),
+      h("div", { class: "chip-row" }, maxChips, h("button", { type: "button", class: "chip-btn", onClick: () => { maxIn.value = ""; markMax(); } }, t("noMaxHours")))),
     h("section", { class: "plan-card" },
       h("h4", {}, `📝 ${t("planningNotes")}`), h("p", { class: "meta" }, t("planningNotesHelp")), notes));
   return form;
@@ -1480,14 +1505,18 @@ async function renderAdmin() {
     h("button", { class: "btn primary", type: "submit" }, t("add")));
   })();
   const staffPanel = h("section", { class: "panel" }, h("h2", {}, t("staff")), addStaff);
-  const staffList = ov.staff.length ? ov.staff.map((s) => staffCard(s, ov)) : [h("div", { class: "empty" }, t("noStaff"))];
-  const inactiveCount = ov.staff.filter((s) => s.active === false).length;
-  const showInactive = inactiveCount ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!state.showInactive, onChange: (e) => { state.showInactive = e.target.checked; render(); } }), h("span", {}, `${t("showInactive")} (${inactiveCount})`)) : null;
+  // Active employees first, then the inactive ones.
+  const activeStaff = ov.staff.filter((x) => x.active !== false), inactiveStaff = ov.staff.filter((x) => x.active === false);
+  const staffLists = ov.staff.length ? [
+    h("h3", { class: "staff-group" }, `${t("activeEmployees")} (${activeStaff.length})`), ...activeStaff.map((x) => staffCard(x, ov)),
+    inactiveStaff.length ? h("h3", { class: "staff-group inactive-group" }, `${t("inactiveEmployees")} (${inactiveStaff.length})`) : null,
+    ...inactiveStaff.map((x) => staffCard(x, ov)),
+  ] : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
     restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), periodsPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
-    staff: () => [staffPanel, showInactive, h("div", { class: state.showInactive ? "" : "hide-inactive" }, staffList)],
+    staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
@@ -1985,10 +2014,11 @@ function staffCard(s, ov) {
   const last = h("input", { value: sp.last, maxLength: 80 });
   const fullName = () => joinName(first.value, last.value);
   const email = h("input", { type: "email", value: s.email ?? "" });
-  const phone = h("input", { type: "tel", value: s.phone ?? "" });
-  const sex = h("select", {}, [["", t("sexUnspecified")], ["M", t("sexMale")], ["F", t("sexFemale")]].map(([v, l]) => h("option", { value: v, selected: (s.sex ?? "") === v }, l)));
-  const lang = h("select", {}, ["fr", "en"].map((l) => h("option", { value: l, selected: s.lang === l }, l === "fr" ? "Français" : "English")));
-  const channel = h("select", {}, [["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: s.notify_channel === v }, l)));
+  const phone = h("input", { type: "tel", value: formatPhone(s.phone), autocomplete: "off", placeholder: "+1 (819) 555-1234" });
+  phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
+  const sex = radioGroup(`sex-${s.id}`, [["M", t("sexMale")], ["F", t("sexFemale")], ["", t("sexUnspecified")]], s.sex ?? "");
+  const lang = radioGroup(`lang-${s.id}`, [["fr", "Français"], ["en", "English"]], s.lang);
+  const channel = radioGroup(`chan-${s.id}`, [["sms", t("sms")], ["email", t("emailCh")]], s.notify_channel);
   const rate = h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: ov.default_rates?.general_cents != null ? `${t("defaultWord")} ${(ov.default_rates.general_cents / 100).toFixed(2)}` : t("noRate"), value: s.hourly_cents != null ? (s.hourly_cents / 100).toFixed(2) : "" });
   // Optional hourly rate per role held (e.g. delivery driver vs cook); blank = use the general rate.
   const heldRoleIds = [...new Set(s.roles.map((r) => r.role_id))];
@@ -1999,7 +2029,6 @@ function staffCard(s, ov) {
   }).filter((x) => x.ro);
   const adminMsg = h("div", { class: "alert", role: "alert" });
   const printOrder = h("input", { type: "number", min: 1, max: 999, inputMode: "numeric", placeholder: t("noPrintOrder"), value: s.print_order ?? "" });
-  const maxHours = h("input", { type: "number", min: 1, max: 168, step: "0.5", inputMode: "decimal", placeholder: t("noMaxHours"), value: s.max_weekly_hours ?? "" });
   const sinInput = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: s.sin_last3 ? `••• ••• ${s.sin_last3}` : "000 000 000", maxLength: 11 });
   let bigAvatar = avatar(s.id, s.name, s.color, s.photo_v, 72);
   let summaryAvatar = avatar(s.id, s.name, s.color, s.photo_v, 28);
@@ -2039,21 +2068,22 @@ function staffCard(s, ov) {
       await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || null, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
-      const lim = await api(`/staff/${s.id}/limit`, { method: "PUT", body: { max_weekly_hours: maxHours.value } }); s.max_weekly_hours = lim.max_weekly_hours;
       if (sinInput.value.trim()) { const r = await api(`/staff/${s.id}/sin`, { method: "PUT", body: { sin: sinInput.value } }); s.sin_last3 = r.sin_last3; sinInput.value = ""; sinInput.placeholder = `••• ••• ${r.sin_last3}`; }
       toast(t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
-    h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
-    h("label", { class: "field" }, h("span", {}, t("sexLabel")), sex, h("span", { class: "meta" }, t("sexHelp"))), h("label", { class: "field" }, h("span", {}, t("email")), email),
-    h("label", { class: "field" }, h("span", {}, t("phone")), phone), h("label", { class: "field" }, h("span", {}, t("language")), lang),
-    h("label", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("div", { class: "form-row r3" },
+      h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
+      h("div", { class: "field" }, h("span", {}, t("sexLabel")), sex)),
+    h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("email")), email), h("label", { class: "field" }, h("span", {}, t("phone")), phone)),
+    h("div", { class: "form-row r2" }, h("div", { class: "field" }, h("span", {}, t("language")), lang), h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel)),
+    h("div", { class: "form-row r2" },
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.active !== false, onChange: async (e) => {
       const want = e.target.checked;
       adminMsg.textContent = "";
       try {
         const r = await api(`/staff/${s.id}/active`, { method: "PUT", body: { active: want } });
-        s.active = want; rowEl.classList.toggle("inactive", !want);
+        s.active = want; rowEl.classList.toggle("inactive", !want); activeChanged = true;
         toast(!want && r.upcoming_shifts ? `${t("saved")} — ⚠ ${r.upcoming_shifts} ${t("upcomingShiftsKept")}` : t("saved"));
       } catch (err) { e.target.checked = !want; adminMsg.textContent = { cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err); }
     } }), h("span", {}, t("activeLabel"))),
@@ -2069,14 +2099,15 @@ function staffCard(s, ov) {
         adminMsg.textContent = { email_required: t("adminNeedsEmail"), invalid_email: t("invalidEmail"), email_taken: t("emailTaken"), cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err);
         if (err.body?.error === "email_required") email.focus();
       }
-    } }), h("span", {}, t("isAdminLabel"))),
+    } }), h("span", {}, t("isAdminLabel")))),
     adminMsg,
-    h("label", { class: "field" }, h("span", {}, t("hourlyRate")), rate, h("span", { class: "meta" }, t("adminOnlyField"))),
-    h("label", { class: "field" }, h("span", {}, t("printOrderLabel")), printOrder, h("span", { class: "meta" }, t("printOrderHelp"))),
-    h("label", { class: "field" }, h("span", {}, t("maxWeeklyHours")), maxHours, h("span", { class: "meta" }, t("maxWeeklyHoursHelp"))),
-    h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp"))),
-    roleRateInputs.length > 1 ? h("div", { class: "field" }, h("span", {}, t("rateByRole")), roleRateInputs.map((x) =>
-      h("label", { class: "role-rate" }, h("span", {}, `${roleIcon(x.ro)} ${roleName(x.ro, s.sex)}`), x.input))) : null,
+    h("div", { class: "field" }, h("span", {}, `${t("hourlyRate")} · ${t("adminOnlyField")}`),
+      h("div", { class: "rate-line" },
+        h("label", { class: "rate-item" }, h("small", {}, roleRateInputs.length > 1 ? t("generalRateShort") : t("hourlyRateShort")), rate),
+        roleRateInputs.length > 1 ? roleRateInputs.map((x) => h("label", { class: "rate-item" }, h("small", {}, `${roleIcon(x.ro)} ${roleName(x.ro, s.sex)}`), x.input)) : null)),
+    h("div", { class: "form-row r2" },
+      h("label", { class: "field" }, h("span", {}, t("printOrderLabel")), printOrder, h("span", { class: "meta" }, t("printOrderHelp"))),
+      h("label", { class: "field" }, h("span", {}, t("sinLabel")), sinInput, h("span", { class: "meta" }, t("sinHelp")))),
     photoRow,
     h("div", { class: "field" }, h("span", {}, t("colour")), h("div", { class: "colour-row" }, dot, picker), swatches));
 
@@ -2165,10 +2196,11 @@ function staffCard(s, ov) {
     dlg.addEventListener("close", () => { s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };
+  let activeChanged = false;
   const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
     h("span", { class: "who-row" }, summaryAvatar, nameEl), iconBlock,
     h("span", { class: "inactive-badge badge" }, t("inactive")),
-    s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : h("span", { class: "meta" }, s.email ?? ""));
+    s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : null);
   return rowEl;
 }
 

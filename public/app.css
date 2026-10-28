@@ -590,3 +590,29 @@ dialog.wide { width: min(860px, calc(100vw - 24px)); }
 .chip-btn[aria-pressed="true"] { background: var(--brand, #da291c); border-color: var(--brand, #da291c); color: #fff; }
 .skills-box:not([hidden]) { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .4rem; }
 .skills-box > h4, .skills-box > p { grid-column: 1 / -1; margin: 0; }
+
+/* ---------- Employee dialog layout ---------- */
+.form-row { display: grid; gap: .7rem; }
+@media (min-width: 700px) { .form-row.r2 { grid-template-columns: 1fr 1fr; } .form-row.r3 { grid-template-columns: 1fr 1fr auto; align-items: start; } }
+.radio-group { display: flex; flex-wrap: wrap; gap: .3rem .5rem; align-items: center; min-height: 44px; }
+.radio { display: inline-flex; align-items: center; gap: .35rem; padding: .35rem .7rem; border: 1px solid var(--line, #c9c4bc); border-radius: 999px; background: #fff; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.radio input { width: auto; min-height: 0; margin: 0; accent-color: var(--brand, #da291c); }
+.radio:has(input:checked) { border-color: var(--brand, #da291c); background: #fdeceb; color: var(--brand, #da291c); }
+.rate-line { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
+.rate-item { display: grid; gap: 2px; } .rate-item small { color: var(--muted, #666); font-weight: 600; font-size: .75rem; }
+.rate-item input { width: 6.5rem; min-height: 40px; }
+.staff-group { margin: 1rem 0 .4rem; font-size: 1rem; color: var(--brand, #da291c); } .staff-group.inactive-group { color: var(--muted, #666); }
+
+/* ---------- Dialog headers: red background, white text ---------- */
+.dlg-head, dialog .modal-body > h2:first-child { background: var(--brand, #da291c); color: #fff; }
+.dlg-head { margin: 0 -1rem; padding: .8rem 1rem; border-radius: 16px 16px 0 0; }
+.dlg-head h2 { color: #fff; }
+.dlg-top { border-bottom: 0; }
+dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem 18px; border-radius: 16px 16px 0 0; font-size: 1.1rem; }
+.dlg-head .btn, .dlg-head .icon-btn { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.7); color: #fff; }
+.dlg-head .btn.primary { background: #fff; color: var(--brand, #da291c); border-color: #fff; }
+.dlg-head .btn.danger { background: transparent; color: #fff; border-color: #fff; }
+.dlg-top .alert { margin-top: .4rem; }
+.dlg-tabs { background: #fff; }
+.staff-dialog, .shift-dialog, .ai-dialog { padding-top: 0 !important; }
+.rate-item input{width:9rem}
