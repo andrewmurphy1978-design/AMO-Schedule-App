@@ -512,3 +512,4 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 .seg-row .times{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
 @media print{.seg-line{font-size:8px}}
 .seg-head{display:grid;gap:2px}
+.skills-box[hidden]{display:none}

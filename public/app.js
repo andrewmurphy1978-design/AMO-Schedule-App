@@ -892,8 +892,12 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
 // ---------- my shifts ----------
 // ---------- time off ----------
 // Kitchen competencies of one employee: the posts they can work (a runner can work all of them).
+const KITCHEN_SKILL_ROLES = ["chef", "cook", "assistant cook"];
 function skillsBox(person) {
   const box = h("div", { class: "skills-box" });
+  const eligible = () => (person.roles ?? []).some((r) => KITCHEN_SKILL_ROLES.includes((state.roles.find((x) => x.id === r.role_id)?.name_en ?? "").toLowerCase()));
+  box.refresh = () => { box.hidden = !eligible(); };
+  box.refresh();
   const posts = state.posts.filter((p) => p.department_id === "kitchen");
   api(`/staff/${person.id}/skills`).then((have) => {
     const set = new Set(have);
@@ -1946,7 +1950,13 @@ function staffCard(s, ov) {
     const content = h("div", { class: "dlg-content" });
     const panes = {
       details: () => [details],
-      roles: () => [skillsBox(s), blocks],
+      roles: () => {
+        // the kitchen competencies only concern Chef, Cook and Assistant cook: shown/hidden as the roles change
+        const box = skillsBox(s);
+        const wrap = h("div", { class: "roles-tab" }, box, blocks);
+        wrap.addEventListener("change", () => { setTimeout(() => box.refresh(), 700); });
+        return [wrap];
+      },
       availability: () => [availabilityEditor(s.id)],
       timeoff: () => [staffTimeOff(s)],
     };
