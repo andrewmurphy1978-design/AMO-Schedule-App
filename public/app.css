@@ -516,3 +516,8 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 
 /* week view: vertical text always readable, name first */
 .vtl-bar.vertical .bar-text { min-height: 2.2em; }
+
+/* single-day coverage: one "icon present/required" chip per department in each half-hour cell */
+.vtl-cell .dept-count { display: inline-block; margin: 0 4px 0 0; font-size: .78rem; font-weight: 700; white-space: nowrap; }
+.vtl-cell .dept-count.short { color: #b4160b; } .vtl-cell .dept-count.over { color: #1c4fa0; } .vtl-cell .dept-count.ok { color: #1c6b30; }
+.vtl-cell:has(.dept-count){display:flex;align-items:center;justify-content:center;gap:2px;white-space:nowrap;overflow:hidden;padding:0 2px}

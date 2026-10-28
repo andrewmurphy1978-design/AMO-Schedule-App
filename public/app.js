@@ -550,9 +550,10 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
 
   const perDay = shown.map((day) => {
     // Each department resolves its own layers (base/season/special day); the counts are then added together.
-    const dayTargets = {}; let labels = [];
+    const dayTargets = {}; let labels = []; const deptTargets = {};
     for (const d of sel.departments) {
       const r = resolveForDate(targets.filter((x) => x.department_id === d), sets, day);
+      deptTargets[d] = r.targets;
       for (const [slot, n] of Object.entries(r.targets)) dayTargets[slot] = (dayTargets[slot] ?? 0) + n;
       labels = r.labels;
     }
@@ -562,7 +563,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
       .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
     const cost = payroll?.department.days.find((x) => x.date === day) ?? null;
-    return { day, wins, items, labels, openMin, closeMin, cost };
+    return { day, wins, items, labels, openMin, closeMin, cost, deptTargets };
   });
 
   const starts = perDay.flatMap((d) => [...d.items.map((x) => Math.max(0, x.span.s)), ...d.wins.map((w) => w.from)]);
@@ -611,11 +612,20 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
     for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
 
-    const cells = buckets.map((b) => {
+    // Single day: present/required for each department with its icon in front (🍕 3/3 · 🚗 1/1).
+    const perDept = shown.length === 1 && sel.departments.length > 0 ? sel.departments.map((dep) => {
+      const slices = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) =>
+        shiftSlices(x).filter((sl) => sl.roles.some((r) => r.department_id === dep && !r.no_count)).map((sl) => ({ start_at: sl.a, end_at: sl.b })));
+      return { dep, wins: targetWindows(d.deptTargets[dep] ?? {}, d.openMin, d.closeMin, boundsOf(sel.restaurant)), buckets: coverage(slices, d.day, startMin, endMin) };
+    }) : null;
+    const cells = buckets.map((b, bi) => {
       const tg = targetAt(d.wins, b.t);
       const cls = tg === undefined ? "none" : b.count < tg ? "short" : b.count === tg ? "ok" : "over";
-      return h("div", { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title: `${fromMin(b.t)} — ${t("present")} ${b.count}${tg === undefined ? "" : ` / ${t("target")} ${tg}`}` },
-        tg === undefined ? String(b.count) : `${b.count}/${tg}`);
+      const lines = perDept ? perDept.map((pd) => ({ dep: pd.dep, n: pd.buckets[bi].count, tg: targetAt(pd.wins, b.t) })).filter((l) => l.n > 0 || l.tg !== undefined) : null;
+      const title = `${fromMin(b.t)} — ${t("present")} ${b.count}${tg === undefined ? "" : ` / ${t("target")} ${tg}`}${lines ? ` · ${lines.map((l) => `${t(`dept.${l.dep}`)} ${l.n}${l.tg === undefined ? "" : `/${l.tg}`}`).join(" · ")}` : ""}`;
+      return h("div", { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title },
+        lines && lines.length ? lines.map((l) => h("span", { class: `dept-count ${l.tg === undefined ? "" : l.n < l.tg ? "short" : l.n > l.tg ? "over" : "ok"}` }, `${deptIcon(l.dep)} ${l.n}${l.tg === undefined ? "" : `/${l.tg}`}`))
+          : (tg === undefined ? String(b.count) : `${b.count}/${tg}`));
     });
 
     const clipped = d.items.map((x) => ({ ...x, from: Math.max(x.span.s, startMin), to: Math.min(x.span.e, endMin) }));
@@ -742,7 +752,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     payrollBox,
     h("div", { class: "gaps" }, gapBox, postBox, extraBox),
     h("div", { class: "vtl-scroll" },
-      h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
+      h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
     h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
