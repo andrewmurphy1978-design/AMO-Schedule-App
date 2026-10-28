@@ -493,3 +493,12 @@ button.vtl-head.zoomable { position: sticky; top: 0; }
 .grid td.name .n1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .grid td.name .n2 { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-width: 130px; }
 @media print { .grid td.name .n1, .grid td.name .n2 { max-width: none; } }
+/* long last names are folded onto two lines (even a single long word): last name column ~ 8 characters wide */
+.grid td.name .name2 { max-width: none; }
+.grid td.name .n2 { max-width: 7.2em; overflow-wrap: anywhere; word-break: break-word; }
+.grid td.name .n1 { max-width: 9em; }
+@media print { .grid td.name .n2 { max-width: 7.2em; } .grid td.name .n1 { max-width: 9em; } }
+
+.grid td.name .n2 { max-width: 9ch; overflow-wrap: normal; word-break: normal; }
+.grid td.name .n1 { max-width: 12ch; }
+@media print { .grid td.name .n2 { max-width: 9ch; } .grid td.name .n1 { max-width: 12ch; } }

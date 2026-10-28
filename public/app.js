@@ -181,6 +181,9 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 });
 
 // ---------- schedule ----------
+// Long last names are folded so the name column stays narrow: a break opportunity after every 9 letters of a long word
+// ("Constantineau" -> "Constanti / neau"); hyphens and spaces already break lines ("Douville- / Bondu").
+const foldLast = (last) => last.split(/(?<=[-\s])/).map((seg) => (seg.length > 9 ? seg.match(/.{1,9}/gs).join("\u200b") : seg)).join("");
 // Time off requested (C/D) or approved (C/A) for the week shown; managers can answer pending requests right here.
 function weekTimeOffPanel(data) {
   const list = data.time_off ?? [];
@@ -446,7 +449,7 @@ async function renderSchedule() {
         h("span", { class: "print-only print-date" }, fmt(d, { weekday: "short", day: "numeric", month: "short" })))), data.hours ? h("th", { class: "total" }, t("total")) : null)),
     h("tbody", {}, rows.length ? rows.map(([id, name]) =>
       h("tr", { class: data.shifts.some((s) => s.staff_id === id) || (data.elsewhere ?? []).some((e) => e.staff_id === id) ? "" : "noshift" }, h("td", { class: "name", title: name }, avatar(id, name, meta.get(id)?.color, meta.get(id)?.photo_v, 36),
-        h("span", { class: "name2" }, h("span", { class: "n1" }, parts.get(id)?.first ?? name), parts.get(id)?.last ? h("span", { class: "n2" }, parts.get(id).last) : null)), days.map((d) =>
+        h("span", { class: "name2" }, h("span", { class: "n1" }, parts.get(id)?.first ?? name), parts.get(id)?.last ? h("span", { class: "n2" }, foldLast(parts.get(id).last)) : null)), days.map((d) =>
         h("td", {},
           offAt(id, d) ? offChip(offAt(id, d)) : null,
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
