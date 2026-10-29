@@ -870,10 +870,10 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
 
   const tlSection = h("section", { class: "timeline" },
     h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(shown[0], { weekday: "long", day: "numeric", month: "long" })}`),
-    shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     zoomBar,
     dayTabs,
     h("div", { class: "gaps" }, gapBox, postBox, extraBox),
+    shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     h("div", { class: "vtl-scroll" },
       h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
