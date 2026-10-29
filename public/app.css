@@ -636,3 +636,4 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .token-reveal{background:#fff8e1;border-color:#e0c96a}.token-reveal input{font-family:ui-monospace,monospace;width:100%}.code{background:#f1efeb;border-radius:8px;padding:.6rem .8rem;overflow-x:auto;font-size:.85rem}
 .wh-events{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:.3rem}
 .publish-bar{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;margin:.5rem 0;padding:.5rem .8rem;border-radius:10px;font-size:.92rem}.publish-bar.draft{background:#fff3cd;border:1px solid #e0c96a}.publish-bar.live{background:#e8f5e9;border:1px solid #a5d6a7}.publish-bar .btn{min-height:36px}.pay-week th,.pay-week td{border-top:2px solid #999}@media print{.publish-bar{display:none}}
+.dlg-lines{max-height:40vh;overflow:auto;padding-left:1.1rem;font-size:.9rem}

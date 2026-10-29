@@ -226,7 +226,7 @@ document.getElementById("lang-toggle").addEventListener("click", () => {
 });
 
 // A small confirmation screen (yes / no) that resolves true or false.
-function confirmDialog({ title, message, yes, no }) {
+function confirmDialog({ title, message, yes, no, lines }) {
   return new Promise((resolve) => {
     // its own dialog, so it can open on top of another dialog without replacing its content
     let dlg = document.getElementById("confirm-modal");
@@ -234,8 +234,8 @@ function confirmDialog({ title, message, yes, no }) {
     let answered = false;
     const answer = (v) => { if (answered) return; answered = true; resolve(v); dlg.close(); };
     dlg.replaceChildren(h("div", { class: "modal-body" },
-      h("h2", {}, title), h("p", {}, message),
-      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => answer(false) }, no), h("button", { class: "btn primary", type: "button", onClick: () => answer(true) }, yes))));
+      h("h2", {}, title), h("p", {}, message), lines?.length ? h("ul", { class: "dlg-lines" }, lines.slice(0, 12).map((l) => h("li", {}, l)), lines.length > 12 ? h("li", {}, `… +${lines.length - 12}`) : null) : null,
+      h("div", { class: "actions" }, no ? h("button", { class: "btn", type: "button", onClick: () => answer(false) }, no) : null, h("button", { class: "btn primary", type: "button", onClick: () => answer(true) }, yes))));
     dlg.addEventListener("close", () => { if (!answered) { answered = true; resolve(false); } }, { once: true });
     dlg.showModal();
   });
@@ -568,16 +568,24 @@ async function renderSchedule() {
   // Draft / published: new schedules are seen only by administrators and the managers of the department until published.
   const editableDepts = depts.filter((d, i) => datas[i].editable);
   const draftDepts = editableDepts.filter((d) => !datas[depts.indexOf(d)].published);
+  // Publishing is refused while somebody is booked twice; staffing gaps or surpluses only need a confirmation.
+  const tryPublish = async () => {
+    const conflicts = conflictLines(data);
+    if (conflicts.length) { await confirmDialog({ title: t("cannotPublishTitle"), message: t("fixConflictsFirst"), lines: conflicts, yes: t("ok") }); return; }
+    const w = renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).lines;
+    if ((w.gapLines.length || w.extraLines.length) && !(await confirmDialog({ title: t("publishBtn"), message: t("publishAnywayStaffing"), yes: t("publishNow"), no: t("cancel") }))) return;
+    await setPublished(draftDepts, true);
+  };
   const setPublished = async (list, published) => {
     try {
       await Promise.all(list.map((d) => api("/schedule/publish", { method: "POST", body: { restaurant_id: sel.restaurant, department_id: d, week: sel.week, published } })));
       toast(published ? t("publishedToast") : t("unpublishedToast")); render();
-    } catch (e) { toast(errorText(e)); }
+    } catch (e) { if (e.body?.error === "conflicts") await confirmDialog({ title: t("cannotPublishTitle"), message: t("fixConflictsFirst"), yes: t("ok") }); else toast(errorText(e)); }
   };
   const publishBar = editableDepts.length
     ? h("div", { class: `publish-bar ${draftDepts.length ? "draft" : "live"}` },
         h("span", {}, draftDepts.length ? `📝 ${t("draftState")}${editableDepts.length > 1 ? ` (${draftDepts.map((d) => t(`dept.${d}`)).join(", ")})` : ""} — ${t("draftHelp")}` : `✅ ${t("publishedState")}`),
-        draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: () => setPublished(draftDepts, true) }, t("publishBtn"))
+        draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: tryPublish }, t("publishBtn"))
           : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
     : datas.every((d) => !d.published) ? h("div", { class: "publish-bar draft" }, `📝 ${t("notPublishedYet")}`) : null;
   $app.replaceChildren(...[printHead, controls, subtabs, publishBar, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
@@ -873,6 +881,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
       h("span", {}, h("i", { style: "background:#93c5fd" }), t("legendOver")), h("span", {}, h("i", { style: "background:var(--line)" }), t("legendNone"))));
   tlSection.boxes = { gapBox, extraBox };
+  tlSection.lines = { gapLines, extraLines };
   return tlSection;
 }
 

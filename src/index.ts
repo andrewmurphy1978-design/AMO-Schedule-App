@@ -1949,6 +1949,16 @@ app.post("/api/schedule/publish", async (c) => {
   const b = await c.req.json<{ restaurant_id?: number; department_id?: string; week?: string; published?: boolean }>().catch(() => ({} as any));
   if (!b.restaurant_id || !b.department_id || !weekBounds(b.week ?? "") || typeof b.published !== "boolean") return c.json({ error: "bad_request" }, 400);
   if (!(await canManage(c.env.DB, me, b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
+  if (b.published) {
+    // Nobody may be booked twice at the same time (any restaurant, any department): fix the conflicts first.
+    const wb = weekBounds(b.week!)!;
+    const clash = await c.env.DB.prepare(
+      `SELECT count(*) AS n FROM shifts a JOIN roles ra ON ra.id = a.role_id
+       JOIN shifts b ON b.staff_id = a.staff_id AND b.id != a.id AND b.status = 'ok' AND a.start_at < b.end_at AND b.start_at < a.end_at
+       WHERE a.restaurant_id = ? AND ra.department_id = ? AND a.status = 'ok' AND a.start_at >= ? AND a.start_at < ?`,
+    ).bind(b.restaurant_id, b.department_id, wb.start, wb.end).first<{ n: number }>();
+    if (clash?.n) return c.json({ error: "conflicts", count: clash.n }, 409);
+  }
   if (b.published) await c.env.DB.prepare("INSERT OR REPLACE INTO schedule_publications (restaurant_id, department_id, week_start, published_at, published_by) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.week, Date.now(), me.id).run();
   else await c.env.DB.prepare("DELETE FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).run();
   emit(c, b.published ? "schedule.published" : "schedule.unpublished", async () => ({ restaurant_id: b.restaurant_id, department_id: b.department_id, week: b.week }));

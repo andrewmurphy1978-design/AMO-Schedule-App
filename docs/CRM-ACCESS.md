@@ -170,6 +170,7 @@ A schedule is one **restaurant + department + week (Monday)**. New schedules are
 (and API tokens, which act as administrators) can see their shifts. Employees do not see them in the schedule view, in "my shifts" or in their calendar feed until someone
 clicks **Publier** (or calls `POST /api/schedule/publish`). A shift follows the publication state of the department of its **main role**.
 Everything planned before this feature existed was marked published automatically. Taking a schedule back (`published:false`) hides it again.
+**Publishing is refused** with `409 {"error":"conflicts","count":n}` while anybody on that schedule is booked twice at the same time (any restaurant or department); fix the shifts first. (Staffing shortages/surpluses are only a warning in the browser; the API does not check them.) Unpublishing is always allowed.
 Webhooks (`shift.*`, `schedule.*`) are sent for drafts too (the CRM is an administrator-level reader); use `schedule.published` to know when employees can see a week.
 
 ## 7. Gaps / proposed work
