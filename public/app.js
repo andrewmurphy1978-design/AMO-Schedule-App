@@ -2114,7 +2114,7 @@ async function renderAdmin() {
   ] : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), specialHoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), specialHoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -2405,40 +2405,6 @@ function fromField() {
   return { input, node: h("label", { class: "field" }, h("span", {}, t("effectiveFrom")), input, h("span", { class: "meta" }, t("effectiveHelp"))) };
 }
 
-// Breakfast hours per weekday: while breakfast is served, the breakfast posts (eggs, back post) are the ones to cover in the kitchen.
-function breakfastPanel(ov) {
-  const st = { restaurant: ov.restaurants[0]?.id };
-  const box = h("section", { class: "panel" });
-  function draw() {
-    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
-    if (!resto) { box.replaceChildren(); return; }
-    const rows = Array.from({ length: 7 }, (_, i) => {
-      const cur = resto.breakfast_by_dow?.[i];
-      const on = h("input", { type: "checkbox", checked: !!cur, "aria-label": weekdayName(i) });
-      const from = timeField(cur?.start ?? resto.open_by_dow?.[i] ?? "07:00"), to = timeField(cur?.end ?? "11:00");
-      const sync = () => { from.hidden = to.hidden = !on.checked; };
-      on.addEventListener("change", sync); sync();
-      return { on, from, to };
-    });
-    const copyMonday = () => rows.slice(1).forEach((r) => { r.on.checked = rows[0].on.checked; r.from.value = rows[0].from.value; r.to.value = rows[0].to.value; r.on.dispatchEvent(new Event("change")); });
-    box.replaceChildren(h("h2", {}, mealWord()), h("p", { class: "meta" }, mealText(t("breakfastHelp"))),
-      h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
-      h("div", { class: "hours-table" }, rows.map((r, i) => h("div", { class: "hours-row" },
-        h("label", { class: "check" }, r.on, h("strong", {}, weekdayName(i))),
-        h("label", { class: "mini" }, h("span", {}, t("openTime")), r.from), h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.to)))),
-      h("div", { class: "actions" },
-        h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
-        h("button", { class: "btn primary", type: "button", onClick: async () => {
-          try {
-            await api(`/restaurants/${st.restaurant}/breakfast`, { method: "PUT", body: { days: rows.map((r) => (r.on.checked ? { start: r.from.value, end: r.to.value } : null)) } });
-            state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
-          } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
-        } }, t("save"))));
-  }
-  draw();
-  return box;
-}
-
 // Closed days (Christmas…) and special opening hours (Christmas Eve until 17:00, New Year's Day from 10:00).
 function specialHoursPanel(ov) {
   const st = { restaurant: ov.restaurants[0]?.id };
@@ -2455,10 +2421,13 @@ function specialHoursPanel(ov) {
     const yearly = h("input", { type: "checkbox" });
     const closed = h("input", { type: "checkbox", checked: true });
     const open = timeField("10:00"), close = timeField("17:00");
-    const hoursRow = h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("openTime")), open), h("label", { class: "field" }, h("span", {}, t("closeTime")), close));
+    const hoursRow = h("div", { class: "sh-inline" }, h("label", { class: "field" }, h("span", {}, t("openTime")), open), h("label", { class: "field" }, h("span", {}, t("closeTime")), close));
     const note = h("input", { maxLength: 80, placeholder: t("specialNote"), "aria-label": t("specialNote") });
     const all = h("input", { type: "checkbox" });
-    const sync = () => { hoursRow.hidden = closed.checked; }; closed.addEventListener("change", sync); sync();
+    const btnClosed = h("button", { type: "button", onClick: () => setMode(true) }, t("closedDay")), btnSpecial = h("button", { type: "button", onClick: () => setMode(false) }, t("specialHoursOption"));
+    const sync = () => { hoursRow.hidden = closed.checked; btnClosed.setAttribute("aria-pressed", String(closed.checked)); btnSpecial.setAttribute("aria-pressed", String(!closed.checked)); };
+    const setMode = (isClosed) => { closed.checked = isClosed; sync(); };
+    sync();
     const add = async (e) => {
       e.preventDefault();
       try {
@@ -2473,13 +2442,14 @@ function specialHoursPanel(ov) {
       list.length ? h("ul", { class: "sh-list" }, list.map((x) => h("li", {},
         h("span", {}, h("b", {}, fmt(x.date, { weekday: "short", day: "numeric", month: "long", ...(x.yearly ? {} : { year: "numeric" }) })), x.yearly ? ` · ${t("everyYear")}` : "", " — ", x.closed ? `⛔ ${t("closedDay")}` : `🕒 ${hm(x.open_time)}–${hm(x.close_time)}`, x.note ? ` · ${x.note}` : ""),
         h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete"))))) : h("p", { class: "meta" }, t("noSpecialHours")),
-      h("form", { class: "td-body", onSubmit: add },
-        h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), date), h("label", { class: "field" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate)),
-        h("div", { class: "td-times" }, h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek),
-        h("div", { class: "seg" }, [[true, t("closedDay")], [false, t("specialHoursOption")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(closed.checked === v), onClick: (e) => { closed.checked = v; sync(); e.target.parentElement.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String((i === 0) === v))); } }, l))),
-        hoursRow, note,
-        ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
-        h("div", { class: "actions" }, h("button", { class: "btn primary", type: "submit" }, t("add")))));
+      h("form", { class: "td-body sh-form", onSubmit: add },
+        // line 1: the dates and Closed
+        h("div", { class: "sh-line" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), date), h("label", { class: "field" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate),
+          h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek, h("div", { class: "seg" }, btnClosed)),
+        // line 2: special hours, description, all restaurants, Add
+        h("div", { class: "sh-line" }, h("div", { class: "seg" }, btnSpecial), hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
+          ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
+          h("button", { class: "btn primary", type: "submit" }, t("add")))));
   }
   draw();
   return box;
@@ -2495,7 +2465,7 @@ function defaultRatesPanel(ov) {
     const rows = roles.map((r) => ({ r, input: h("input", { type: "number", min: 0, max: 1000, step: "0.05", inputMode: "decimal", placeholder: t("sameAsGeneral"), value: fmtRate(d.roles[r.id]) }) }));
     box.replaceChildren(h("h2", {}, t("defaultRatesTitle")), h("p", { class: "meta" }, t("defaultRatesHelp")),
       h("label", { class: "field" }, h("span", {}, t("generalRate")), general),
-      h("div", { class: "hours-table" }, rows.map(({ r, input }) => h("div", { class: "hours-row" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), h("label", { class: "mini" }, h("span", {}, "$ / h"), input)))),
+      h("div", { class: "pair-grid" }, rows.map(({ r, input }) => h("label", { class: "pair-item" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), input))),
       h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
         try {
           const saved = await api("/admin/default-rates", { method: "PUT", body: { general: general.value, roles: Object.fromEntries(rows.map(({ r, input }) => [r.id, input.value])) } });
@@ -2506,51 +2476,70 @@ function defaultRatesPanel(ov) {
   return box;
 }
 
-// Minutes before opening that each role should arrive (default start of new shifts).
+// Minutes before opening that each role should arrive (default start of new shifts). Waiter and cook first, the other roles on demand.
 function preOpenPanel() {
   const box = h("section", { class: "panel" });
+  let more = false;
   api("/roles").then((roles) => {
-    const inputs = roles.map((r) => ({ r, input: h("input", { type: "number", min: 0, max: 180, step: 5, inputMode: "numeric", value: r.pre_open_minutes ?? 0 }) }));
-    box.replaceChildren(h("h2", {}, t("preOpenTitle")), h("p", { class: "meta" }, t("preOpenHelp")),
-      h("div", { class: "hours-table" }, inputs.map(({ r, input }) => h("div", { class: "hours-row" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), h("label", { class: "mini" }, h("span", {}, t("minutes")), input)))),
+    const inputs = roles.map((r) => ({ r, input: h("input", { type: "number", min: 0, max: 180, step: 5, inputMode: "numeric", value: r.pre_open_minutes ?? 0, "aria-label": `${roleName(r)} — ${t("minutes")}` }) }));
+    const main = (x) => /^(Waiter|Cook)\b/.test(x.r.name_en);
+    const item = ({ r, input }) => h("label", { class: "pair-item" }, h("strong", {}, `${roleIcon(r)} ${roleName(r)}`), input);
+    const draw = () => box.replaceChildren(h("h2", {}, t("preOpenTitle")), h("p", { class: "meta" }, t("preOpenHelp")),
+      h("div", { class: "pair-grid" }, inputs.filter(main).map(item)),
+      h("button", { class: "btn sm", type: "button", "aria-expanded": String(more), onClick: () => { more = !more; draw(); } }, more ? `− ${t("fewerRoles")}` : `+ ${t("moreRoles")}`),
+      more ? h("div", { class: "pair-grid", style: "margin-top:.6rem" }, inputs.filter((x) => !main(x)).map(item)) : null,
       h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
         try {
           for (const { r, input } of inputs) { const m = Number(input.value) || 0; if (m !== (r.pre_open_minutes ?? 0)) { await api(`/roles/${r.id}/pre-open`, { method: "PUT", body: { minutes: m } }); r.pre_open_minutes = m; } }
           state.roles = await api("/roles"); toast(t("saved"));
         } catch (e) { toast(errorText(e)); }
       } }, t("save"))));
+    draw();
   }).catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
   return box;
 }
 
-// Opening and closing time for every weekday of one restaurant.
+// Opening hours, breakfast and dinner start for every weekday of one restaurant (one line per day on desktop).
 function hoursPanel(ov) {
   const st = { restaurant: ov.restaurants[0]?.id };
   const box = h("section", { class: "panel" });
   function draw() {
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
     if (!resto) { box.replaceChildren(h("h2", {}, t("hoursTitle")), h("div", { class: "empty" }, t("noSchedules"))); return; }
-    const rows = Array.from({ length: 7 }, (_, i) => ({
-      open: timeField(resto.open_by_dow?.[i] ?? resto.open_time),
-      close: timeField(resto.close_by_dow?.[i] ?? resto.close_time),
-    }));
-    const copyMonday = () => rows.slice(1).forEach((r) => { r.open.value = rows[0].open.value; r.close.value = rows[0].close.value; });
+    const rows = Array.from({ length: 7 }, (_, i) => {
+      const bf = resto.breakfast_by_dow?.[i], dn = resto.dinner_by_dow?.[i];
+      const open = timeField(resto.open_by_dow?.[i] ?? resto.open_time), close = timeField(resto.close_by_dow?.[i] ?? resto.close_time);
+      const bfOn = h("input", { type: "checkbox", checked: !!bf, "aria-label": `${mealWord()} — ${weekdayName(i)}` }), bfEnd = timeField(bf?.end ?? "11:00");
+      const dnOn = h("input", { type: "checkbox", checked: !!dn, "aria-label": `${t("dinnerStarts")} — ${weekdayName(i)}` }), dnAt = timeField(dn ?? "17:00");
+      const sync = () => { bfEnd.hidden = !bfOn.checked; dnAt.hidden = !dnOn.checked; };
+      bfOn.addEventListener("change", sync); dnOn.addEventListener("change", sync); sync();
+      return { open, close, bfOn, bfEnd, dnOn, dnAt };
+    });
+    const copyMonday = () => rows.slice(1).forEach((r) => {
+      const m = rows[0]; r.open.value = m.open.value; r.close.value = m.close.value; r.bfOn.checked = m.bfOn.checked; r.bfEnd.value = m.bfEnd.value; r.dnOn.checked = m.dnOn.checked; r.dnAt.value = m.dnAt.value;
+      r.bfOn.dispatchEvent(new Event("change")); r.dnOn.dispatchEvent(new Event("change"));
+    });
     box.replaceChildren(
       h("h2", {}, t("hoursTitle")),
-      h("p", { class: "meta" }, t("hoursHelp")),
+      h("p", { class: "meta" }, `${t("hoursHelp")} ${mealText(t("breakfastHelpShort"))}`),
       h("label", { class: "field" }, h("span", {}, t("restaurant")),
         h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } },
           ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
-      h("div", { class: "hours-table" },
-        h("div", { class: "hours-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime"))),
-        rows.map((r, i) => h("div", { class: "hours-row" }, h("strong", {}, weekdayName(i)),
+      h("div", { class: "hrs-table" },
+        h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerStarts"))),
+        rows.map((r, i) => h("div", { class: "hrs-row" }, h("strong", {}, weekdayName(i)),
           h("label", { class: "mini" }, h("span", {}, t("openTime")), r.open),
-          h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.close)))),
+          h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.close),
+          h("label", { class: "check hrs-bf" }, r.bfOn, h("span", { class: "hrs-until" }, mealWord())),
+          h("div", { class: "mini" }, h("span", {}, t("breakfastUntil")), r.bfEnd),
+          h("div", { class: "mini dn" }, h("label", { class: "check" }, r.dnOn, h("span", { class: "hrs-until" }, t("dinnerStarts"))), r.dnAt)))),
       h("div", { class: "actions" },
         h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try {
-            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: rows.map((r) => r.open.value), close_times: rows.map((r) => r.close.value) } });
+            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: rows.map((r) => r.open.value), close_times: rows.map((r) => r.close.value), dinner_times: rows.map((r) => (r.dnOn.checked ? r.dnAt.value : null)) } });
+            // breakfast runs from opening time until the chosen time
+            await api(`/restaurants/${st.restaurant}/breakfast`, { method: "PUT", body: { days: rows.map((r) => (r.bfOn.checked ? { start: r.open.value, end: r.bfEnd.value } : null)) } });
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
           } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("save"))));

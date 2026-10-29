@@ -243,13 +243,14 @@ const requireAdmin = async (c: any, next: any) => {
 
 // Adds open_by_dow and close_by_dow (7 "HH:MM" values each, Monday..Sunday) to restaurant rows.
 async function withOpenHours<T extends { id: number; open_time: string; close_time: string }>(db: D1Database, rows: T[]) {
-  const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null }>();
+  const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time, dinner_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null; dinner_time: string | null }>();
   const bfRows = (await db.prepare("SELECT restaurant_id, dow, start_time, end_time FROM restaurant_breakfast").all<{ restaurant_id: number; dow: number; start_time: string; end_time: string }>()).results;
   const specials = (await db.prepare("SELECT id, restaurant_id, date, yearly, closed, open_time, close_time, note FROM restaurant_special_hours ORDER BY date").all<{ id: number; restaurant_id: number; date: string; yearly: number; closed: number; open_time: string | null; close_time: string | null; note: string | null }>()).results;
   return rows.map((r) => {
     const day = (d: number) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d);
     return {
       ...r,
+      dinner_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.dinner_time ?? null),
       special_hours: specials.filter((x) => x.restaurant_id === r.id).map((x) => ({ ...x, yearly: x.yearly === 1, closed: x.closed === 1 })),
       breakfast_by_dow: Array.from({ length: 7 }, (_, d) => { const b = bfRows.find((x) => x.restaurant_id === r.id && x.dow === d); return b ? { start: b.start_time, end: b.end_time } : null; }),
       open_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.open_time ?? r.open_time),
@@ -681,7 +682,7 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 // Legacy fields open_time / close_time set the same value for every day. Until-close shifts follow the closing time of their day.
 app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
-  const b = await c.req.json<{ open_times?: string[]; close_times?: string[]; open_time?: string; close_time?: string }>();
+  const b = await c.req.json<{ open_times?: string[]; close_times?: string[]; dinner_times?: (string | null)[]; open_time?: string; close_time?: string }>();
   if (!id) return c.json({ error: "bad_id" }, 400);
   const current = await c.env.DB.prepare("SELECT id, open_time, close_time FROM restaurants WHERE id = ?").bind(id).first<{ id: number; open_time: string; close_time: string }>();
   if (!current) return c.json({ error: "not_found" }, 404);
@@ -690,11 +691,14 @@ app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
   const closes = b.close_times ?? (b.close_time ? Array(7).fill(b.close_time) : existing.close_by_dow);
   const valid = (a: unknown): a is string[] => Array.isArray(a) && a.length === 7 && a.every((x) => typeof x === "string" && TIME_RE.test(x));
   if (!valid(opens) || !valid(closes) || opens.some((o, d) => o >= closes[d])) return c.json({ error: "invalid_times" }, 400);
+  // dinner start per weekday (null = none); kept as it is when the caller does not send it
+  const dinners = b.dinner_times ?? existing.dinner_by_dow;
+  if (!Array.isArray(dinners) || dinners.length !== 7 || dinners.some((x, d) => x != null && (typeof x !== "string" || !TIME_RE.test(x) || x < opens[d] || x >= closes[d]))) return c.json({ error: "invalid_times" }, 400);
   const db = c.env.DB;
   await db.batch([
     db.prepare("UPDATE restaurants SET open_time = ?, close_time = ? WHERE id = ?").bind(opens[0], closes[0], id),
     db.prepare("DELETE FROM restaurant_open_hours WHERE restaurant_id = ?").bind(id),
-    ...opens.map((o, d) => db.prepare("INSERT INTO restaurant_open_hours (restaurant_id, dow, open_time, close_time) VALUES (?, ?, ?, ?)").bind(id, d, o, closes[d])),
+    ...opens.map((o, d) => db.prepare("INSERT INTO restaurant_open_hours (restaurant_id, dow, open_time, close_time, dinner_time) VALUES (?, ?, ?, ?, ?)").bind(id, d, o, closes[d], dinners[d] ?? null)),
     // 'F' shifts end at the closing time of their weekday (only when the shift starts before closing).
     ...closes.map((cl, d) =>
       db.prepare(
