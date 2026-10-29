@@ -1461,6 +1461,35 @@ function aiScheduleDialog({ restaurantId, departments, currentWeek }) {
   setup();
 }
 
+// ---- leave requests, shared by Administration → Demandes de congé and the employee dialog ----
+// Dates: desktop "26 octobre" (both years when it spans two), mobile short with the year only on the second date.
+function leaveDates(r) {
+  const twoYears = r.start_date.slice(0, 4) !== r.end_date.slice(0, 4);
+  const tail = r.start_time ? ` · ${r.start_time}–${r.end_time}` : "";
+  if (mqDesktop.matches) {
+    const d = (x, y) => fmt(x, { day: "numeric", month: "long", ...(y ? { year: "numeric" } : {}) });
+    return (r.start_date === r.end_date ? d(r.start_date, false) : `${d(r.start_date, twoYears)} → ${d(r.end_date, twoYears)}`) + tail;
+  }
+  const m = (x, y) => fmt(x, { weekday: "short", day: "numeric", month: "short", ...(y ? { year: "numeric" } : {}) });
+  return (r.start_date === r.end_date ? m(r.start_date, false) : `${m(r.start_date, false)} → ${m(r.end_date, twoYears)}`) + tail;
+}
+const leaveStatusText = (st) => ({ requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") }[st] ?? st);
+// One request on one line: [name] dates · status · note, buttons at the right (columns line up from row to row).
+function leaveRow(r, { name, actions }) {
+  const note = [r.note, r.decision_note].filter(Boolean).join(" · ");
+  return h("div", { class: "cov-row leave-row" },
+    h("div", { class: `leave-main ${name ? "with-name" : ""}` }, name ? h("b", { class: "lv-name" }, name) : null, h("span", { class: "lv-dates" }, leaveDates(r)),
+      h("span", { class: `leave-status ${r.status}` }, leaveStatusText(r.status)), note ? h("span", { class: "meta lv-note" }, note) : null),
+    actions);
+}
+// Sub-cards "À traiter / Accordé / Refusé".
+function leaveGroups(rows, makeRow) {
+  return [["requested", t("toAnswer")], ["approved", t("grantedWord")], ["denied", t("declinedWord")]].map(([st, title]) => {
+    const list = rows.filter((r) => r.status === st);
+    return h("div", { class: "leave-group" }, h("h3", {}, `${title} (${list.length})`), list.length ? list.map(makeRow) : h("p", { class: "meta" }, t("nothingToReview")));
+  });
+}
+
 // Time off of one employee, inside the employee dialog: list with approve / decline / withdraw, and a quick "add leave".
 function staffTimeOff(person) {
   const box = h("div", {});
@@ -1472,19 +1501,12 @@ function staffTimeOff(person) {
     const ts = timeField("14:00"), te = timeField("21:00");
     const timeBox = h("div", { class: "time-pair", hidden: true }, h("label", { class: "field" }, h("span", {}, t("start")), ts), h("label", { class: "field" }, h("span", {}, t("end")), te));
     allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
-    const label = { requested: t("offRequested"), approved: t("offApproved"), denied: t("offDenied") };
-    const dates = (r) => (r.start_date === r.end_date ? longDate(r.start_date) : `${longDate(r.start_date)} → ${longDate(r.end_date)}`) + (r.start_time ? ` · ${r.start_time}–${r.end_time}` : "");
     const act = async (fn) => { try { await fn(); load(); } catch (e) { toast(errorText(e)); } };
     box.replaceChildren(
-      rows.length ? rows.map((r) => h("div", { class: "cov-row avail-row" },
-        h("div", { class: "avail-text" },
-          h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
-          h("div", { class: "meta" }, `${label[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`)),
-        h("div", { class: "row-icons" },
-          r.status !== "approved" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("approve"), "aria-label": t("approve"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, "✅") : null,
-          r.status !== "denied" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("deny"), "aria-label": t("deny"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, "❌") : null,
-          h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { if ((await ask(t("confirmCancelOff")))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️"))))
-        : h("p", { class: "meta" }, t("noTimeOff")),
+      ...leaveGroups(rows, (r) => leaveRow(r, { actions: h("div", { class: "row-icons" },
+        r.status !== "approved" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("approve"), "aria-label": t("approve"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, "✅") : null,
+        r.status !== "denied" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("deny"), "aria-label": t("deny"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, "❌") : null,
+        h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { if ((await ask(t("confirmCancelOff")))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️")) })),
       h("h4", {}, t("addLeaveFor")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
         h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))),
@@ -1594,31 +1616,11 @@ async function timeOffNodes(part = "mine") {
       toast(res.shifts_on_those_days ? `${t("saved")} — ⚠ ${res.shifts_on_those_days} ${t("shiftsOnThoseDays")}` : t("saved")); render();
     } catch (e) { toast(errorText(e)); }
   };
-  // Dates of a request: desktop "26 octobre" (both years when it spans two), mobile as before with the year only on the second date.
-  const reviewDates = (r) => {
-    const twoYears = r.start_date.slice(0, 4) !== r.end_date.slice(0, 4);
-    const tail = r.start_time ? ` · ${r.start_time}–${r.end_time}` : "";
-    if (mqDesktop.matches) {
-      const d = (x, y) => fmt(x, { day: "numeric", month: "long", ...(y ? { year: "numeric" } : {}) });
-      return (r.start_date === r.end_date ? d(r.start_date, false) : `${d(r.start_date, twoYears)} → ${d(r.end_date, twoYears)}`) + tail;
-    }
-    const m = (x, y) => fmt(x, { weekday: "short", day: "numeric", month: "short", ...(y ? { year: "numeric" } : {}) });
-    return (r.start_date === r.end_date ? m(r.start_date, false) : `${m(r.start_date, false)} → ${m(r.end_date, twoYears)}`) + tail;
-  };
-  const reviewRow = (r) => {
-    const actions = h("div", { class: "actions" },
-      r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
-      r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null);
-    return h("div", { class: "cov-row leave-row" },
-      h("div", { class: "leave-main" }, h("b", {}, r.staff_name), h("span", {}, reviewDates(r)), h("span", { class: `leave-status ${r.status}` }, statusText[r.status] ?? r.status), r.note ? h("span", { class: "meta" }, r.note) : null),
-      actions);
-  };
-  const reviewGroup = (status, title) => {
-    const rows = review.filter((r) => r.status === status);
-    return h("div", { class: "leave-group" }, h("h3", {}, `${title} (${rows.length})`), rows.length ? rows.map(reviewRow) : h("p", { class: "meta" }, t("nothingToReview")));
-  };
+  const reviewRow = (r) => leaveRow(r, { name: r.staff_name, actions: h("div", { class: "actions" },
+    r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
+    r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null) });
   const reviewBox = review.length || state.me.managed.length || state.me.me.is_admin ? h("section", { class: "panel" }, h("h2", {}, t("timeOffRequests")),
-    reviewGroup("requested", t("toAnswer")), reviewGroup("approved", t("grantedWord")), reviewGroup("denied", t("declinedWord"))) : null;
+    ...leaveGroups(review, reviewRow)) : null;
   // administrators decide in Administration → Congés; managers (no Administration access) keep the list here
   if (part === "review") return [reviewBox ?? h("p", { class: "meta" }, t("nothingToReview"))];
   return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);

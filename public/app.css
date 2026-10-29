@@ -779,3 +779,10 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .leave-status.approved{color:#166534;font-weight:600}.leave-status.denied{color:#b91c1c;font-weight:600}.leave-status.requested{color:#92400e;font-weight:600}
 @media (prefers-color-scheme:dark){.leave-status.approved{color:#86efac}.leave-status.denied{color:#fca5a5}.leave-status.requested{color:#fcd34d}}
 @media (min-width:900px){.leave-row{display:flex;align-items:center;gap:.8rem;padding:.5rem .8rem}.leave-row .leave-main{flex:1;flex-wrap:nowrap;align-items:center;gap:.9rem;min-width:0}.leave-row .actions{margin:0 0 0 auto;flex:none;display:flex;gap:.4rem}.leave-row .actions .btn{min-height:34px;padding:0 .8rem}}
+
+@media (min-width:900px){
+  .leave-main{display:grid;grid-template-columns:340px 150px 1fr;align-items:center;gap:.9rem}
+  .leave-main.with-name{grid-template-columns:130px 340px 150px 1fr}
+  .leave-row .leave-main{flex:1;min-width:0}.lv-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
+.leave-row .row-icons{display:flex;gap:.2rem}
