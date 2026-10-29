@@ -762,3 +762,13 @@ button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2
 button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2px;filter:brightness(.92)}.vtl-cell.editable{user-select:none;-webkit-user-select:none}
 .staff-pick{display:flex;gap:.4rem;align-items:stretch}.staff-pick select{flex:1;min-width:0}.staff-pick .btn{flex:none;padding:0 .8rem}
 @media (min-width:900px){.staff-dialog .dlg-tabs{flex-wrap:wrap;overflow:visible;gap:0}.staff-dialog .dlg-tabs button{padding:.5rem .6rem;font-size:.9rem}}
+@media (max-width:600px){.acc-tabs{flex-wrap:nowrap;overflow:visible;gap:0;justify-content:space-between}.acc-tabs button{flex:1 1 auto;padding:.55rem .3rem;font-size:.76rem;text-align:center;white-space:nowrap}}
+@media (min-width:900px){
+  .acc-form{grid-template-columns:1fr 1fr;gap:.6rem 1.2rem;align-items:start;max-width:720px}
+  .acc-form>h3{grid-column:1/-1;margin:0}
+  .acc-form>p.meta:first-of-type{align-self:center;margin:0;font-size:.95rem;color:var(--ink)}
+  .acc-form .acc-phone{margin:0}
+  .acc-form>.btn{grid-column:auto;min-height:40px}.acc-form .btn.primary{width:auto}
+  .acc-content input,.acc-content select{min-height:38px}
+  .acc-form .radio{min-height:38px;padding:.2rem .8rem}
+}

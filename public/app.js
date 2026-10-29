@@ -1635,17 +1635,17 @@ async function renderAccount() {
   // Mobile-first, tab-based screen (same tabs as the employee dialog, limited to what the employee may change).
   const profile = h("form", { class: "acc-form", onSubmit: save },
     h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
-    h("label", { class: "field" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
+    h("label", { class: "field acc-phone" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
     h("div", { class: "field" }, h("span", {}, t("language")), lang),
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
   const tabs = [
     ["profile", t("details"), () => [profile]],
-    ["daysoff", t("fixedDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
-    ["availability", t("availability"), () => [availabilityEditor(state.me.me.id, "times")]],
-    ["calendar", t("calendarTitle"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
-    ["payslips", t("myPayslips"), () => [slipsBox]],
+    ["daysoff", t("tabDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
+    ["availability", t("tabAvailability"), () => [availabilityEditor(state.me.me.id, "times")]],
+    ["calendar", t("tabCalendar"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
+    ["payslips", t("tabPayslips"), () => [slipsBox]],
   ];
   state.accountTab = tabs.some(([id]) => id === state.accountTab) ? state.accountTab : "profile";
   const bar = h("div", { class: "dlg-tabs acc-tabs", role: "tablist" });
