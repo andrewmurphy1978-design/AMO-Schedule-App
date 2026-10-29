@@ -718,3 +718,15 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .publish-bar select,.publish-bar input[type=checkbox]+span{color:#1f1f23}
 .publish-bar select{background:#fff;border-color:#c9c4bc}
 .publish-bar .btn.primary{color:#fff}
+
+/* dark mode: panels that were built with a fixed light background now follow the theme (their text is light in dark mode) */
+@media (prefers-color-scheme: dark) {
+  .cov-row, .slip, .plan-card, .chip-btn, .radio, .seg-row, .resto-cols .resto-block, .dropzone, .tw-slot, .tw-head, .ai-prompt, .dlg-tabs { background: var(--card); color: var(--ink); }
+  .cov-row.open { background: color-mix(in srgb, var(--brand) 14%, var(--card)); border-color: color-mix(in srgb, var(--brand) 50%, var(--line)); }
+  .cov-row { border-color: var(--line); }
+  .slip { border-color: var(--line); }
+  .radio:has(input:checked) { background: color-mix(in srgb, var(--brand) 20%, var(--card)); color: var(--ink); }
+  .tw-head.stat, .tw-head.spec { color: #1f1f23; }
+  .pay-total { background: color-mix(in srgb, var(--brand) 12%, var(--card)); }
+  .dropzone:hover, .dropzone:focus-visible, .dropzone.over { background: color-mix(in srgb, var(--brand) 16%, var(--card)); }
+}
