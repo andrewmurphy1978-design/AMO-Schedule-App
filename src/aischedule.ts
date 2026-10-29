@@ -14,7 +14,7 @@ export interface AiEmployee {
 }
 export interface AiContext {
   lang: "fr" | "en";
-  restaurant: { id: number; name: string; open_by_dow: string[]; close_by_dow: string[]; breakfast_by_dow: ({ start: string; end: string } | null)[] };
+  restaurant: { id: number; name: string; open_by_dow: string[]; close_by_dow: string[]; breakfast_by_dow: ({ start: string; end: string } | null)[]; closed_dates?: string[] };
   week: { start: string; days: string[] };
   departments: string[];
   overtime_hours: number;
@@ -40,6 +40,7 @@ Rules, in order of importance:
 5. Aim for each employee's "promised_hours" for the week (if any) without going over their maximum. Employees marked "is_new" have no history: give them a fair, reasonable first week.
 6. Use "current_week_shifts" as the starting point: keep the same people at the same hours on the same weekdays unless a rule above forces a change.
 7. Roles listed in "pre_open_minutes" start that many minutes before the restaurant opens. Shifts that run to closing use until_close=true and the closing time as "end".
+8. "open_by_dow" / "close_by_dow" already include this week's special hours. Never schedule anyone on a date listed in "restaurant.closed_dates" (the restaurant is closed).
 8. Kitchen: with 4 or more cooks present each principal post (subs, starters, pasta, pizza) needs its own competent person ("kitchen_posts"); with breakfast hours the breakfast posts (bf_eggs, bf_back) must be covered then.
 9. Respect the planner's extra instructions unless they break rules 1-3.
 Times are local, 24-hour. A shift never crosses midnight. In "summary" describe in 2-4 sentences what you did; in "concerns" list anything you could not satisfy (empty list if none). Write summary and concerns in the language given by "language".`;
@@ -79,6 +80,7 @@ export function checkProposal(ctx: AiContext, p: Proposal): { shifts: ProposedSh
     const emp = byId.get(s.staff_id);
     if (!emp) { dropped.push({ shift: s, reason: "unknown_employee" }); continue; }
     if (!emp.roles.some((r) => r.id === s.role_id)) { dropped.push({ shift: s, reason: "role_not_held" }); continue; }
+    if (ctx.restaurant.closed_dates?.includes(s.start_at.slice(0, 10))) { dropped.push({ shift: s, reason: "restaurant_closed" }); continue; }
     if (!weekDays.has(s.start_at.slice(0, 10)) || s.start_at >= s.end_at) { dropped.push({ shift: s, reason: "outside_week_or_invalid" }); continue; }
     if (Date.parse(`${s.end_at}:00Z`) - Date.parse(`${s.start_at}:00Z`) > 16 * 3_600_000) { dropped.push({ shift: s, reason: "too_long" }); continue; }
     kept.push(s);

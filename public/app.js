@@ -1,6 +1,6 @@
 import { splitName, joinName, shortNames, orderStaff } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
-import { postGaps, DEFAULT_BOUNDARIES, GRID_KEYS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
+import { postGaps, hoursFor, DEFAULT_BOUNDARIES, GRID_KEYS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
@@ -126,6 +126,11 @@ const hhmm = (iso) => iso.slice(11, 16);
 const closeOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.close_by_dow?.[dow] ?? r?.close_time ?? "22:00"; };
 const dowOf = (ymdStr) => (parseYmd(ymdStr).getDay() + 6) % 7;
 // Opening time for a weekday (0 = Monday ... 6 = Sunday).
+// Hours of one date: the weekly hours unless the day is closed or has special hours.
+const hoursOn = (restaurantId, day) => {
+  const r = state.restaurants.find((x) => x.id === restaurantId), dow = dowOf(day);
+  return hoursFor(r?.special_hours, day, openOf(restaurantId, dow), closeOf(restaurantId, dow));
+};
 const openOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.open_by_dow?.[dow] ?? r?.open_time ?? "07:00"; };
 const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
 const dayOf = (iso) => iso.slice(0, 10);
@@ -856,13 +861,13 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
       for (const [slot, n] of Object.entries(r.targets)) dayTargets[slot] = (dayTargets[slot] ?? 0) + n;
       labels = r.labels;
     }
-    const openMin = toMin(openOf(sel.restaurant, (parseYmd(day).getDay() + 6) % 7));
-    const closeMin = toMin(closeOf(sel.restaurant, dowOf(day)));
-    const wins = targetWindows(dayTargets, openMin, closeMin, boundsOf(sel.restaurant));
+    const hrs = hoursOn(sel.restaurant, day);
+    const openMin = toMin(hrs.open), closeMin = toMin(hrs.close);
+    const wins = hrs.closed ? [] : targetWindows(dayTargets, openMin, closeMin, boundsOf(sel.restaurant));
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
       .sort((a, b) => a.span.s - b.span.s || a.s.staff_name.localeCompare(b.s.staff_name, locale()));
     const cost = payroll?.department.days.find((x) => x.date === day) ?? null;
-    return { day, wins, items, labels, openMin, closeMin, cost, deptTargets };
+    return { day, wins, items, labels, openMin, closeMin, cost, deptTargets, hrs };
   });
 
   const starts = perDay.flatMap((d) => [...d.items.map((x) => Math.max(0, x.span.s)), ...d.wins.map((w) => w.from)]);
@@ -914,7 +919,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
     const perDept = shown.length === 1 && sel.departments.length > 0 ? sel.departments.map((dep) => {
       const slices = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) =>
         shiftSlices(x).filter((sl) => sl.roles.some((r) => r.department_id === dep && !r.no_count)).map((sl) => ({ start_at: sl.a, end_at: sl.b })));
-      return { dep, wins: targetWindows(d.deptTargets[dep] ?? {}, d.openMin, d.closeMin, boundsOf(sel.restaurant)), buckets: coverage(slices, d.day, startMin, endMin) };
+      return { dep, wins: d.hrs.closed ? [] : targetWindows(d.deptTargets[dep] ?? {}, d.openMin, d.closeMin, boundsOf(sel.restaurant)), buckets: coverage(slices, d.day, startMin, endMin) };
     }) : null;
     const cells = buckets.map((b, bi) => {
       const tg = targetAt(d.wins, b.t);
@@ -974,12 +979,13 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
           return h("div", { class: "vtl-costcell", style: `top:${i * ph}px;height:${ph}px`, title: `${(startMin / 60 + i) % 24}h` }, c > 0 ? money(c) : "");
         }))
       : null;
-    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin - lead), shade(d.openMin - lead, d.openMin, "vtl-setup", t("setupTime")), shade(d.closeMin, endMin), h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
+    return h("div", { class: `vtl-day ${hourly ? "with-cost" : ""}` }, shade(startMin, d.openMin - lead), shade(d.openMin - lead, d.openMin, "vtl-setup", t("setupTime")), shade(d.closeMin, endMin), d.hrs.closed ? h("div", { class: "vtl-closed vtl-closed-day", title: d.hrs.note ?? t("closedDay"), style: `top:0;height:${hours * ph}px` }, h("span", {}, `⛔ ${t("closedDay")}`)) : null, h("div", { class: "vtl-cov" }, cells), costCol, h("div", { class: "vtl-lanes" }, bars));
   });
 
   const heads = perDay.map((d) => {
     const kids = [fmt(d.day, { weekday: "short" }), h("small", {}, fmt(d.day, { day: "numeric", month: "short" })),
       d.labels.length ? h("span", { class: "tag" }, d.labels.join(" · ")) : null,
+      d.hrs.closed ? h("span", { class: "tag closed", title: d.hrs.note ?? "" }, `⛔ ${d.hrs.note || t("closedDay")}`) : d.hrs.special ? h("span", { class: "tag special", title: d.hrs.note ?? "" }, `🕒 ${hm(d.hrs.open)}–${hm(d.hrs.close)}`) : null,
       d.cost ? h("span", { class: "cost" }, money(d.cost.cents)) : null,
       // time off that day: C/D requested, C/A approved (first names, with the hours when only part of the day)
       ...(data.time_off ?? []).filter((o) => o.start_date <= d.day && o.end_date >= d.day).map((o) =>
@@ -1101,7 +1107,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
         h("div", {}, mine.map((r) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: g.roles.has(r.id), onChange: (e) => { e.target.checked ? g.roles.add(r.id) : g.roles.delete(r.id); } }), `${roleIcon(r)} ${roleName(r, person?.sex)}`))))),
       h("button", { class: "btn sm", type: "button", onClick: () => {
         const lastEnd = segs.length ? segs[segs.length - 1].to.value : start.value;
-        segs.push({ from: timeField(lastEnd), to: timeField(untilClose.checked ? closeOf(sel.restaurant, dowOf(date.value)) : end.value), roles: new Set() }); drawSegs();
+        segs.push({ from: timeField(lastEnd), to: timeField(untilClose.checked ? hoursOn(sel.restaurant, date.value).close : end.value), roles: new Set() }); drawSegs();
       } }, `+ ${t("addTimeRange")}`));
   };
   drawSegs();
@@ -1113,12 +1119,15 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const role = state.roles.find((r) => r.id === Number(roleSel.value));
     if (!role?.pre_open_minutes) return;
     const dow = (parseYmd(date.value).getDay() + 6) % 7;
-    const m = toMin(openOf(sel.restaurant, dow)) - role.pre_open_minutes;
+    const m = toMin(hoursOn(sel.restaurant, date.value).open) - role.pre_open_minutes;
     if (m >= 0) start.value = fromMin(m);
   }
   roleSel.addEventListener("change", applyPreOpen); date.addEventListener("change", applyPreOpen);
   applyPreOpen();
   const alertBox = h("div");
+  // warn (without blocking) when the date is a closed day
+  const closedNote = () => { if (hoursOn(sel.restaurant, date.value).closed) alertBox.replaceChildren(h("div", { class: "info", role: "status" }, `⛔ ${t("closedWarning")}`)); else if (alertBox.querySelector(".info")) alertBox.replaceChildren(); };
+  date.addEventListener("change", closedNote); closedNote();
   const nextDay = h("span", { class: "meta" });
   const syncNext = () => {
     end.disabled = untilClose.checked;
@@ -1127,7 +1136,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   start.addEventListener("input", syncNext); end.addEventListener("input", syncNext); untilClose.addEventListener("change", syncNext); syncNext();
 
   const payload = (force) => {
-    const endTime = untilClose.checked ? closeOf(sel.restaurant, dowOf(date.value)) : end.value;
+    const endTime = untilClose.checked ? hoursOn(sel.restaurant, date.value).close : end.value;
     const endDate = endTime <= start.value ? addDays(date.value, 1) : date.value;
     return {
       staff_id: Number(staffSel.value), restaurant_id: sel.restaurant, role_id: Number(roleSel.value),
@@ -2045,7 +2054,7 @@ async function renderAdmin() {
   ] : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), specialHoursPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -2365,6 +2374,47 @@ function breakfastPanel(ov) {
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
           } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("save"))));
+  }
+  draw();
+  return box;
+}
+
+// Closed days (Christmas…) and special opening hours (Christmas Eve until 17:00, New Year's Day from 10:00).
+function specialHoursPanel(ov) {
+  const st = { restaurant: ov.restaurants[0]?.id };
+  const box = h("section", { class: "panel" });
+  const reload = async () => { state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); draw(); };
+  function draw() {
+    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
+    if (!resto) { box.replaceChildren(); return; }
+    const date = h("input", { type: "date", required: true, "aria-label": t("date") });
+    const yearly = h("input", { type: "checkbox" });
+    const closed = h("input", { type: "checkbox", checked: true });
+    const open = timeField("10:00"), close = timeField("17:00");
+    const hoursRow = h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("openTime")), open), h("label", { class: "field" }, h("span", {}, t("closeTime")), close));
+    const note = h("input", { maxLength: 80, placeholder: t("specialNote"), "aria-label": t("specialNote") });
+    const all = h("input", { type: "checkbox" });
+    const sync = () => { hoursRow.hidden = closed.checked; }; closed.addEventListener("change", sync); sync();
+    const add = async (e) => {
+      e.preventDefault();
+      try {
+        for (const r of all.checked ? ov.restaurants : [resto])
+          await api(`/restaurants/${r.id}/special-hours`, { method: "POST", body: { date: date.value, yearly: yearly.checked, closed: closed.checked, open_time: open.value, close_time: close.value, note: note.value } });
+        toast(t("saved")); await reload();
+      } catch (err) { toast(err.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(err)); }
+    };
+    const list = resto.special_hours ?? [];
+    box.replaceChildren(h("h2", {}, t("specialHoursTitle")), h("p", { class: "meta" }, t("specialHoursHelp")),
+      h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+      list.length ? h("ul", { class: "sh-list" }, list.map((x) => h("li", {},
+        h("span", {}, h("b", {}, fmt(x.date, { weekday: "short", day: "numeric", month: "long", ...(x.yearly ? {} : { year: "numeric" }) })), x.yearly ? ` · ${t("everyYear")}` : "", " — ", x.closed ? `⛔ ${t("closedDay")}` : `🕒 ${hm(x.open_time)}–${hm(x.close_time)}`, x.note ? ` · ${x.note}` : ""),
+        h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete"))))) : h("p", { class: "meta" }, t("noSpecialHours")),
+      h("form", { class: "td-body", onSubmit: add },
+        h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("date")), date), h("label", { class: "check" }, yearly, h("span", {}, t("everyYear")))),
+        h("div", { class: "seg" }, [[true, t("closedDay")], [false, t("specialHoursOption")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(closed.checked === v), onClick: (e) => { closed.checked = v; sync(); e.target.parentElement.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String((i === 0) === v))); } }, l))),
+        hoursRow, note,
+        ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
+        h("div", { class: "actions" }, h("button", { class: "btn primary", type: "submit" }, t("add")))));
   }
   draw();
   return box;

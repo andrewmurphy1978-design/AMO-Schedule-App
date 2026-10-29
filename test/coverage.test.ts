@@ -187,3 +187,16 @@ test("AI schedule: the answer is parsed and checked against the facts given to t
   assert.ok(buildUserPrompt(ctx, "Pas de quart de nuit").includes("Pas de quart de nuit"));
   assert.ok(!buildUserPrompt(ctx, "").includes("phone"));
 });
+
+test("closed days and special hours override the weekly hours, an exact date beating a yearly one", async () => {
+  const { hoursFor } = await import("../public/coverage.js");
+  const sp = [
+    { date: "2025-12-24", yearly: true, closed: false, open_time: "11:00", close_time: "17:00", note: "Veille de Noël" },
+    { date: "2025-12-25", yearly: true, closed: true, open_time: null, close_time: null, note: "Noël" },
+    { date: "2027-12-24", yearly: false, closed: false, open_time: "11:00", close_time: "15:00", note: null },
+  ];
+  assert.deepEqual(hoursFor(sp, "2026-12-24", "11:00", "22:00"), { closed: false, open: "11:00", close: "17:00", note: "Veille de Noël", special: true });
+  assert.equal(hoursFor(sp, "2026-12-25", "11:00", "22:00").closed, true);
+  assert.equal(hoursFor(sp, "2027-12-24", "11:00", "22:00").close, "15:00");
+  assert.deepEqual(hoursFor(sp, "2026-12-26", "11:00", "22:00"), { closed: false, open: "11:00", close: "22:00", note: null, special: false });
+});

@@ -57,7 +57,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 |---|---|
 | Identity | `GET /me` (me, client, managed restaurants, roles) |
 | Employees | `GET /admin/overview` (A: staff, roles, managers, restaurants), `GET /staff` (M), `POST /staff` (A), `PUT /staff/:id` (A), `PUT /staff/:id/active\|admin\|wage\|sin\|limit\|planning` (A) |
-| Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast` (A) |
+| Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast` (A), `POST /restaurants/:id/special-hours`, `DELETE /restaurants/:id/special-hours/:hid` (A; closed days / special hours, also returned as `special_hours` by `GET /restaurants`) |
 | Visible schedules (admin) | `GET/PUT /staff/:id/view-access` `{custom, access:[{restaurant_id, department_id}]}`: which schedules an employee may look at (automatic = where they hold a role; custom = the ticked list). `GET /me` returns the effective `schedules` for non-administrators |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
 | Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=` (also `total_hours`, `gross_cents` = the caller's own gross pay for the week), `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
@@ -196,6 +196,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | **Closed days and special opening hours** per restaurant (`special_hours`, yearly or one date); the AI scheduler receives the week's effective hours and `closed_dates`; migration 0042. |
 | 2026-10-29 | **Staffing targets** are now fixed 30-minute intervals (slot = start time, e.g. `08:30`); `PUT /api/targets/range` sets/clears one department's target for a time range of one layer; `PUT /api/restaurants/:id/periods` removed; migration 0041. |
 | 2026-10-29 | **Draft / publish** schedules (per restaurant + department + week), `POST /api/schedule/publish`, events `schedule.published` / `schedule.unpublished`, migration 0037. New "Sommaire" tab in the Horaire screen. |
 | 2026-10-28 | **Webhooks** (Administration → Webhooks; signed `POST`s, retries; migration 0036). |

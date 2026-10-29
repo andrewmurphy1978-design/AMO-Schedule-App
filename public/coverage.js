@@ -170,3 +170,15 @@ function matchPosts(here, posts, can, missing) {
   };
   posts.forEach((p, pi) => { if (!place(pi, new Set())) missing.add(p.id); });
 }
+
+/**
+ * Opening hours of one date. `special` = [{ date, yearly, closed, open_time, close_time, note }]; an entry for the exact date wins over a
+ * yearly one (same month and day). Returns { closed, open, close, note, special } where open/close are the regular ones unless overridden.
+ */
+export function hoursFor(special, date, open, close) {
+  const list = special ?? [];
+  const x = list.find((e) => e.date === date) ?? list.find((e) => e.yearly && e.date.slice(5) === date.slice(5));
+  if (!x) return { closed: false, open, close, note: null, special: false };
+  if (x.closed) return { closed: true, open, close, note: x.note ?? null, special: true };
+  return { closed: false, open: x.open_time ?? open, close: x.close_time ?? close, note: x.note ?? null, special: true };
+}

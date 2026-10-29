@@ -8,7 +8,7 @@ import { parseSettings, validateSettingsPatch, type Settings } from "./settings.
 import { normalizePhone } from "./phone.ts";
 import { SYSTEM_PROMPT, buildUserPrompt, parseProposal, checkProposal, callClaude, type AiContext } from "./aischedule.ts";
 // @ts-ignore plain JS module shared with the browser
-import { DEFAULT_BOUNDARIES, GRID_KEYS } from "../public/coverage.js";
+import { DEFAULT_BOUNDARIES, GRID_KEYS, hoursFor } from "../public/coverage.js";
 // @ts-ignore plain JS module shared with the browser
 import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
@@ -245,10 +245,12 @@ const requireAdmin = async (c: any, next: any) => {
 async function withOpenHours<T extends { id: number; open_time: string; close_time: string }>(db: D1Database, rows: T[]) {
   const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null }>();
   const bfRows = (await db.prepare("SELECT restaurant_id, dow, start_time, end_time FROM restaurant_breakfast").all<{ restaurant_id: number; dow: number; start_time: string; end_time: string }>()).results;
+  const specials = (await db.prepare("SELECT id, restaurant_id, date, yearly, closed, open_time, close_time, note FROM restaurant_special_hours ORDER BY date").all<{ id: number; restaurant_id: number; date: string; yearly: number; closed: number; open_time: string | null; close_time: string | null; note: string | null }>()).results;
   return rows.map((r) => {
     const day = (d: number) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d);
     return {
       ...r,
+      special_hours: specials.filter((x) => x.restaurant_id === r.id).map((x) => ({ ...x, yearly: x.yearly === 1, closed: x.closed === 1 })),
       breakfast_by_dow: Array.from({ length: 7 }, (_, d) => { const b = bfRows.find((x) => x.restaurant_id === r.id && x.dow === d); return b ? { start: b.start_time, end: b.end_time } : null; }),
       open_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.open_time ?? r.open_time),
       close_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.close_time ?? r.close_time),
@@ -699,6 +701,8 @@ app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
            AND ((CAST(strftime('%w', substr(start_at, 1, 10)) AS INTEGER) + 6) % 7) = ?3`,
       ).bind(cl, id, d)),
   ]);
+  const specialDates = (await db.prepare("SELECT date FROM restaurant_special_hours WHERE restaurant_id = ?").bind(id).all<{ date: string }>()).results.map((x) => x.date);
+  if (specialDates.length) await syncUntilClose(db, id, specialDates); // special days keep their own closing time
   return c.json({ ok: true });
 });
 
@@ -740,6 +744,49 @@ app.put("/api/targets", async (c) => {
   }
   return c.json({ ok: true });
 });
+
+// Closed days and special opening hours (administrators). One entry per restaurant and date; saving again replaces it.
+app.post("/api/restaurants/:id/special-hours", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ date?: string; yearly?: boolean; closed?: boolean; open_time?: string; close_time?: string; note?: string }>();
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!DATE_RE2.test(b.date ?? "")) return c.json({ error: "invalid_date" }, 400);
+  if (!b.closed && (!TIME_RE.test(b.open_time ?? "") || !TIME_RE.test(b.close_time ?? "") || b.open_time! >= b.close_time!)) return c.json({ error: "invalid_times" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("INSERT OR REPLACE INTO restaurant_special_hours (restaurant_id, date, yearly, closed, open_time, close_time, note) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, b.date, b.yearly ? 1 : 0, b.closed ? 1 : 0, b.closed ? null : b.open_time, b.closed ? null : b.close_time, (b.note ?? "").trim().slice(0, 80) || null).run();
+  await syncUntilClose(c.env.DB, id, [b.date!]);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/restaurants/:id/special-hours/:hid", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id")), hid = intParam(c.req.param("hid"));
+  if (!id || !hid) return c.json({ error: "bad_id" }, 400);
+  const row = await c.env.DB.prepare("SELECT date, yearly FROM restaurant_special_hours WHERE id = ? AND restaurant_id = ?").bind(hid, id).first<{ date: string; yearly: number }>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("DELETE FROM restaurant_special_hours WHERE id = ?").bind(hid).run();
+  await syncUntilClose(c.env.DB, id, [row.date]);
+  return c.json({ ok: true });
+});
+
+// Until-close shifts follow the closing time of their day, special hours included. `dates` may be yearly: the occurrences of this and next year are refreshed.
+async function syncUntilClose(db: D1Database, restaurantId: number, dates: string[]) {
+  const rest = await db.prepare("SELECT id, open_time, close_time FROM restaurants WHERE id = ?").bind(restaurantId).first<{ id: number; open_time: string; close_time: string }>();
+  if (!rest) return;
+  const [r] = await withOpenHours(db, [rest]);
+  const year = new Date().getUTCFullYear();
+  const all = new Set<string>();
+  for (const d of dates) for (const y of [year, year + 1]) all.add(`${y}${d.slice(4)}`);
+  for (const d of dates) all.add(d);
+  const stmts: D1PreparedStatement[] = [];
+  for (const date of all) {
+    const dow = (new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7;
+    const hrs = hoursFor(r.special_hours, date, r.open_by_dow[dow], r.close_by_dow[dow]);
+    if (hrs.closed) continue;
+    stmts.push(db.prepare("UPDATE shifts SET end_at = ?1 || 'T' || ?2 WHERE restaurant_id = ?3 AND until_close = 1 AND substr(start_at, 1, 10) = ?1 AND substr(start_at, 12, 5) < ?2").bind(date, hrs.close, restaurantId));
+  }
+  if (stmts.length) await db.batch(stmts);
+}
 
 // Breakfast hours per weekday: days = 7 entries (Monday..Sunday), each { start, end } or null (no breakfast that day).
 app.put("/api/restaurants/:id/breakfast", requireAdmin, async (c) => {
@@ -1599,7 +1646,11 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
   const roles = (await rolesFor(db, c.get("me").client_id)).filter((r) => r.pre_open_minutes > 0) as { name_en: string; pre_open_minutes: number }[];
   return {
     lang,
-    restaurant: { id: rest.id, name: rest.name, open_by_dow: r.open_by_dow, close_by_dow: r.close_by_dow, breakfast_by_dow: r.breakfast_by_dow },
+    // hours of the days of this very week, special hours included
+    restaurant: { id: rest.id, name: rest.name, breakfast_by_dow: r.breakfast_by_dow,
+      open_by_dow: days.map((d, i) => hoursFor(r.special_hours, d, r.open_by_dow[i], r.close_by_dow[i]).open),
+      close_by_dow: days.map((d, i) => hoursFor(r.special_hours, d, r.open_by_dow[i], r.close_by_dow[i]).close),
+      closed_dates: days.filter((d, i) => hoursFor(r.special_hours, d, r.open_by_dow[i], r.close_by_dow[i]).closed) },
     week: { start: week, days }, departments, overtime_hours: settings.overtime_hours, period_boundaries: boundaries, targets,
     pre_open_minutes: Object.fromEntries(roles.map((x) => [x.name_en, x.pre_open_minutes])),
     employees,
