@@ -751,3 +751,11 @@ button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2
 .vtl-head .tag.closed{background:#fee2e2;color:#991b1b}.vtl-head .tag.special{background:#fef3c7;color:#92400e}
 @media (prefers-color-scheme:dark){.vtl-head .tag.closed{background:#451a1a;color:#fca5a5}.vtl-head .tag.special{background:#3b2a0a;color:#fcd34d}}
 .sh-list{list-style:none;padding:0;margin:.4rem 0;display:grid;gap:.3rem}.sh-list li{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.35rem .5rem;border:1px solid var(--line);border-radius:8px}
+/* target dialog: compact, header flush with the dialog edges */
+.target-dialog{padding:0 !important;gap:0;overflow-x:hidden}
+.target-dialog .dlg-top{margin:0;padding:0;border:0}
+.target-dialog .dlg-head{margin:0;padding:.55rem .9rem;border-radius:16px 16px 0 0}
+.target-dialog .td-body{padding:.55rem .9rem .7rem;gap:.4rem}
+.target-dialog select,.target-dialog input{min-height:38px;font-size:15px;padding-top:0;padding-bottom:0}
+.target-dialog .field{gap:.15rem}.target-dialog .field>span{font-size:.78rem}
+.td-times{gap:.5rem}.td-dept input{width:4rem}.target-dialog .meta{font-size:.78rem}
