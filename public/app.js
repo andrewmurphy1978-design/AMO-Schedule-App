@@ -563,7 +563,7 @@ async function renderSchedule() {
   const setTab = (v) => { state.scheduleTab = v; try { localStorage.setItem("scheduleTab", v); } catch { /* ignore */ } render(); };
   if (state.scheduleTab === "summary" && !payroll) state.scheduleTab = "coverage"; // the summary exists for administrators only
   const subtabs = h("div", { class: "subtabs", role: "tablist" },
-    ...[["coverage", t("coverageTab")], ["table", t("tableTab")], ...(payroll ? [["summary", t("summaryTab")]] : [])].map(([v, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.scheduleTab === v), onClick: () => setTab(v) }, l)), status);
+    ...[...(payroll ? [["summary", t("summaryTab")]] : []), ["coverage", t("coverageTab")], ["table", t("tableTab")]].map(([v, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.scheduleTab === v), onClick: () => setTab(v) }, l)), status);
   const onTable = state.scheduleTab === "table";
   // Draft / published: new schedules are seen only by administrators and the managers of the department until published.
   const editableDepts = depts.filter((d, i) => datas[i].editable);
