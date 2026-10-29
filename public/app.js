@@ -2076,8 +2076,10 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["timeoff", "adminTimeOff"], ["branding", "adminBranding"], ["api", "adminApi"], ["webhooks", "adminWebhooks"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"], ["targets", "adminTargets"]];
 state.adminSection = "restaurants";
+// the old Webhooks tab now lives with the API access
+const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
 
 async function renderAdmin() {
   const ov = await api("/admin/overview");
@@ -2117,16 +2119,15 @@ async function renderAdmin() {
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
     branding: () => [brandingPanel()],
-    api: () => [apiPanel()],
-    webhooks: () => [webhooksPanel()],
+    api: () => [apiPanel(), webhooksPanel()],
     clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
-    h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
-  $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[state.adminSection]())));
+    h("button", { type: "button", "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
+  $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
 }
 
 // ---- seasons / special days ----
