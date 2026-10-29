@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-ignore plain JS module shared with the browser
-import { postGaps, DEFAULT_BOUNDARIES, periodWindows, remapPeriods, validBoundaries, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses, shiftSpan, toMin } from "../public/coverage.js";
+import { postGaps, DEFAULT_BOUNDARIES, periodWindows, validBoundaries, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses, shiftSpan, toMin } from "../public/coverage.js";
 
 const sh = (a: string, b: string) => ({ start_at: a, end_at: b });
 const DAY = "2026-10-27";
@@ -15,32 +15,25 @@ test("override wins slot by slot, default fills the rest", () => {
   assert.deepEqual(resolveTargets(rows, 3), { "06:30": 2, "11:00": 4 });
 });
 
-test("periods run from opening to the first boundary, boundary to boundary, and the last one to closing", () => {
-  const t = { open: 2, "08:00": 3, "09:00": 3, "11:00": 5, "12:00": 6, "14:00": 3, "17:00": 4, "20:00": 2 };
+test("targets are per 30-minute interval, clipped to the opening hours", () => {
+  const t = { "06:30": 2, "07:00": 2, "07:30": 2, "11:00": 5, "11:30": 5, "12:00": 6, "21:30": 2 };
   const wins = targetWindows(t, toMin("06:30"), toMin("22:00"));
   assert.equal(targetAt(wins, toMin("06:29")), undefined);
   assert.equal(targetAt(wins, toMin("06:30")), 2);
   assert.equal(targetAt(wins, toMin("07:59")), 2);
-  assert.equal(targetAt(wins, toMin("11:30")), 5);
+  assert.equal(targetAt(wins, toMin("08:00")), undefined);
+  assert.equal(targetAt(wins, toMin("11:45")), 5);
   assert.equal(targetAt(wins, toMin("12:00")), 6);
-  assert.equal(targetAt(wins, toMin("16:59")), 3);
-  assert.equal(targetAt(wins, toMin("19:59")), 4);
   assert.equal(targetAt(wins, toMin("21:59")), 2);
   assert.equal(targetAt(wins, toMin("22:00")), undefined);
 });
 
-test("periods are clipped to the opening hours of the day", () => {
-  // opens at 11:00: the open period starts at 11:00 and the earlier periods disappear
-  const w = periodWindows(DEFAULT_BOUNDARIES, toMin("11:00"), toMin("21:00"));
-  assert.deepEqual(w.map((x: any) => [x.key, x.from / 60, x.to / 60]), [["11:00", 11, 12], ["12:00", 12, 14], ["14:00", 14, 17], ["17:00", 17, 20], ["20:00", 20, 21]]);
-  // opens at 11:00 and the first period "open" lasts until 11:00 -> dropped; closes before the last boundary
-  assert.deepEqual(periodWindows(DEFAULT_BOUNDARIES, toMin("07:00"), toMin("19:00")).map((x: any) => x.key), ["open", "08:00", "09:00", "11:00", "12:00", "14:00", "17:00"]);
-});
-
-test("changing boundaries keeps the values of the old period that covered each new period's start", () => {
-  const old = { open: 1, "08:00": 2, "09:00": 3, "11:00": 4, "12:00": 4, "14:00": 2, "17:00": 5, "20:00": 3 };
-  assert.deepEqual(remapPeriods(DEFAULT_BOUNDARIES, ["10:00", "15:00", "20:00"], old), { open: 1, "10:00": 3, "15:00": 2, "20:00": 3 });
-  assert.deepEqual(remapPeriods(["09:00"], DEFAULT_BOUNDARIES, { open: 1, "09:00": 5 }).open, 1);
+test("intervals before opening and after closing disappear", () => {
+  const w = periodWindows(DEFAULT_BOUNDARIES, toMin("11:00"), toMin("12:30"));
+  assert.deepEqual(w.map((x: any) => [x.key, x.from / 60, x.to / 60]), [["11:00", 11, 11.5], ["11:30", 11.5, 12], ["12:00", 12, 12.5]]);
+  assert.equal(DEFAULT_BOUNDARIES.length, 48);
+  // an opening time between two intervals clips the first one
+  assert.deepEqual(periodWindows(DEFAULT_BOUNDARIES, toMin("10:45"), toMin("11:30")).map((x: any) => [x.key, x.from, x.to]), [["10:30", 645, 660], ["11:00", 660, 690]]);
 });
 
 test("boundary lists must be 1-10 increasing times", () => {

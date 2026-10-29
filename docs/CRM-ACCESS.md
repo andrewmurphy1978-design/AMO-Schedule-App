@@ -57,11 +57,11 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 |---|---|
 | Identity | `GET /me` (me, client, managed restaurants, roles) |
 | Employees | `GET /admin/overview` (A: staff, roles, managers, restaurants), `GET /staff` (M), `POST /staff` (A), `PUT /staff/:id` (A), `PUT /staff/:id/active\|admin\|wage\|sin\|limit\|planning` (A) |
-| Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast\|periods` (A) |
+| Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast` (A) |
 | Visible schedules (admin) | `GET/PUT /staff/:id/view-access` `{custom, access:[{restaurant_id, department_id}]}`: which schedules an employee may look at (automatic = where they hold a role; custom = the ticked list). `GET /me` returns the effective `schedules` for non-administrators |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
 | Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=` (also `total_hours`, `gross_cents` = the caller's own gross pay for the week), `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
-| Targets | `GET/PUT /targets`, `GET/POST/PUT/DELETE /target-sets` |
+| Targets | `GET/PUT /targets`, `PUT /targets/range`, `GET/POST/PUT/DELETE /target-sets` |
 | Time off / availability | `/time-off*`, `/availability*` |
 | Attendance file (admin) | `GET /staff/:id/attendance` → `{ absences, incidents, last_12_months }`; absences have `kind` = `announced` (declared before the shift began) / `late` (after it began) / `by_manager`, plus `reason`, `outcome` (open, filled, cancelled, shift_removed); incidents are no-show / late arrival / early departure entered by a manager (`POST /admin/incidents`: administrators and the manager of that employee's department; reading and deleting them is administrators only) |
 | Absences / sick calls | `POST /shifts/:id/sick` `{reason?: sick\|medical\|family\|transport\|personal\|other, note?}` (the reason is shown only to managers/administrators and is not sent in webhooks), `GET /coverage`, `/coverage/:id/*` |
@@ -196,6 +196,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | **Staffing targets** are now fixed 30-minute intervals (slot = start time, e.g. `08:30`); `PUT /api/targets/range` sets/clears one department's target for a time range of one layer; `PUT /api/restaurants/:id/periods` removed; migration 0041. |
 | 2026-10-29 | **Draft / publish** schedules (per restaurant + department + week), `POST /api/schedule/publish`, events `schedule.published` / `schedule.unpublished`, migration 0037. New "Sommaire" tab in the Horaire screen. |
 | 2026-10-28 | **Webhooks** (Administration → Webhooks; signed `POST`s, retries; migration 0036). |
 | 2026-10-28 | **API tokens** (Administration → Accès API; `Authorization: Bearer ams_...`; read/write; migration 0035). |

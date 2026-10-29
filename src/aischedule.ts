@@ -36,7 +36,7 @@ Rules, in order of importance:
 1. Only use employees and roles from "employees"; an employee can only work a role listed for them.
 2. Never schedule someone during their time off (requested or approved), their unavailability, or on a fixed day off.
 3. Never exceed "max_weekly_hours" of an employee, and keep everyone at or under "overtime_hours" per week. No two shifts of the same person may overlap, nor overlap "already_planned_elsewhere".
-4. Meet the staffing "targets" (headcount per period for each date and department) as closely as possible, counting each shift once for its role's department. Periods run from opening to the first boundary, boundary to boundary, and the last to closing.
+4. Meet the staffing "targets" (headcount per period for each date and department) as closely as possible, counting each shift once for its role's department. Targets are given per 30-minute interval, keyed by its start time, within opening hours.
 5. Aim for each employee's "promised_hours" for the week (if any) without going over their maximum. Employees marked "is_new" have no history: give them a fair, reasonable first week.
 6. Use "current_week_shifts" as the starting point: keep the same people at the same hours on the same weekdays unless a rule above forces a change.
 7. Roles listed in "pre_open_minutes" start that many minutes before the restaurant opens. Shifts that run to closing use until_close=true and the closing time as "end".

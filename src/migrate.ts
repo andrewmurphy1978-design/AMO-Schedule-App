@@ -40,6 +40,7 @@ import m0037 from "../migrations/0037_publications.sql";
 import m0038 from "../migrations/0038_absence_reason.sql";
 import m0039 from "../migrations/0039_absences.sql";
 import m0040 from "../migrations/0040_view_access.sql";
+import m0041 from "../migrations/0041_half_hour_targets.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -82,6 +83,7 @@ const MIGRATIONS: [string, string][] = [
   ["0038_absence_reason", m0038],
   ["0039_absences", m0039],
   ["0040_view_access", m0040],
+  ["0041_half_hour_targets", m0041],
 ];
 
 const statements = (sql: string) =>

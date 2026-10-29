@@ -8,7 +8,7 @@ import { parseSettings, validateSettingsPatch, type Settings } from "./settings.
 import { normalizePhone } from "./phone.ts";
 import { SYSTEM_PROMPT, buildUserPrompt, parseProposal, checkProposal, callClaude, type AiContext } from "./aischedule.ts";
 // @ts-ignore plain JS module shared with the browser
-import { DEFAULT_BOUNDARIES, periodKeys, remapPeriods, validBoundaries } from "../public/coverage.js";
+import { DEFAULT_BOUNDARIES, GRID_KEYS } from "../public/coverage.js";
 // @ts-ignore plain JS module shared with the browser
 import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
@@ -245,15 +245,10 @@ const requireAdmin = async (c: any, next: any) => {
 async function withOpenHours<T extends { id: number; open_time: string; close_time: string }>(db: D1Database, rows: T[]) {
   const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null }>();
   const bfRows = (await db.prepare("SELECT restaurant_id, dow, start_time, end_time FROM restaurant_breakfast").all<{ restaurant_id: number; dow: number; start_time: string; end_time: string }>()).results;
-  const bounds = new Map<number, string[]>();
-  for (const p of (await db.prepare("SELECT restaurant_id, boundaries FROM restaurant_periods").all<{ restaurant_id: number; boundaries: string }>()).results) {
-    try { const b = JSON.parse(p.boundaries); if (validBoundaries(b)) bounds.set(p.restaurant_id, b); } catch { /* default */ }
-  }
   return rows.map((r) => {
     const day = (d: number) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d);
     return {
       ...r,
-      period_bounds: bounds.get(r.id) ?? DEFAULT_BOUNDARIES,
       breakfast_by_dow: Array.from({ length: 7 }, (_, d) => { const b = bfRows.find((x) => x.restaurant_id === r.id && x.dow === d); return b ? { start: b.start_time, end: b.end_time } : null; }),
       open_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.open_time ?? r.open_time),
       close_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.close_time ?? r.close_time),
@@ -678,12 +673,6 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
 });
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-// Staffing-target period boundaries of a restaurant (see public/coverage.js).
-async function boundariesOf(db: D1Database, restaurantId: number): Promise<string[]> {
-  const r = await db.prepare("SELECT boundaries FROM restaurant_periods WHERE restaurant_id = ?").bind(restaurantId).first<{ boundaries: string }>();
-  try { const b = r ? JSON.parse(r.boundaries) : null; return validBoundaries(b) ? b : DEFAULT_BOUNDARIES; } catch { return DEFAULT_BOUNDARIES; }
-}
-
 // Opening and closing time per weekday (open_times / close_times = 7 values each, Monday..Sunday).
 // Legacy fields open_time / close_time set the same value for every day. Until-close shifts follow the closing time of their day.
 app.put("/api/restaurants/:id/hours", requireAdmin, async (c) => {
@@ -737,7 +726,7 @@ app.put("/api/targets", async (c) => {
     if (!set) return c.json({ error: "set_not_found" }, 404);
   }
   const entries = Object.entries(b.slots ?? {});
-  const validSlots: string[] = periodKeys(await boundariesOf(c.env.DB, b.restaurant_id));
+  const validSlots: string[] = GRID_KEYS;
   for (const [slot, n] of entries) if (!validSlots.includes(slot) || !Number.isInteger(n) || n < 0 || n > 99) return c.json({ error: "invalid_target" }, 400);
   const db = c.env.DB;
   try {
@@ -766,29 +755,28 @@ app.put("/api/restaurants/:id/breakfast", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
-// Change the staffing-target periods of one restaurant (admin). Existing targets are carried over to the new periods.
-app.put("/api/restaurants/:id/periods", requireAdmin, async (c) => {
-  const id = intParam(c.req.param("id"));
-  const { boundaries } = await c.req.json<{ boundaries?: string[] }>();
-  if (!id) return c.json({ error: "bad_id" }, 400);
-  if (!validBoundaries(boundaries)) return c.json({ error: "invalid_periods" }, 400);
-  if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
-  const old = await boundariesOf(c.env.DB, id);
-  const rows = (await c.env.DB.prepare("SELECT department_id, set_id, dow, slot, count FROM staffing_targets WHERE restaurant_id = ?").bind(id).all<{ department_id: string; set_id: number; dow: number; slot: string; count: number }>()).results;
-  const groups = new Map<string, { department_id: string; set_id: number; dow: number; values: Record<string, number> }>();
-  for (const r of rows) {
-    const k = `${r.department_id}|${r.set_id}|${r.dow}`;
-    const g = groups.get(k) ?? { department_id: r.department_id, set_id: r.set_id, dow: r.dow, values: {} };
-    g.values[r.slot] = r.count; groups.set(k, g);
+// Sets (or, with count null, clears) the target of one department for a time range of one layer, in 30-minute intervals.
+// Used by the quick edit on the coverage view. from/to are "HH:MM" on a half-hour; to may be "24:00".
+app.put("/api/targets/range", async (c) => {
+  const b = await c.req.json<{ restaurant_id: number; department_id: string; set_id?: number; dow: number; from: string; to: string; count: number | null }>();
+  const setId = b.set_id ?? 0;
+  if (!Number.isInteger(b.dow) || b.dow < -1 || b.dow > 6) return c.json({ error: "invalid_day" }, 400);
+  const from = GRID_KEYS.indexOf(b.from), to = b.to === "24:00" ? 48 : GRID_KEYS.indexOf(b.to);
+  if (from < 0 || to <= from) return c.json({ error: "invalid_times" }, 400);
+  if (b.count !== null && (!Number.isInteger(b.count) || b.count < 0 || b.count > 99)) return c.json({ error: "invalid_target" }, 400);
+  if (!(await canManage(c.env.DB, c.get("me"), b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
+  if (setId !== 0 && !(await c.env.DB.prepare("SELECT 1 FROM target_sets WHERE id = ? AND restaurant_id = ?").bind(setId, b.restaurant_id).first())) return c.json({ error: "set_not_found" }, 404);
+  const db = c.env.DB;
+  const slots: string[] = GRID_KEYS.slice(from, to);
+  try {
+    await db.batch(slots.flatMap((slot) => [
+      db.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ? AND department_id = ? AND set_id = ? AND dow = ? AND slot = ?").bind(b.restaurant_id, b.department_id, setId, b.dow, slot),
+      ...(b.count === null ? [] : [db.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, set_id, dow, slot, count) VALUES (?, ?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, setId, b.dow, slot, b.count)]),
+    ]));
+  } catch {
+    return c.json({ error: "invalid_reference" }, 400);
   }
-  const stmts: D1PreparedStatement[] = [
-    c.env.DB.prepare("INSERT OR REPLACE INTO restaurant_periods (restaurant_id, boundaries) VALUES (?, ?)").bind(id, JSON.stringify(boundaries)),
-    c.env.DB.prepare("DELETE FROM staffing_targets WHERE restaurant_id = ?").bind(id),
-  ];
-  for (const g of groups.values()) for (const [slot, n] of Object.entries(remapPeriods(old, boundaries, g.values) as Record<string, number>))
-    stmts.push(c.env.DB.prepare("INSERT INTO staffing_targets (restaurant_id, department_id, set_id, dow, slot, count) VALUES (?, ?, ?, ?, ?, ?)").bind(id, g.department_id, g.set_id, g.dow, slot, n));
-  await c.env.DB.batch(stmts);
-  return c.json({ ok: true, boundaries });
+  return c.json({ ok: true });
 });
 
 // ---------- Seasons and special days ----------
@@ -1559,7 +1547,7 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
   const days = Array.from({ length: 7 }, (_, i) => new Date(Date.parse(`${week}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
   const prevStart = new Date(Date.parse(`${week}T00:00:00Z`) - 7 * 86_400_000).toISOString().slice(0, 10);
   const dmarks = departments.map(() => "?").join(",");
-  const boundaries = await boundariesOf(db, restaurantId);
+  const boundaries = DEFAULT_BOUNDARIES;
   const cid = (c.get("me") as Me).client_id;
   const settings = await loadSettings(db, cid);
   const roleCatalogue = await rolesFor(db, cid);

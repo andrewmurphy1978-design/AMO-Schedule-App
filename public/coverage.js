@@ -1,10 +1,10 @@
 // Pure helpers for the staffing timeline. No DOM access, so they are unit-tested in Node.
 
-// Staffing-target periods. A restaurant has a list of boundaries (default below): the first period runs from opening to the first
-// boundary, each boundary starts the next period, and the last period runs to closing. A period is identified by its key:
-// "open" for the first one, otherwise its start time ("08:00", "12:00"...). Open-8:00, 8:00-9:00, 9:00-11:00, 11:00-12:00,
-// 12:00-14:00, 14:00-17:00, 17:00-20:00, 20:00-Close with the default boundaries.
-export const DEFAULT_BOUNDARIES = ["08:00", "09:00", "11:00", "12:00", "14:00", "17:00", "20:00"];
+// Staffing-target periods: fixed 30-minute intervals. An interval is identified by its start time ("08:00", "08:30"...) and is
+// clipped to the opening hours of the day. (The "open" key of the former configurable periods is only read for compatibility.)
+export const DEFAULT_BOUNDARIES = Array.from({ length: 48 }, (_, i) => `${String(Math.floor(i / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}`);
+/** Keys of every interval of the day. */
+export const GRID_KEYS = DEFAULT_BOUNDARIES;
 
 export const toMin = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 export const fromMin = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
@@ -62,8 +62,8 @@ export function remapPeriods(oldBoundaries, newBoundaries, values) {
   return out;
 }
 
-/** Valid boundary list: 1 to 10 times "HH:MM", strictly increasing. */
-export const validBoundaries = (b) => Array.isArray(b) && b.length >= 1 && b.length <= 10 && b.every((x) => /^([01]\d|2[0-3]):[0-5]\d$/.test(x)) && b.every((x, i) => i === 0 || b[i - 1] < x);
+/** Valid boundary list: 1 to 48 times "HH:MM", strictly increasing. */
+export const validBoundaries = (b) => Array.isArray(b) && b.length >= 1 && b.length <= 48 && b.every((x) => /^([01]\d|2[0-3]):[0-5]\d$/.test(x)) && b.every((x, i) => i === 0 || b[i - 1] < x);
 
 export const targetAt = (wins, t) => wins.find((w) => t >= w.from && t < w.to)?.count;
 

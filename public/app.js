@@ -1,6 +1,6 @@
 import { splitName, joinName, shortNames, orderStaff } from "./names.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
-import { postGaps, DEFAULT_BOUNDARIES, periodKeys, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
+import { postGaps, DEFAULT_BOUNDARIES, GRID_KEYS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
 import { staffColor, textOn, SWATCHES, setStaffOrder } from "./colors.js";
 
@@ -694,13 +694,67 @@ async function zoomTo(day) {
 }
 
 // ---------- coverage timeline (vertical) ----------
-// Target periods of a restaurant: Open-8:00, 8:00-9:00 ... 20:00-Close (editable per restaurant).
-const boundsOf = (restaurantId, list = state.restaurants) => list?.find((r) => r.id === restaurantId)?.period_bounds ?? DEFAULT_BOUNDARIES;
+// Staffing targets use fixed 30-minute intervals ("8:00–8:30"); only the ones inside the opening hours are shown.
+const boundsOf = () => DEFAULT_BOUNDARIES;
 const hm = (x) => x.replace(/^0/, "");
-function periodLabel(boundaries, key) {
-  const keys = periodKeys(boundaries), i = keys.indexOf(key);
-  const next = i >= 0 && i + 1 < keys.length ? hm(keys[i + 1]) : t("closeSlot");
-  return `${key === "open" ? t("openSlot") : hm(key)}–${next}`;
+const periodLabel = (_boundaries, key) => `${hm(key)}–${hm(fromMin(toMin(key) + 30))}`;
+function hoursSlots(restaurantId, list = state.restaurants) {
+  const r = list?.find((x) => x.id === restaurantId);
+  if (!r) return GRID_KEYS.filter((k) => toMin(k) >= 360 && toMin(k) < 1380);
+  const lo = Math.floor(Math.min(...r.open_by_dow.map(toMin)) / 30) * 30, hi = Math.max(...r.close_by_dow.map(toMin));
+  return GRID_KEYS.filter((k) => toMin(k) >= lo && toMin(k) < hi);
+}
+
+// Quick edit of a staffing target from the coverage view (administrators): one department, one time range, one layer.
+function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
+  const restaurant = state.sel.restaurant;
+  const dow = dowOf(day);
+  const slots = hoursSlots(restaurant);
+  const nameOf = (s) => (s.kind === "special" ? s.name : `${weekdayName(dow)} · ${s.name}`);
+  // layers that apply on this date, least to most specific; each one stores its values under (set, dow)
+  const layers = [{ id: 0, dow, label: `${t("everyWeekday")} ${weekdayName(dow)}` },
+    ...sets.filter((x) => x.kind === "season" && ruleMatches(x.rule, day)).map((x) => ({ id: x.id, dow, label: nameOf(x) })),
+    ...sets.filter((x) => x.kind === "special" && ruleMatches(x.rule, day)).map((x) => ({ id: x.id, dow: -1, label: nameOf(x) }))];
+  const key = fromMin(Math.floor(minute / 30) * 30);
+  const current = (d) => resolveForDate(targets.filter((x) => x.department_id === d), sets, day).targets[key];
+  // where the value shown comes from: the most specific layer that defines it
+  const sourceOf = (d) => [...layers].reverse().find((l) => targets.some((x) => x.department_id === d && x.set_id === l.id && x.slot === key && (x.dow === l.dow || x.dow === -1))) ?? layers[0];
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("target-modal");
+    if (!dlg) { dlg = h("dialog", { id: "target-modal" }); document.body.append(dlg); }
+    let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
+    const fromSel = h("select", {}, slots.map((k) => h("option", { value: k, selected: k === key }, hm(k))));
+    const toSel = h("select", {}, [...slots.slice(1), fromMin(toMin(slots[slots.length - 1]) + 30)].map((k) => h("option", { value: k, selected: toMin(k) === toMin(key) + 30 }, hm(k))));
+    // one number per displayed department, all saved together; the clicked one comes first
+    const order = [dep, ...deps.filter((d) => d !== dep)].filter((d) => deps.includes(d));
+    const counts = order.map((d) => { const v = current(d); const input = h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", "aria-label": t(`dept.${d}`) }); return { d, v, input }; });
+    const layerSel = h("select", {}, layers.map((l, i) => h("option", { value: i }, l.label)));
+    // the layer the shown values come from (most specific across the departments)
+    layerSel.value = String(Math.max(...order.map((d) => layers.indexOf(sourceOf(d)))));
+    const save = async () => {
+      const l = layers[Number(layerSel.value)];
+      if (toMin(toSel.value) <= toMin(fromSel.value)) { toast(t("invalidTimes")); return; }
+      try {
+        for (const c of counts) {
+          if (c.input.value === "" && c.v === undefined) continue; // nothing there, nothing entered
+          await api("/targets/range", { method: "PUT", body: { restaurant_id: restaurant, department_id: c.d, set_id: l.id, dow: l.dow, from: fromSel.value, to: toSel.value, count: c.input.value === "" ? null : Number(c.input.value) } });
+        }
+        toast(t("saved")); finish(true); onSaved?.();
+      } catch (e) { toast(errorText(e)); }
+    };
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); save(); } },
+      h("h2", {}, t("editTarget")), h("p", { class: "meta" }, fmt(day, { weekday: "long", day: "numeric", month: "long" })),
+      h("div", { class: "times" }, h("label", { class: "field" }, h("span", {}, t("from")), fromSel), h("label", { class: "field" }, h("span", {}, t("to")), toSel)),
+      h("div", { class: "field" }, h("span", {}, t("peopleNeeded")),
+        counts.map((c) => h("label", { class: "check", style: "justify-content:space-between" }, h("span", {}, `${deptIcon(c.d)} ${t(`dept.${c.d}`)}`), c.input))),
+      layers.length > 1 ? h("label", { class: "field" }, h("span", {}, t("appliesTo")), layerSel) : h("p", { class: "meta" }, `${t("appliesTo")} : ${layers[0].label}`),
+      h("p", { class: "meta" }, t("clearHint")),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: () => finish(false) }, t("cancel")),
+        h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.addEventListener("close", () => { if (!done) { done = true; resolve(false); } }, { once: true });
+    dlg.showModal();
+  });
 }
 const mqDesktop = window.matchMedia("(min-width: 900px)");
 mqDesktop.addEventListener("change", () => { if (state.me) render(); });
@@ -863,9 +917,14 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
       const cls = tg === undefined ? "none" : b.count < tg ? "short" : b.count === tg ? "ok" : "over";
       const lines = perDept ? perDept.map((pd) => ({ dep: pd.dep, n: pd.buckets[bi].count, tg: targetAt(pd.wins, b.t) })).filter((l) => l.n > 0 || l.tg !== undefined) : null;
       const title = `${fromMin(b.t)} — ${t("present")} ${b.count}${tg === undefined ? "" : ` / ${t("target")} ${tg}`}${lines ? ` · ${lines.map((l) => `${t(`dept.${l.dep}`)} ${l.n}${l.tg === undefined ? "" : `/${l.tg}`}`).join(" · ")}` : ""}`;
-      return h("div", { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title },
-        lines && lines.length ? lines.map((l) => h("span", { class: `dept-count ${l.tg === undefined ? "" : l.n < l.tg ? "short" : l.n > l.tg ? "over" : "ok"}` }, `${deptIcon(l.dep)} ${l.n}${l.tg === undefined ? "" : `/${l.tg}`}`))
-          : (tg === undefined ? String(b.count) : `${b.count}/${tg}`));
+      const content = lines && lines.length ? lines.map((l) => h("span", { class: `dept-count ${l.tg === undefined ? "" : l.n < l.tg ? "short" : l.n > l.tg ? "over" : "ok"}`, "data-dep": l.dep }, `${deptIcon(l.dep)} ${l.n}${l.tg === undefined ? "" : `/${l.tg}`}`))
+        : (tg === undefined ? String(b.count) : `${b.count}/${tg}`);
+      const cellProps = { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title };
+      // administrators: click a cell to change the staffing target of that time (and department)
+      return state.me.me.is_admin && data.editable
+        ? h("button", { ...cellProps, type: "button", class: `vtl-cell ${cls} editable`, title: `${title} — ${t("editTargetHint")}`,
+            onClick: (e) => targetDialog({ day: d.day, minute: b.t, dep: e.target.closest("[data-dep]")?.dataset.dep ?? sel.departments[0], deps: sel.departments, targets, sets, onSaved: render }) }, content)
+        : h("div", cellProps, content);
     });
 
     const clipped = d.items.map((x) => ({ ...x, from: Math.max(x.span.s, startMin), to: Math.min(x.span.e, endMin) }));
@@ -1982,7 +2041,7 @@ async function renderAdmin() {
   ] : [h("div", { class: "empty" }, t("noStaff"))];
 
   const sections = {
-    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), periodsPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
+    restaurants: () => [restaurantsPanel, hoursPanel(ov), breakfastPanel(ov), preOpenPanel(), defaultRatesPanel(ov)],
     targets: () => [weeklyTargetsPanel(ov), targetsPanel(ov)],
     staff: () => [staffPanel, ...staffLists],
     messaging: () => [messagingPanel(), settingsPanel(), messageLogPanel()],
@@ -2126,7 +2185,7 @@ function weeklyTargetsPanel(ov) {
       info[i].hol.map((x) => h("div", { class: `hol ${x.statutory ? "stat" : "spec"}`, title: x.statutory ? t("statutoryHoliday") : t("busyDay") }, `${x.statutory ? "🏛 " : "★ "}${lang === "fr" ? x.fr : x.en}`)),
       info[i].labels.length ? h("div", { class: "periods" }, info[i].labels.join(", ")) : null));
 
-    const bounds = boundsOf(st.restaurant, ov.restaurants), SLOTS = periodKeys(bounds), slotLabel = (k) => periodLabel(bounds, k);
+    const SLOTS = hoursSlots(st.restaurant, ov.restaurants), slotLabel = (k) => periodLabel(null, k);
     const body = SLOTS.map((slot) => h("tr", {},
       h("th", { class: "tw-slot" }, slotLabel(slot)),
       days.map((day, i) => {
@@ -2214,7 +2273,7 @@ function targetsPanel(ov) {
     const sel = (opts, cur, onChange) => h("select", { onChange }, opts.map(([v, l]) => h("option", { value: v, selected: String(v) === String(cur) }, l)));
     const reload = () => load();
 
-    const bounds2 = boundsOf(st.restaurant, ov.restaurants), SLOTS2 = periodKeys(bounds2), slotLabel2 = (k) => periodLabel(bounds2, k);
+    const SLOTS2 = hoursSlots(st.restaurant, ov.restaurants), slotLabel2 = (k) => periodLabel(null, k);
     const slotInputs = SLOTS2.map((slot) => {
       const mine = own.find((r) => r.slot === slot)?.count;
       const dflt = fallback[slot];
@@ -2256,6 +2315,7 @@ function targetsPanel(ov) {
         st.dow !== -1 ? h("button", { class: "btn danger", type: "button", onClick: () => saveTargets({}) }, t("resetDay")) : null,
         h("button", { class: "btn primary", type: "button", onClick: () => {
           const slots = {};
+          for (const r of own) if (!SLOTS2.includes(r.slot)) slots[r.slot] = r.count; // outside the opening hours: left as it is
           for (const slot of SLOTS2) if (inputs[slot].value !== "") slots[slot] = Number(inputs[slot].value);
           saveTargets(slots);
         } }, t("save"))),
@@ -2301,41 +2361,6 @@ function breakfastPanel(ov) {
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
           } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("save"))));
-  }
-  draw();
-  return box;
-}
-
-// The time periods of the staffing targets, per restaurant (Open-8:00, 8:00-9:00 ... 20:00-Close).
-function periodsPanel(ov) {
-  const st = { restaurant: ov.restaurants[0]?.id };
-  const box = h("section", { class: "panel" });
-  function draw() {
-    const resto = ov.restaurants.find((r) => r.id === st.restaurant);
-    if (!resto) { box.replaceChildren(); return; }
-    let list = [...(resto.period_bounds ?? DEFAULT_BOUNDARIES)];
-    const paint = () => {
-      const fields = list.map((b, i) => { const f = timeField(b); f.addEventListener("change", () => { list[i] = f.value; showPreview(); }); return f; });
-      const preview = h("p", { class: "meta" });
-      const showPreview = () => { preview.textContent = periodKeys(list).map((k) => periodLabel(list, k)).join("  ·  "); };
-      showPreview();
-      box.replaceChildren(h("h2", {}, t("periodsTitle")), h("p", { class: "meta" }, t("periodsHelp")),
-        h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
-        h("div", { class: "hours-table" }, h("div", { class: "hours-row" }, h("strong", {}, t("openSlot")), h("span", { class: "meta" }, t("firstPeriod"))),
-          fields.map((f, i) => h("div", { class: "hours-row" }, h("strong", {}, t("periodStarts")), f,
-            list.length > 1 ? h("button", { class: "btn danger", type: "button", onClick: () => { list.splice(i, 1); paint(); } }, t("delete")) : null))),
-        preview,
-        h("div", { class: "actions" },
-          list.length < 10 ? h("button", { class: "btn", type: "button", onClick: () => { const last = list[list.length - 1]; const m = Math.min(1380, toMin(last) + 60); list.push(fromMin(m)); paint(); } }, `+ ${t("addPeriod")}`) : null,
-          h("button", { class: "btn", type: "button", onClick: () => { list = [...DEFAULT_BOUNDARIES]; paint(); } }, t("defaultPeriods")),
-          h("button", { class: "btn primary", type: "button", onClick: async () => {
-            try {
-              await api(`/restaurants/${st.restaurant}/periods`, { method: "PUT", body: { boundaries: list } });
-              state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
-            } catch (e) { toast(e.body?.error === "invalid_periods" ? t("periodsInvalid") : errorText(e)); }
-          } }, t("save"))));
-    };
-    paint();
   }
   draw();
   return box;
