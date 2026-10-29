@@ -2543,6 +2543,7 @@ function hoursPanel(ov) {
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
           } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("save"))));
+    rows.forEach((r) => r.bfOn.dispatchEvent(new Event("change"))); // sets the visibility of the "until" cells now they are attached
   }
   draw();
   return box;
