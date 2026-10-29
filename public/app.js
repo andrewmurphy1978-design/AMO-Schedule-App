@@ -2020,13 +2020,7 @@ async function renderAdmin() {
 
   const restaurantsPanel = h("section", { class: "panel" }, h("h2", {}, t("restaurants")),
     h("p", {}, ov.restaurants.map((r) => h("span", { class: "badge", style: "margin-right:.4rem" }, r.name))),
-    (() => {
-      const name = h("input", { required: true, maxLength: 80 });
-      return h("form", { class: "inline-form", onSubmit: async (e) => {
-        e.preventDefault();
-        try { await api("/restaurants", { method: "POST", body: { name: name.value } }); state.restaurants = await api("/restaurants"); render(); } catch (err) { toast(errorText(err)); }
-      } }, h("label", { class: "field" }, h("span", {}, t("addRestaurant")), name), h("span"), h("button", { class: "btn primary", type: "submit" }, t("add")));
-    })());
+    h("p", { class: "meta" }, t("addRestaurantInfo")));
 
   // One "+ Add" button; the new employee's name goes in a small dialog.
   const addStaff = h("button", { class: "btn primary", type: "button", onClick: () => {

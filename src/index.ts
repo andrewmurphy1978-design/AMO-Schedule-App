@@ -663,7 +663,9 @@ app.get("/api/restaurants", async (c) => {
   return c.json(await withOpenHours(c.env.DB, rows));
 });
 
+// Adding a restaurant is an additional paid service: only the owner's CRM (an API token) can do it, never a person in the app.
 app.post("/api/restaurants", requireAdmin, async (c) => {
+  if (!c.get("me").via_token) return c.json({ error: "crm_only" }, 403);
   const { name } = await c.req.json<{ name?: string }>();
   if (!name?.trim()) return c.json({ error: "name_required" }, 400);
   try {
