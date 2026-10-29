@@ -2447,7 +2447,7 @@ function specialHoursPanel(ov) {
     const endDate = h("input", { type: "date", class: "sh-date", "aria-label": t("toDate") });
     date.addEventListener("change", () => { endDate.min = date.value; if (endDate.value && endDate.value < date.value) endDate.value = date.value; });
     // a whole week (construction, big clean-up): Monday to Sunday of the chosen date
-    const wholeWeek = h("button", { class: "btn", type: "button", onClick: () => { if (!date.value) { date.focus(); return; } const mon = mondayOf(parseYmd(date.value)); date.value = mon; endDate.value = addDays(mon, 6); yearly.checked = false; } }, t("wholeWeek"));
+    const wholeWeek = h("button", { class: "btn sh-half", type: "button", onClick: () => { if (!date.value) { date.focus(); return; } const mon = mondayOf(parseYmd(date.value)); date.value = mon; endDate.value = addDays(mon, 6); yearly.checked = false; } }, t("wholeWeek"));
     const yearly = h("input", { type: "checkbox" });
     const closed = h("input", { type: "checkbox", checked: true });
     const open = timeField("10:00"), close = timeField("17:00");
@@ -2474,12 +2474,12 @@ function specialHoursPanel(ov) {
         h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete"))))) : h("p", { class: "meta" }, t("noSpecialHours")),
       h("form", { class: "td-body sh-form", onSubmit: add },
         // line 1: the dates and Closed
-        h("div", { class: "sh-line" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), date), h("label", { class: "field" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate),
-          h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek, h("div", { class: "seg" }, btnClosed, btnSpecial)),
+        h("div", { class: "sh-line sh-line1" }, h("label", { class: "field sh-d" }, h("span", {}, t("fromDate")), date), h("label", { class: "field sh-d" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate),
+          h("label", { class: "check sh-half" }, yearly, h("span", {}, t("everyYear"))), wholeWeek, h("div", { class: "seg sh-seg" }, btnClosed, btnSpecial)),
         // line 2: special hours, description, all restaurants, Add
         h("div", { class: "sh-line" }, hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
-          ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
-          h("button", { class: "btn primary", type: "submit" }, t("add")))));
+          h("div", { class: "sh-end" }, ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
+            h("button", { class: "btn primary", type: "submit" }, t("add"))))));
   }
   draw();
   return box;
