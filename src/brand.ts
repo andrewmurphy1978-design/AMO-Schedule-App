@@ -3,16 +3,17 @@
 
 export const BRAND_TEXT_KEYS = ["name", "sender_name", "title_fr", "title_en", "intro_fr", "intro_en", "footer_fr", "footer_en"] as const;
 export const LOGO_TYPES = ["image/png", "image/jpeg", "image/webp", "image/svg+xml"] as const;
+export const COUNTRIES = ["CA", "US", "FR", "BE", "CH", "OTHER"] as const;
 export const MAX_LOGO_BYTES = 300 * 1024;
 
 export interface Brand {
-  name: string; color: string; sender_name: string;
+  name: string; color: string; sender_name: string; country: string;
   title_fr: string; title_en: string; intro_fr: string; intro_en: string; footer_fr: string; footer_en: string;
   logo: boolean; logo_v: number;
 }
 
 export const DEFAULT_BRAND: Brand = {
-  name: "Mikes", color: "#da291c", sender_name: "",
+  name: "Mikes", color: "#da291c", sender_name: "", country: "CA",
   title_fr: "", title_en: "", intro_fr: "", intro_en: "", footer_fr: "", footer_en: "", logo: false, logo_v: 0,
 };
 
@@ -20,6 +21,7 @@ export function parseBrand(rows: { key: string; value: string }[]): Brand {
   const m = new Map(rows.map((r) => [r.key, r.value]));
   const b: Brand = { ...DEFAULT_BRAND };
   for (const k of BRAND_TEXT_KEYS) { const v = m.get(`brand_${k}`); if (v != null && (v !== "" || k !== "name")) b[k] = v; }
+  const ct = m.get("brand_country"); if (ct && (COUNTRIES as readonly string[]).includes(ct)) b.country = ct;
   const c = m.get("brand_color"); if (c && /^#[0-9a-f]{6}$/i.test(c)) b.color = c.toLowerCase();
   b.logo = m.has("brand_logo_type");
   b.logo_v = Number(m.get("brand_logo_v") ?? 0);
@@ -37,6 +39,10 @@ export function validateBrandPatch(p: Record<string, unknown>): { values: Record
     if (k === "name" && !v) return { error: "name_required" };
     if (/[\r\n]/.test(v) && (k === "name" || k === "sender_name")) return { error: `invalid:${k}` };
     values[`brand_${k}`] = v;
+  }
+  if ("country" in p) {
+    if (typeof p.country !== "string" || !(COUNTRIES as readonly string[]).includes(p.country)) return { error: "invalid_country" };
+    values.brand_country = p.country;
   }
   if ("color" in p) {
     if (typeof p.color !== "string" || !/^#[0-9a-f]{6}$/i.test(p.color)) return { error: "invalid_color" };

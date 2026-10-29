@@ -65,7 +65,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Sick calls | `POST /shifts/:id/sick`, `GET /coverage`, `/coverage/:id/*` |
 | Payroll (A) | `GET /admin/payroll`, `/admin/default-rates`, `/admin/payslips*`, `GET /payslips` |
 | Messaging (A) | `GET/PUT /connections`, `POST /connections/test`, `GET /admin/notifications` |
-| Branding (A) | `GET /auth/branding` (public), `PUT /admin/branding`, `PUT/DELETE /admin/branding/logo` |
+| Branding (A) | `GET /auth/branding` (public; includes `country` CA/US/FR/BE/CH/OTHER, which sets "déjeuner" vs "petit-déjeuner" in the French screens), `PUT /admin/branding`, `PUT/DELETE /admin/branding/logo` |
 | AI | `POST /admin/ai-schedule`, `/admin/ai-schedule/apply` |
 | Clients (platform owner) | `GET /clients`, `POST /clients`, `PUT /clients/:id` |
 | API tokens (admin, browser only) | `GET/POST /admin/tokens`, `DELETE /admin/tokens/:id` |

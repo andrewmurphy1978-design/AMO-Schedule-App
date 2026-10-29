@@ -924,9 +924,10 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
     data.editable ? h("div", { class: "gaps" }, gapBox, postBox, extraBox) : null,
     shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     h("div", { class: "vtl-scroll" },
-      h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
+      h("div", { class: `vtl ${zoom ? "zoomed" : ""} ${data.editable ? "" : "no-cov"}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
         [h("div", { class: "vtl-corner" }), ...heads, axis, ...dayCols])),
-    h("div", { class: "tl-legend" },
+    // the staffing targets and their colours are for the people who run the schedule
+    !data.editable ? null : h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
       h("span", {}, h("i", { style: "background:#93c5fd" }), t("legendOver")), h("span", {}, h("i", { style: "background:var(--line)" }), t("legendNone"))));
   tlSection.boxes = { gapBox, extraBox };
@@ -1720,6 +1721,7 @@ function brandingPanel() {
   const text = (key, max = 80) => h("input", { value: b[key] ?? "", maxLength: max });
   const name = text("name"), sender = text("sender_name");
   const color = h("input", { type: "color", value: b.color, "aria-label": t("brandColor") });
+  const country = h("select", {}, [["CA", t("countryCA")], ["US", t("countryUS")], ["FR", t("countryFR")], ["BE", t("countryBE")], ["CH", t("countryCH")], ["OTHER", t("countryOTHER")]].map(([v, l]) => h("option", { value: v, selected: (b.country ?? "CA") === v }, l)));
   const f = { title_fr: text("title_fr"), title_en: text("title_en"), intro_fr: text("intro_fr", 300), intro_en: text("intro_en", 300), footer_fr: text("footer_fr", 300), footer_en: text("footer_en", 300) };
   const logoBox = h("div", { class: "brand-logo" });
   const drawLogo = () => logoBox.replaceChildren(
@@ -1739,11 +1741,11 @@ function brandingPanel() {
     h("form", { class: "acc-form", onSubmit: async (e) => {
       e.preventDefault();
       try {
-        state.brand = { ...state.brand, ...(await api("/admin/branding", { method: "PUT", body: { name: name.value, color: color.value, sender_name: sender.value, ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value])) } })) };
-        applyBrand(); toast(t("saved"));
+        state.brand = { ...state.brand, ...(await api("/admin/branding", { method: "PUT", body: { name: name.value, color: color.value, country: country.value, sender_name: sender.value, ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value])) } })) };
+        applyBrand(); state.posts = localizePosts(await api("/posts")); toast(t("saved"));
       } catch (err) { toast(errorText(err)); }
     } },
-      field(t("brandName"), name), field(t("brandColor"), color),
+      field(t("brandName"), name), field(t("brandColor"), color), field(t("brandCountry"), country, h("span", { class: "meta" }, t("brandCountryHelp"))),
       h("div", { class: "field" }, h("span", {}, t("brandLogo")), logoBox, h("span", { class: "meta" }, t("brandLogoHelp"))),
       field(t("brandSender"), sender, h("span", { class: "meta" }, t("brandSenderHelp"))),
       h("h3", {}, t("brandLoginTexts")), h("p", { class: "meta" }, t("brandBlankDefault")),
@@ -2144,7 +2146,7 @@ function breakfastPanel(ov) {
       return { on, from, to };
     });
     const copyMonday = () => rows.slice(1).forEach((r) => { r.on.checked = rows[0].on.checked; r.from.value = rows[0].from.value; r.to.value = rows[0].to.value; r.on.dispatchEvent(new Event("change")); });
-    box.replaceChildren(h("h2", {}, t("breakfastTitle")), h("p", { class: "meta" }, t("breakfastHelp")),
+    box.replaceChildren(h("h2", {}, mealWord()), h("p", { class: "meta" }, mealText(t("breakfastHelp"))),
       h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
       h("div", { class: "hours-table" }, rows.map((r, i) => h("div", { class: "hours-row" },
         h("label", { class: "check" }, r.on, h("strong", {}, weekdayName(i))),
@@ -2540,10 +2542,15 @@ function staffCard(s, ov) {
 
 // ---------- boot ----------
 // ---------- Per-client branding (name, colour, logo, texts), set in Administration ----------
-const DEFAULT_BRAND = { name: "Mikes", color: "#da291c", sender_name: "", title_fr: "", title_en: "", intro_fr: "", intro_en: "", footer_fr: "", footer_en: "", logo: false, logo_v: 0 };
+const DEFAULT_BRAND = { name: "Mikes", color: "#da291c", sender_name: "", country: "CA", title_fr: "", title_en: "", intro_fr: "", intro_en: "", footer_fr: "", footer_en: "", logo: false, logo_v: 0 };
 state.brand = { ...DEFAULT_BRAND };
 const darkenHex = (hex, f = 0.78) => { const n = parseInt(hex.slice(1), 16); const c = (sh) => Math.round(((n >> sh) & 255) * f).toString(16).padStart(2, "0"); return `#${c(16)}${c(8)}${c(0)}`; };
 const brandText = (key) => state.brand[`${key}_${getLang()}`] || "";
+// French word for the first meal: "déjeuner" in Canada and the United States, "petit-déjeuner" in France, Belgium, Switzerland and elsewhere.
+const mealWord = () => (getLang() === "en" ? "Breakfast" : ["CA", "US"].includes(state.brand.country) ? "Déjeuner" : "Petit-déjeuner");
+const mealText = (str) => str.replaceAll("{meal}", mealWord().toLowerCase()).replaceAll("{Meal}", mealWord());
+// the kitchen posts "Déjeuner (œufs)" / "Déjeuner (poste arrière)" follow the same wording
+const localizePosts = (posts) => posts.map((p) => (["CA", "US"].includes(state.brand.country) ? p : { ...p, name_fr: p.name_fr.replace(/^Déjeuner/, "Petit-déjeuner") }));
 function applyBrand() {
   const b = state.brand, root = document.documentElement.style;
   root.setProperty("--brand", b.color); root.setProperty("--brand-dark", darkenHex(b.color));
@@ -2609,6 +2616,7 @@ async function boot() {
     return;
   }
   [state.restaurants, state.roles, state.posts] = await Promise.all([api("/restaurants"), api("/roles"), api("/posts").catch(() => [])]);
+  state.posts = localizePosts(state.posts);
   render();
 }
 boot();

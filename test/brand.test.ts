@@ -23,3 +23,11 @@ test("sender address and colour darkening", () => {
   assert.equal(senderAddress("a@b.c", 'Ev"il<>'), "Evil <a@b.c>");
   assert.equal(darken("#ffffff", 0.5), "#808080");
 });
+
+test("country: defaults to Canada, only known values", () => {
+  assert.equal(parseBrand([]).country, "CA");
+  assert.equal(parseBrand([{ key: "brand_country", value: "FR" }]).country, "FR");
+  assert.equal(parseBrand([{ key: "brand_country", value: "XX" }]).country, "CA");
+  assert.deepEqual(validateBrandPatch({ country: "BE" }), { values: { brand_country: "BE" } });
+  assert.deepEqual(validateBrandPatch({ country: "Mars" }), { error: "invalid_country" });
+});
