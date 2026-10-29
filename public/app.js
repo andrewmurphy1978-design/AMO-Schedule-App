@@ -1503,10 +1503,13 @@ function staffTimeOff(person) {
     allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
     const act = async (fn) => { try { await fn(); load(); } catch (e) { toast(errorText(e)); } };
     box.replaceChildren(
-      ...leaveGroups(rows, (r) => leaveRow(r, { actions: h("div", { class: "row-icons" },
+      // counts on top, then every request in date order
+      h("p", { class: "leave-counts" }, [["requested", t("toAnswer")], ["approved", t("grantedWord")], ["denied", t("declinedWord")]].map(([st, label]) => h("span", { class: `leave-status ${st}` }, `${label} (${rows.filter((r) => r.status === st).length})`))),
+      ...(rows.length ? [...rows].sort((a, b) => a.start_date.localeCompare(b.start_date) || (a.start_time ?? "").localeCompare(b.start_time ?? "")) : []).map((r) => leaveRow(r, { actions: h("div", { class: "row-icons" },
         r.status !== "approved" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("approve"), "aria-label": t("approve"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, "✅") : null,
         r.status !== "denied" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("deny"), "aria-label": t("deny"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, "❌") : null,
         h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { if ((await ask(t("confirmCancelOff")))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️")) })),
+      ...(rows.length ? [] : [h("p", { class: "meta" }, t("noTimeOff"))]),
       h("h4", {}, t("addLeaveFor")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
         h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))),
