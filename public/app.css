@@ -824,3 +824,4 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .sh-line input[type=date]{width:148px !important;min-width:0}.sh-line label.field{width:auto}
 @media (min-width:900px){.sh-line .sh-date{width:150px !important;min-width:0}}
 @media (max-width:899px){.hrs-row{align-items:end}.hrs-row strong{align-self:start}}
+@media (max-width:899px){.admin-content .panel>h2+p.meta,.admin-content .resto-head>p.meta{display:none}}
