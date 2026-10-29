@@ -198,8 +198,8 @@ function renderChrome() {
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
-    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["timeoff", t("timeOff")], ["account", t("account")]]
-    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["timeoff", t("timeOff")], ["account", t("account")]];
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -219,7 +219,7 @@ async function render() {
     }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
-    else if (state.view === "timeoff") await renderTimeOff();
+    else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
@@ -1549,7 +1549,8 @@ function availabilityEditor(staffId, part = "both") {
   return box;
 }
 
-async function renderTimeOff() {
+// Time-off requests and decisions, as a list of blocks (shown in Mon compte → Congés).
+async function timeOffNodes() {
   const today = ymd(new Date());
   const [mine, review] = await Promise.all([api("/time-off/mine"), api("/time-off/review")]);
   const from = h("input", { type: "date", required: true, value: today });
@@ -1600,7 +1601,7 @@ async function renderTimeOff() {
         r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
         r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null)))
     : h("p", { class: "meta" }, t("nothingToReview"))) : null;
-  $app.replaceChildren(h("div", { class: "account" }, form, myList, reviewBox));
+  return [form, myList, reviewBox].filter(Boolean);
 }
 
 async function renderAccount() {
@@ -1644,6 +1645,7 @@ async function renderAccount() {
     ["profile", t("details"), () => [profile]],
     ["daysoff", t("tabDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
     ["availability", t("tabAvailability"), () => [availabilityEditor(state.me.me.id, "times")]],
+    ["timeoff", t("timeOff"), () => { const box = h("div", { class: "acc-content" }, h("p", { class: "meta" }, t("loading"))); timeOffNodes().then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; }],
     ["calendar", t("tabCalendar"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
     ["payslips", t("tabPayslips"), () => [slipsBox]],
   ];
@@ -2419,6 +2421,10 @@ function specialHoursPanel(ov) {
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
     if (!resto) { box.replaceChildren(); return; }
     const date = h("input", { type: "date", required: true, "aria-label": t("date") });
+    const endDate = h("input", { type: "date", "aria-label": t("toDate") });
+    date.addEventListener("change", () => { endDate.min = date.value; if (endDate.value && endDate.value < date.value) endDate.value = date.value; });
+    // a whole week (construction, big clean-up): Monday to Sunday of the chosen date
+    const wholeWeek = h("button", { class: "btn sm", type: "button", onClick: () => { if (!date.value) { date.focus(); return; } const mon = mondayOf(parseYmd(date.value)); date.value = mon; endDate.value = addDays(mon, 6); yearly.checked = false; } }, t("wholeWeek"));
     const yearly = h("input", { type: "checkbox" });
     const closed = h("input", { type: "checkbox", checked: true });
     const open = timeField("10:00"), close = timeField("17:00");
@@ -2430,7 +2436,7 @@ function specialHoursPanel(ov) {
       e.preventDefault();
       try {
         for (const r of all.checked ? ov.restaurants : [resto])
-          await api(`/restaurants/${r.id}/special-hours`, { method: "POST", body: { date: date.value, yearly: yearly.checked, closed: closed.checked, open_time: open.value, close_time: close.value, note: note.value } });
+          await api(`/restaurants/${r.id}/special-hours`, { method: "POST", body: { date: date.value, end_date: endDate.value || undefined, yearly: yearly.checked && !endDate.value, closed: closed.checked, open_time: open.value, close_time: close.value, note: note.value } });
         toast(t("saved")); await reload();
       } catch (err) { toast(err.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(err)); }
     };
@@ -2441,7 +2447,8 @@ function specialHoursPanel(ov) {
         h("span", {}, h("b", {}, fmt(x.date, { weekday: "short", day: "numeric", month: "long", ...(x.yearly ? {} : { year: "numeric" }) })), x.yearly ? ` · ${t("everyYear")}` : "", " — ", x.closed ? `⛔ ${t("closedDay")}` : `🕒 ${hm(x.open_time)}–${hm(x.close_time)}`, x.note ? ` · ${x.note}` : ""),
         h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete"))))) : h("p", { class: "meta" }, t("noSpecialHours")),
       h("form", { class: "td-body", onSubmit: add },
-        h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("date")), date), h("label", { class: "check" }, yearly, h("span", {}, t("everyYear")))),
+        h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), date), h("label", { class: "field" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate)),
+        h("div", { class: "td-times" }, h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek),
         h("div", { class: "seg" }, [[true, t("closedDay")], [false, t("specialHoursOption")]].map(([v, l]) => h("button", { type: "button", "aria-pressed": String(closed.checked === v), onClick: (e) => { closed.checked = v; sync(); e.target.parentElement.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String((i === 0) === v))); } }, l))),
         hoursRow, note,
         ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,

@@ -750,15 +750,21 @@ app.put("/api/targets", async (c) => {
 // Closed days and special opening hours (administrators). One entry per restaurant and date; saving again replaces it.
 app.post("/api/restaurants/:id/special-hours", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
-  const b = await c.req.json<{ date?: string; yearly?: boolean; closed?: boolean; open_time?: string; close_time?: string; note?: string }>();
+  const b = await c.req.json<{ date?: string; end_date?: string; yearly?: boolean; closed?: boolean; open_time?: string; close_time?: string; note?: string }>();
   if (!id) return c.json({ error: "bad_id" }, 400);
-  if (!DATE_RE2.test(b.date ?? "")) return c.json({ error: "invalid_date" }, 400);
+  if (!DATE_RE2.test(b.date ?? "") || (b.end_date !== undefined && b.end_date !== null && b.end_date !== "" && !DATE_RE2.test(b.end_date))) return c.json({ error: "invalid_date" }, 400);
   if (!b.closed && (!TIME_RE.test(b.open_time ?? "") || !TIME_RE.test(b.close_time ?? "") || b.open_time! >= b.close_time!)) return c.json({ error: "invalid_times" }, 400);
+  // a range (e.g. a whole week closed for construction): one entry per day, never yearly, at most 60 days
+  const last = b.end_date || b.date!;
+  const dayMs = 86_400_000, span = (Date.parse(`${last}T00:00:00Z`) - Date.parse(`${b.date}T00:00:00Z`)) / dayMs;
+  if (!(span >= 0) || span > 59) return c.json({ error: "invalid_date" }, 400);
   if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
-  await c.env.DB.prepare("INSERT OR REPLACE INTO restaurant_special_hours (restaurant_id, date, yearly, closed, open_time, close_time, note) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, b.date, b.yearly ? 1 : 0, b.closed ? 1 : 0, b.closed ? null : b.open_time, b.closed ? null : b.close_time, (b.note ?? "").trim().slice(0, 80) || null).run();
-  await syncUntilClose(c.env.DB, id, [b.date!]);
-  return c.json({ ok: true });
+  const dates = Array.from({ length: span + 1 }, (_, i) => new Date(Date.parse(`${b.date}T00:00:00Z`) + i * dayMs).toISOString().slice(0, 10));
+  const note = (b.note ?? "").trim().slice(0, 80) || null;
+  await c.env.DB.batch(dates.map((d) => c.env.DB.prepare("INSERT OR REPLACE INTO restaurant_special_hours (restaurant_id, date, yearly, closed, open_time, close_time, note) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, d, dates.length === 1 && b.yearly ? 1 : 0, b.closed ? 1 : 0, b.closed ? null : b.open_time, b.closed ? null : b.close_time, note)));
+  await syncUntilClose(c.env.DB, id, dates, dates.length === 1 && !!b.yearly);
+  return c.json({ ok: true, days: dates.length });
 });
 
 app.delete("/api/restaurants/:id/special-hours/:hid", requireAdmin, async (c) => {
@@ -767,18 +773,18 @@ app.delete("/api/restaurants/:id/special-hours/:hid", requireAdmin, async (c) =>
   const row = await c.env.DB.prepare("SELECT date, yearly FROM restaurant_special_hours WHERE id = ? AND restaurant_id = ?").bind(hid, id).first<{ date: string; yearly: number }>();
   if (!row) return c.json({ error: "not_found" }, 404);
   await c.env.DB.prepare("DELETE FROM restaurant_special_hours WHERE id = ?").bind(hid).run();
-  await syncUntilClose(c.env.DB, id, [row.date]);
+  await syncUntilClose(c.env.DB, id, [row.date], row.yearly === 1);
   return c.json({ ok: true });
 });
 
 // Until-close shifts follow the closing time of their day, special hours included. `dates` may be yearly: the occurrences of this and next year are refreshed.
-async function syncUntilClose(db: D1Database, restaurantId: number, dates: string[]) {
+async function syncUntilClose(db: D1Database, restaurantId: number, dates: string[], yearly = true) {
   const rest = await db.prepare("SELECT id, open_time, close_time FROM restaurants WHERE id = ?").bind(restaurantId).first<{ id: number; open_time: string; close_time: string }>();
   if (!rest) return;
   const [r] = await withOpenHours(db, [rest]);
   const year = new Date().getUTCFullYear();
   const all = new Set<string>();
-  for (const d of dates) for (const y of [year, year + 1]) all.add(`${y}${d.slice(4)}`);
+  if (yearly) for (const d of dates) for (const y of [year, year + 1]) all.add(`${y}${d.slice(4)}`);
   for (const d of dates) all.add(d);
   const stmts: D1PreparedStatement[] = [];
   for (const date of all) {

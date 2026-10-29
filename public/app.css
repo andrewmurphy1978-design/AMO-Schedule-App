@@ -772,3 +772,4 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
   .acc-content input,.acc-content select{min-height:38px}
   .acc-form .radio{min-height:38px;padding:.2rem .8rem}
 }
+@media (max-width:600px){.acc-tabs button{font-size:.7rem;padding:.55rem .2rem}}
