@@ -706,3 +706,15 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .att-mgr{border-left-color:#6b7280}.att-mgr .att-badge{color:#6b7280}
 .att-inc{border-left-color:var(--brand)}.att-inc .att-badge{color:var(--brand)}
 .staff-dialog{grid-template-columns:minmax(0,1fr)}.staff-dialog>*{min-width:0}.dlg-top{max-width:100%}.dlg-tabs{max-width:100%}
+
+.va-wrap{overflow-x:auto;margin:.6rem 0}
+.va-grid{border-collapse:collapse;width:100%;font-size:.9rem}
+.va-grid th,.va-grid td{border:1px solid var(--line,#e3dfd9);padding:.45rem .5rem;text-align:center}
+.va-grid thead th{background:color-mix(in srgb,var(--ink) 6%,var(--card));font-size:.8rem}
+.va-grid tbody th{text-align:left;white-space:nowrap}
+.va-grid input{width:20px;height:20px;min-height:0;accent-color:var(--brand)}
+/* buttons and selects inside the coloured notices keep light backgrounds with dark text, also in dark mode */
+.publish-bar .btn:not(.primary),.client-bar .btn,.token-reveal .btn:not(.primary){background:#fff;color:#1f1f23;border-color:#c9c4bc}
+.publish-bar select,.publish-bar input[type=checkbox]+span{color:#1f1f23}
+.publish-bar select{background:#fff;border-color:#c9c4bc}
+.publish-bar .btn.primary{color:#fff}

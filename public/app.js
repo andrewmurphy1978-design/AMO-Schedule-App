@@ -166,7 +166,9 @@ function allowedDepartments(restaurantId) {
   if (me.is_admin) return DEPTS;
   const set = new Set();
   for (const m of state.me.managed) if (m.restaurant_id === restaurantId) set.add(m.department_id);
-  for (const r of state.me.roles) if (r.restaurant_id === restaurantId) set.add(r.department_id);
+  // the server decides which schedules this person may look at (their roles, or the list an administrator ticked)
+  if (state.me.schedules) for (const x of state.me.schedules) { if (x.restaurant_id === restaurantId) set.add(x.department_id); }
+  else for (const r of state.me.roles) if (r.restaurant_id === restaurantId) set.add(r.department_id);
   return DEPTS.filter((d) => set.has(d));
 }
 
@@ -1141,6 +1143,44 @@ function skillsBox(person) {
         catch (err) { e.target.checked = !e.target.checked; e.target.checked ? set.add(p.id) : set.delete(p.id); toast(errorText(err)); }
       } }), getLang() === "fr" ? p.name_fr : p.name_en)));
   }).catch(() => {});
+  return box;
+}
+
+// Which schedules (restaurant x department) this employee may look at: automatic (where they hold a role) or ticked by hand.
+function scheduleAccessPane(person, ov) {
+  const box = h("div", { class: "sched-access" });
+  async function load() {
+    const cur = await api(`/staff/${person.id}/view-access`);
+    const fromRoles = new Set(person.roles.map((r) => `${r.restaurant_id}|${state.roles.find((x) => x.id === r.role_id)?.department_id}`));
+    const ticked = new Set(cur.access.map((x) => `${x.restaurant_id}|${x.department_id}`));
+    let custom = cur.custom;
+    const start = new Set(custom ? ticked : fromRoles); // when switching to "custom", start from what they see now
+    const boxes = new Map();
+    const mode = radioGroup(`va-${person.id}`, [["auto", t("vaAuto")], ["custom", t("vaCustom")]], custom ? "custom" : "auto");
+    const grid = h("table", { class: "va-grid" },
+      h("thead", {}, h("tr", {}, h("th", {}, t("restaurant")), DEPTS.map((d) => h("th", {}, t(`dept.${d}`))), h("th", {}, t("vaAllDepts")))),
+      h("tbody", {}, ov.restaurants.map((r) => {
+        const cells = DEPTS.map((d) => { const key = `${r.id}|${d}`; const input = h("input", { type: "checkbox", checked: start.has(key), "aria-label": `${r.name} — ${t(`dept.${d}`)}` }); boxes.set(key, input); return h("td", {}, input); });
+        const rowAll = h("input", { type: "checkbox", "aria-label": `${r.name}: ${t("vaAllDepts")}`, onChange: (e) => DEPTS.forEach((d) => { boxes.get(`${r.id}|${d}`).checked = e.target.checked; }) });
+        return h("tr", {}, h("th", {}, r.name), cells, h("td", {}, rowAll));
+      })));
+    const sync = () => {
+      const isCustom = mode.value === "custom";
+      boxes.forEach((input, key) => { input.disabled = !isCustom; if (!isCustom) input.checked = fromRoles.has(key); });
+      grid.querySelectorAll("tbody tr td:last-child input").forEach((i) => { i.disabled = !isCustom; });
+      note.textContent = isCustom ? t("vaCustomHelp") : t("vaAutoHelp");
+    };
+    const note = h("p", { class: "meta" });
+    mode.addEventListener("change", sync);
+    sync();
+    box.replaceChildren(h("h4", {}, t("scheduleAccessTab")), h("p", { class: "meta" }, t("vaHelp")), mode, note, h("div", { class: "va-wrap" }, grid),
+      h("button", { class: "btn primary", type: "button", onClick: async () => {
+        const isCustom = mode.value === "custom";
+        const access = isCustom ? [...boxes].filter(([, i]) => i.checked).map(([k]) => { const [r, d] = k.split("|"); return { restaurant_id: Number(r), department_id: d }; }) : [];
+        try { await api(`/staff/${person.id}/view-access`, { method: "PUT", body: { custom: isCustom, access } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+      } }, t("save")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
   return box;
 }
 
@@ -2592,7 +2632,7 @@ function staffCard(s, ov) {
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
     // the kitchen tab only exists for Chef, Cook and Assistant cook
-    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")]];
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", t("scheduleAccessTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
@@ -2610,6 +2650,7 @@ function staffCard(s, ov) {
       timeoff: () => [staffTimeOff(s)],
       planning: () => [planningForm(s)],
       attendance: () => [attendancePane(s, ov)],
+      scheduleaccess: () => [scheduleAccessPane(s, ov)],
     };
     const drawTabs = () => {
       if (!tabList().some(([id]) => id === tab)) tab = "roles";

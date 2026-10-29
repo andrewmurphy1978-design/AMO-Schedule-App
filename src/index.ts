@@ -220,16 +220,19 @@ async function canManage(db: D1Database, me: Me, restaurantId: number, departmen
 
 // Employees may view a schedule only for a restaurant+department where they hold a role.
 // Managers can always view what they manage.
+/** Every schedule (restaurant + department) a person may look at: the ones they manage, plus either the ones where they hold a
+ *  role ("auto") or exactly the ones an administrator ticked ("custom"). Administrators see everything (not listed here). */
+async function viewableSchedules(db: D1Database, staffId: number): Promise<{ restaurant_id: number; department_id: string }[]> {
+  const custom = (await db.prepare("SELECT view_custom FROM staff WHERE id = ?").bind(staffId).first<{ view_custom: number }>())?.view_custom === 1;
+  const base = custom
+    ? "SELECT restaurant_id, department_id FROM staff_view_access WHERE staff_id = ?1"
+    : "SELECT sr.restaurant_id, ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1";
+  return (await db.prepare(`${base} UNION SELECT restaurant_id, department_id FROM managers WHERE staff_id = ?1`).bind(staffId).all<{ restaurant_id: number; department_id: string }>()).results;
+}
+
 async function canView(db: D1Database, me: Me, restaurantId: number, departmentId: string) {
   if (await canManage(db, me, restaurantId, departmentId)) return true;
-  const r = await db
-    .prepare(
-      `SELECT 1 FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id
-       WHERE sr.staff_id = ? AND sr.restaurant_id = ? AND ro.department_id = ?`,
-    )
-    .bind(me.id, restaurantId, departmentId)
-    .first();
-  return !!r;
+  return (await viewableSchedules(db, me.id)).some((x) => x.restaurant_id === restaurantId && x.department_id === departmentId);
 }
 
 const requireAdmin = async (c: any, next: any) => {
@@ -577,7 +580,8 @@ app.get("/api/me", async (c) => {
     .bind(me.id)
     .all();
   const client = await db.prepare("SELECT id, name FROM clients WHERE id = ?").bind(me.client_id).first();
-  return c.json({ me, client, managed: managed.results, roles: roles.results });
+  const schedules = me.is_admin ? null : await viewableSchedules(db, me.id);
+  return c.json({ me, client, managed: managed.results, roles: roles.results, schedules });
 });
 
 app.get("/api/departments", async (c) =>
@@ -654,13 +658,11 @@ app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
 // ---------- Restaurants (admin) ----------
 app.get("/api/restaurants", async (c) => {
   const me = c.get("me");
-  const sql = me.is_admin
-    ? "SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ?2 ORDER BY name"
-    : `SELECT DISTINCT r.id, r.name, r.open_time, r.close_time FROM restaurants r WHERE r.client_id = ?2 AND r.id IN
-         (SELECT restaurant_id FROM staff_roles WHERE staff_id = ?1
-          UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1) ORDER BY r.name`;
-  const stmt = c.env.DB.prepare(sql);
-  const rows = (await stmt.bind(me.id, me.client_id).all()).results as { id: number; name: string; open_time: string; close_time: string }[];
+  let ids: number[] | null = null; // null = all (administrators)
+  if (!me.is_admin) ids = [...new Set((await viewableSchedules(c.env.DB, me.id)).map((x) => x.restaurant_id))];
+  if (ids && !ids.length) return c.json([]);
+  const rows = (await c.env.DB.prepare(`SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ?${ids ? ` AND id IN (${ids.map(() => "?").join(",")})` : ""} ORDER BY name`)
+    .bind(me.client_id, ...(ids ?? [])).all()).results as { id: number; name: string; open_time: string; close_time: string }[];
   return c.json(await withOpenHours(c.env.DB, rows));
 });
 
@@ -809,11 +811,7 @@ function validRule(kind: string, r: any): Record<string, unknown> | null {
 
 async function inRestaurant(db: D1Database, me: Me, restaurantId: number) {
   if (me.is_admin) return true;
-  const r = await db
-    .prepare("SELECT 1 FROM staff_roles WHERE staff_id = ?1 AND restaurant_id = ?2 UNION SELECT 1 FROM managers WHERE staff_id = ?1 AND restaurant_id = ?2")
-    .bind(me.id, restaurantId)
-    .first();
-  return !!r;
+  return (await viewableSchedules(db, me.id)).some((x) => x.restaurant_id === restaurantId);
 }
 
 app.get("/api/target-sets", async (c) => {
@@ -857,6 +855,30 @@ app.delete("/api/target-sets/:id", requireAdmin, async (c) => {
   await c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM staffing_targets WHERE set_id = ?").bind(id),
     c.env.DB.prepare("DELETE FROM target_sets WHERE id = ?").bind(id),
+  ]);
+  return c.json({ ok: true });
+});
+
+// Which schedules an employee may look at (administrators only to change).
+const DEPT_IDS = ["floor", "kitchen", "prep", "delivery", "admin"];
+app.get("/api/staff/:id/view-access", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const row = await c.env.DB.prepare("SELECT view_custom FROM staff WHERE id = ?").bind(id).first<{ view_custom: number }>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+  const access = (await c.env.DB.prepare("SELECT restaurant_id, department_id FROM staff_view_access WHERE staff_id = ?").bind(id).all<{ restaurant_id: number; department_id: string }>()).results;
+  return c.json({ custom: row.view_custom === 1, access });
+});
+app.put("/api/staff/:id/view-access", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ custom?: boolean; access?: { restaurant_id: number; department_id: string }[] }>().catch(() => ({} as { custom?: boolean; access?: { restaurant_id: number; department_id: string }[] }));
+  if (!id || typeof b.custom !== "boolean" || !Array.isArray(b.access) || b.access.length > 200) return c.json({ error: "bad_request" }, 400);
+  if (b.access.some((x) => !Number.isInteger(x.restaurant_id) || !DEPT_IDS.includes(x.department_id))) return c.json({ error: "bad_request" }, 400);
+  const db = c.env.DB;
+  await db.batch([
+    db.prepare("UPDATE staff SET view_custom = ? WHERE id = ?").bind(b.custom ? 1 : 0, id),
+    db.prepare("DELETE FROM staff_view_access WHERE staff_id = ?").bind(id),
+    ...b.access.map((x) => db.prepare("INSERT OR IGNORE INTO staff_view_access (staff_id, restaurant_id, department_id) VALUES (?, ?, ?)").bind(id, x.restaurant_id, x.department_id)),
   ]);
   return c.json({ ok: true });
 });
@@ -1810,6 +1832,9 @@ app.post("/api/staff-roles", async (c) => {
     await c.env.DB.prepare("INSERT OR IGNORE INTO staff_roles (staff_id, restaurant_id, role_id) VALUES (?, ?, ?)")
       .bind(b.staff_id, b.restaurant_id, b.role_id)
       .run();
+    // The list of visible schedules follows the roles: a new role turns its schedule on (automatic and hand-picked lists alike).
+    await c.env.DB.prepare("INSERT OR IGNORE INTO staff_view_access (staff_id, restaurant_id, department_id) VALUES (?, ?, ?)")
+      .bind(b.staff_id, b.restaurant_id, role.department_id).run();
   } catch {
     return c.json({ error: "invalid_reference" }, 400);
   }
@@ -1859,6 +1884,12 @@ app.delete("/api/staff-roles", async (c) => {
     }
   }
   stmts.push(db.prepare("DELETE FROM staff_roles WHERE staff_id = ? AND restaurant_id = ? AND role_id = ?").bind(b.staff_id, b.restaurant_id, b.role_id));
+  // Automatic lists mirror the roles: drop the schedule when the last role of that department here goes (hand-picked lists are left as ticked).
+  stmts.push(db.prepare(
+    `DELETE FROM staff_view_access WHERE staff_id = ?1 AND restaurant_id = ?2 AND department_id = ?3
+       AND EXISTS (SELECT 1 FROM staff WHERE id = ?1 AND view_custom = 0)
+       AND NOT EXISTS (SELECT 1 FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1 AND sr.restaurant_id = ?2 AND ro.department_id = ?3 AND sr.role_id != ?4)`,
+  ).bind(b.staff_id, b.restaurant_id, role.department_id, b.role_id));
   await db.batch(stmts);
   return c.json({ ok: true, moved_or_deleted: count });
 });
