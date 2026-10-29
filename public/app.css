@@ -843,3 +843,13 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
   .sh-line.sh-line1 .sh-seg button{flex:1 1 0}
 }
 @media (max-width:899px){.sh-line.sh-line1 .sh-half{font-size:.85rem;padding-left:.3rem;padding-right:.3rem}.sh-line.sh-line1 .sh-half input{margin:0}}
+.sh-btns{display:flex;gap:.4rem;flex:none}
+
+/* restaurant picker (custom drop-down with logos) */
+.rs{position:relative}.rs-btn{width:100%;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:0 .7rem;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+.rs-item{display:flex;align-items:center;gap:.55rem;min-width:0}.rs-item img{width:24px;height:24px;object-fit:contain;border-radius:4px;background:#fff;flex:none}
+.rs-caret{color:var(--muted);flex:none}
+.rs-menu{position:absolute;z-index:30;left:0;right:0;top:calc(100% + 4px);margin:0;padding:.25rem;list-style:none;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);max-height:50vh;overflow:auto}
+.rs-menu[hidden]{display:none}.rs-opt{padding:.55rem .6rem;border-radius:8px;cursor:pointer}.rs-opt.active{background:color-mix(in srgb,var(--brand) 12%,var(--card))}.rs-opt[aria-selected=true] .rs-item span:last-child{font-weight:700}
+.controls .rs{min-width:220px}
+.rs-menu{right:auto;min-width:100%;width:max-content;max-width:90vw}

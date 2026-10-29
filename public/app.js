@@ -478,9 +478,7 @@ async function renderSchedule() {
         setTimeout(() => window.print(), 150);
       } }, `🖨 ${t("printSchedule")}`));
   const controls = h("div", { class: "controls" },
-    h("label", { class: "field" }, h("span", {}, t("restaurant")),
-      h("select", { onChange: (e) => { sel.restaurant = Number(e.target.value); render(); } },
-        options.map((r) => h("option", { value: r.id, selected: r.id === sel.restaurant }, r.name)))),
+    h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: options, value: sel.restaurant, onChange: (id) => { sel.restaurant = id; render(); } })),
     h("div", { class: "field" }, h("span", {}, t("department")),
       h("div", { class: "seg" }, allowedDepartments(sel.restaurant).map((d) =>
         h("button", { type: "button", "aria-pressed": String(sel.departments.includes(d)), onClick: () => {
@@ -696,6 +694,32 @@ async function zoomTo(day) {
   if (mqDesktop.matches) state.zoomDay = day;
   await render();
   document.querySelector("section.timeline")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Restaurant picker with the franchise logo in front of each name: a real drop-down (not the phone's native list).
+const restaurantLogo = (r) => (r?.franchise?.logo ? `/api/restaurants/${r.id}/logo?v=${r.franchise.logo_v}` : state.brand.logo ? `/api/auth/logo?v=${state.brand.logo_v}` : "logo.png");
+function restaurantSelect({ list, value, onChange }) {
+  const wrap = h("div", { class: "rs" });
+  const btn = h("button", { type: "button", class: "rs-btn", "aria-haspopup": "listbox", "aria-expanded": "false" });
+  const menu = h("ul", { class: "rs-menu", role: "listbox", hidden: true, tabindex: "-1" });
+  let active = Math.max(0, list.findIndex((r) => r.id === value));
+  const item = (r) => h("span", { class: "rs-item" }, h("img", { src: restaurantLogo(r), alt: "", width: 24, height: 24 }), h("span", {}, r.name));
+  const current = list.find((r) => r.id === value) ?? list[0];
+  btn.replaceChildren(current ? item(current) : "—", h("span", { class: "rs-caret", "aria-hidden": "true" }, "▾"));
+  const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); document.removeEventListener("pointerdown", outside, true); };
+  const outside = (e) => { if (!wrap.contains(e.target)) close(); };
+  const paint = () => [...menu.children].forEach((li, i) => { li.classList.toggle("active", i === active); li.setAttribute("aria-selected", String(list[i].id === value)); });
+  const choose = (i) => { close(); btn.focus(); if (list[i].id !== value) onChange(list[i].id); };
+  list.forEach((r, i) => menu.append(h("li", { role: "option", class: "rs-opt", onClick: () => choose(i), onPointerEnter: () => { active = i; paint(); } }, item(r))));
+  const open = () => { menu.hidden = false; btn.setAttribute("aria-expanded", "true"); active = Math.max(0, list.findIndex((r) => r.id === value)); paint(); document.addEventListener("pointerdown", outside, true); };
+  btn.addEventListener("click", () => (menu.hidden ? open() : close()));
+  btn.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { close(); return; }
+    if (["ArrowDown", "ArrowUp"].includes(e.key)) { e.preventDefault(); if (menu.hidden) open(); else { active = (active + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length; paint(); } }
+    if (e.key === "Enter" && !menu.hidden) { e.preventDefault(); choose(active); }
+  });
+  wrap.append(btn, menu);
+  return wrap;
 }
 
 // ---------- coverage timeline (vertical) ----------
@@ -2085,7 +2109,7 @@ async function renderAdmin() {
   const ov = await api("/admin/overview");
 
   // Restaurant pills: small franchise logo + name (an owner can have restaurants of several franchises); click to edit the franchise.
-  const logoSrc = (r) => (r.franchise?.logo ? `/api/restaurants/${r.id}/logo?v=${r.franchise.logo_v}` : state.brand.logo ? `/api/auth/logo?v=${state.brand.logo_v}` : "logo.png");
+  const logoSrc = restaurantLogo;
   const restaurantsPanel = h("section", { class: "panel" },
     h("div", { class: "resto-head" }, h("h2", {}, t("restaurants")), h("p", { class: "meta" }, t("addRestaurantInfo"))),
     h("div", { class: "resto-pills" }, ov.restaurants.map((r) => h("button", { class: "resto-pill", type: "button", title: t("franchiseEdit"), onClick: () => franchiseDialog(r, ov) },
@@ -2334,7 +2358,7 @@ function weeklyTargetsPanel(ov) {
     box.replaceChildren(
       h("h2", {}, t("targetsWeekTitle")), h("p", { class: "meta" }, t("targetsWeekHelp")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
-        h("label", { class: "field" }, h("span", {}, t("restaurant")), sel(ov.restaurants.map((r) => [r.id, r.name]), st.restaurant, (e) => { st.restaurant = Number(e.target.value); load(); })),
+        h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: ov.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; load(); } })),
         h("label", { class: "field" }, h("span", {}, t("department")), sel(DEPTS.map((d) => [d, t(`dept.${d}`)]), st.department, (e) => { st.department = e.target.value; load(); }))),
       h("div", { class: "weeknav", style: "margin:8px 0" },
         h("button", { class: "icon-btn", type: "button", "aria-label": t("prev"), onClick: () => { st.week = addDays(st.week, -7); load(); } }, "‹"),
@@ -2396,7 +2420,7 @@ function targetsPanel(ov) {
     box.replaceChildren(...[
       h("h2", {}, t("targetsPeriods")), h("p", { class: "meta" }, t("targetsHelp")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
-        h("label", { class: "field" }, h("span", {}, t("restaurant")), sel(ov.restaurants.map((r) => [r.id, r.name]), st.restaurant, (e) => { st.restaurant = Number(e.target.value); st.setId = 0; reload(); })),
+        h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: ov.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; st.setId = 0; reload(); } })),
         h("label", { class: "field" }, h("span", {}, t("department")), sel(DEPTS.map((d) => [d, t(`dept.${d}`)]), st.department, (e) => { st.department = e.target.value; reload(); })),
         h("label", { class: "field" }, h("span", {}, t("period")), sel(periodOpts, st.setId, (e) => { st.setId = Number(e.target.value); reload(); }))),
       h("div", { class: "period-bar" },
@@ -2437,7 +2461,7 @@ function fromField() {
 
 // Closed days (Christmas…) and special opening hours (Christmas Eve until 17:00, New Year's Day from 10:00).
 function specialHoursPanel(ov) {
-  const st = { restaurant: ov.restaurants[0]?.id };
+  const st = { restaurant: ov.restaurants[0]?.id, editing: null };
   const box = h("section", { class: "panel" });
   const reload = async () => { state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); draw(); };
   function draw() {
@@ -2454,6 +2478,9 @@ function specialHoursPanel(ov) {
     const hoursRow = h("div", { class: "sh-inline" }, h("label", { class: "field" }, h("span", {}, t("openTime")), open), h("label", { class: "field" }, h("span", {}, t("closeTime")), close));
     const note = h("input", { maxLength: 80, placeholder: t("specialNote"), "aria-label": t("specialNote") });
     const all = h("input", { type: "checkbox" });
+    // editing an entry: the form is filled with it, saving replaces it (a changed date removes the old one)
+    const cur = st.editing ? (resto.special_hours ?? []).find((x) => x.id === st.editing) ?? null : null;
+    if (cur) { date.value = cur.date; yearly.checked = !!cur.yearly; closed.checked = !!cur.closed; note.value = cur.note ?? ""; if (cur.open_time) open.value = cur.open_time; if (cur.close_time) close.value = cur.close_time; }
     const btnClosed = h("button", { type: "button", onClick: () => setMode(true) }, t("closedDay")), btnSpecial = h("button", { type: "button", onClick: () => setMode(false) }, t("specialHoursOption"));
     const sync = () => { hoursRow.hidden = closed.checked; btnClosed.setAttribute("aria-pressed", String(closed.checked)); btnSpecial.setAttribute("aria-pressed", String(!closed.checked)); };
     const setMode = (isClosed) => { closed.checked = isClosed; sync(); };
@@ -2461,6 +2488,8 @@ function specialHoursPanel(ov) {
     const add = async (e) => {
       e.preventDefault();
       try {
+        if (cur && cur.date !== date.value) await api(`/restaurants/${resto.id}/special-hours/${cur.id}`, { method: "DELETE" });
+        st.editing = null;
         for (const r of all.checked ? ov.restaurants : [resto])
           await api(`/restaurants/${r.id}/special-hours`, { method: "POST", body: { date: date.value, end_date: endDate.value || undefined, yearly: yearly.checked && !endDate.value, closed: closed.checked, open_time: open.value, close_time: close.value, note: note.value } });
         toast(t("saved")); await reload();
@@ -2468,10 +2497,10 @@ function specialHoursPanel(ov) {
     };
     const list = resto.special_hours ?? [];
     box.replaceChildren(h("h2", {}, t("specialHoursTitle")), h("p", { class: "meta" }, t("specialHoursHelp")),
-      h("label", { class: "field" }, h("span", {}, t("restaurant")), h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } }, ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+      h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: ov.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; st.editing = null; draw(); } })),
       list.length ? h("ul", { class: "sh-list" }, list.map((x) => h("li", {},
         h("span", {}, h("b", {}, fmt(x.date, { weekday: "short", day: "numeric", month: "long", ...(x.yearly ? {} : { year: "numeric" }) })), x.yearly ? ` · ${t("everyYear")}` : "", " — ", x.closed ? `⛔ ${t("closedDay")}` : `🕒 ${hm(x.open_time)}–${hm(x.close_time)}`, x.note ? ` · ${x.note}` : ""),
-        h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete"))))) : h("p", { class: "meta" }, t("noSpecialHours")),
+        h("span", { class: "sh-btns" }, h("button", { class: "btn sm", type: "button", onClick: () => { st.editing = x.id; draw(); box.scrollIntoView({ block: "nearest" }); } }, t("editWord")), h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (!(await ask(t("confirmDeleteSpecial")))) return; try { await api(`/restaurants/${resto.id}/special-hours/${x.id}`, { method: "DELETE" }); if (st.editing === x.id) st.editing = null; await reload(); } catch (err) { toast(errorText(err)); } } }, t("delete")))))) : h("p", { class: "meta" }, t("noSpecialHours")),
       h("form", { class: "td-body sh-form", onSubmit: add },
         // line 1: the dates and Closed
         h("div", { class: "sh-line sh-line1" }, h("label", { class: "field sh-d" }, h("span", {}, t("fromDate")), date), h("label", { class: "field sh-d" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate),
@@ -2479,7 +2508,8 @@ function specialHoursPanel(ov) {
         // line 2: special hours, description, all restaurants, Add
         h("div", { class: "sh-line" }, hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
           h("div", { class: "sh-end" }, ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
-            h("button", { class: "btn primary", type: "submit" }, t("add"))))));
+            cur ? h("button", { class: "btn", type: "button", onClick: () => { st.editing = null; draw(); } }, t("cancel")) : null,
+            h("button", { class: "btn primary", type: "submit" }, cur ? t("save") : t("add"))))));
   }
   draw();
   return box;
@@ -2552,9 +2582,7 @@ function hoursPanel(ov) {
     box.replaceChildren(
       h("h2", {}, t("hoursTitle")),
       h("p", { class: "meta" }, `${t("hoursHelp")} ${mealText(t("breakfastHelpShort"))}`),
-      h("label", { class: "field" }, h("span", {}, t("restaurant")),
-        h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } },
-          ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
+      h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: ov.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; draw(); } })),
       h("div", { class: "hrs-table" },
         h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerWord")), h("span", {}, t("startsAt"))),
         rows.map((r, i) => h("div", { class: "hrs-row" }, h("strong", {}, weekdayName(i)),
@@ -2786,14 +2814,19 @@ function staffCard(s, ov) {
   // The card is a compact row; the details open in their own dialog (separate from #modal, which the role dialogs use).
   // Icons grouped by restaurant: the roles held there, then ⭐ + the department icon for each department managed there.
   const shortName = (n) => n.split(/-des-|\sdes\s/)[0];
-  const byResto = ov.restaurants.map((r) => {
-    const roleIcons = [...new Set(s.roles.filter((x) => x.restaurant_id === r.id).map((x) => roleIcon(state.roles.find((y) => y.id === x.role_id))))];
-    const mgr = s.managers.filter((m) => m.restaurant_id === r.id).map((m) => deptIcon(m.department_id));
-    return { r, roleIcons, mgr };
-  }).filter((x) => x.roleIcons.length || x.mgr.length);
-  const iconBlock = h("span", { class: "staff-icons" }, byResto.map(({ r, roleIcons, mgr }) =>
-    h("span", { class: "resto-icons", title: r.name }, h("small", {}, shortName(r.name)), ` ${roleIcons.join(" ")}`,
-      mgr.length ? h("span", { class: "mgr-icons", title: t("managerOf") }, mgr.map((i) => h("span", {}, `⭐${i}`))) : null)));
+  const iconBlock = h("span", { class: "staff-icons" });
+  // redrawn whenever roles or managed departments change, so the list is up to date right away
+  const drawIcons = () => {
+    const byResto = ov.restaurants.map((r) => {
+      const roleIcons = [...new Set(s.roles.filter((x) => x.restaurant_id === r.id).map((x) => roleIcon(state.roles.find((y) => y.id === x.role_id))))];
+      const mgr = s.managers.filter((m) => m.restaurant_id === r.id).map((m) => deptIcon(m.department_id));
+      return { r, roleIcons, mgr };
+    }).filter((x) => x.roleIcons.length || x.mgr.length);
+    iconBlock.replaceChildren(...byResto.map(({ r, roleIcons, mgr }) =>
+      h("span", { class: "resto-icons", title: r.name }, h("small", {}, shortName(r.name)), ` ${roleIcons.join(" ")}`,
+        mgr.length ? h("span", { class: "mgr-icons", title: t("managerOf") }, mgr.map((i) => h("span", {}, `⭐${i}`))) : null)));
+  };
+  drawIcons();
   const nameEl = h("span", {}, s.name);
   const open = () => {
     let dlg = document.getElementById("staff-modal");
@@ -2831,6 +2864,7 @@ function staffCard(s, ov) {
     };
     // roles are saved as they change: show or hide the kitchen tab
     content.addEventListener("change", () => { if (tab === "roles") setTimeout(drawTabs, 400); });
+    content.addEventListener("change", () => setTimeout(drawIcons, 600));
     content.addEventListener("change", () => { if (tab === "roles") setTimeout(() => { if (hasKitchenRole(s) !== tabList().some(([id]) => id === "kitchen")) { const keep = content.firstChild; tabBar.replaceChildren(...tabList().map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { tab = id; draw(); } }, label))); void keep; } }, 700); });
     dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
       // Sticky header: Save submits the details form (form= attribute), Close just closes.
@@ -2839,7 +2873,7 @@ function staffCard(s, ov) {
         tabBar),
       content));
     draw();
-    dlg.addEventListener("close", () => { s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
+    dlg.addEventListener("close", () => { drawIcons(); s.first_name = first.value.trim() || s.first_name; s.last_name = last.value.trim(); nameEl.textContent = fullName() || s.name; s.name = nameEl.textContent; }, { once: true });
     dlg.showModal();
   };
   const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
