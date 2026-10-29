@@ -279,11 +279,15 @@ function absenceDialog({ forOther = false } = {}) {
     let reason = null;
     const note = h("input", { maxLength: 200, placeholder: t("absenceNote"), "aria-label": t("absenceNote") });
     const go = h("button", { class: "btn primary", type: "button", disabled: true, onClick: () => finish({ reason, note: note.value.trim() }) }, t("absenceConfirm"));
+    const cancel = h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel"));
+    const desktop = mqDesktop.matches; // desktop: the buttons sit in the red header, like the other dialogs
     const list = h("div", { class: "reason-list", role: "radiogroup", "aria-label": t("absenceReason") }, ABSENCE_REASONS.map((r) =>
       h("label", { class: "reason" }, h("input", { type: "radio", name: "absence-reason", value: r, onChange: () => { reason = r; go.disabled = false; } }), h("span", {}, t(`reason.${r}`)))));
+    const title = forOther ? t("reportAbsent") : t("imAbsent");
     dlg.replaceChildren(h("div", { class: "modal-body" },
-      h("h2", {}, forOther ? t("reportAbsent") : t("imAbsent")), h("p", { class: "meta" }, t("absenceHelp")), list, note,
-      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")), go)));
+      desktop ? h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, title), h("div", { class: "dlg-actions" }, cancel, go))) : h("h2", {}, title),
+      h("p", { class: "meta" }, t("absenceHelp")), list, note,
+      desktop ? null : h("div", { class: "actions" }, cancel, go)));
     dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
     dlg.showModal();
   });
