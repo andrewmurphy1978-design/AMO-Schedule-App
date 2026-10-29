@@ -773,3 +773,9 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
   .acc-form .radio{min-height:38px;padding:.2rem .8rem}
 }
 @media (max-width:600px){.acc-tabs button{font-size:.7rem;padding:.55rem .2rem}}
+
+.leave-group{margin-top:.6rem}.leave-group h3{margin:.4rem 0;font-size:1rem;color:var(--muted)}
+.leave-main{display:flex;flex-wrap:wrap;gap:.2rem .6rem;align-items:baseline}
+.leave-status.approved{color:#166534;font-weight:600}.leave-status.denied{color:#b91c1c;font-weight:600}.leave-status.requested{color:#92400e;font-weight:600}
+@media (prefers-color-scheme:dark){.leave-status.approved{color:#86efac}.leave-status.denied{color:#fca5a5}.leave-status.requested{color:#fcd34d}}
+@media (min-width:900px){.leave-row{display:flex;align-items:center;gap:.8rem;padding:.5rem .8rem}.leave-row .leave-main{flex:1;flex-wrap:nowrap;align-items:center;gap:.9rem;min-width:0}.leave-row .actions{margin:0 0 0 auto;flex:none;display:flex;gap:.4rem}.leave-row .actions .btn{min-height:34px;padding:0 .8rem}}

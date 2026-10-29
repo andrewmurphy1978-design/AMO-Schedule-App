@@ -1594,13 +1594,31 @@ async function timeOffNodes(part = "mine") {
       toast(res.shifts_on_those_days ? `${t("saved")} — ⚠ ${res.shifts_on_those_days} ${t("shiftsOnThoseDays")}` : t("saved")); render();
     } catch (e) { toast(errorText(e)); }
   };
-  const reviewBox = review.length || state.me.managed.length || state.me.me.is_admin ? h("section", { class: "panel" }, h("h2", {}, t("timeOffToReview")),
-    review.length ? review.map((r) => h("div", { class: "cov-row" }, h("div", {}, h("b", {}, r.staff_name), ` · ${dates(r)}`),
-      h("div", { class: "meta" }, `${statusText[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}`),
-      h("div", { class: "actions" },
-        r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
-        r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null)))
-    : h("p", { class: "meta" }, t("nothingToReview"))) : null;
+  // Dates of a request: desktop "26 octobre" (both years when it spans two), mobile as before with the year only on the second date.
+  const reviewDates = (r) => {
+    const twoYears = r.start_date.slice(0, 4) !== r.end_date.slice(0, 4);
+    const tail = r.start_time ? ` · ${r.start_time}–${r.end_time}` : "";
+    if (mqDesktop.matches) {
+      const d = (x, y) => fmt(x, { day: "numeric", month: "long", ...(y ? { year: "numeric" } : {}) });
+      return (r.start_date === r.end_date ? d(r.start_date, false) : `${d(r.start_date, twoYears)} → ${d(r.end_date, twoYears)}`) + tail;
+    }
+    const m = (x, y) => fmt(x, { weekday: "short", day: "numeric", month: "short", ...(y ? { year: "numeric" } : {}) });
+    return (r.start_date === r.end_date ? m(r.start_date, false) : `${m(r.start_date, false)} → ${m(r.end_date, twoYears)}`) + tail;
+  };
+  const reviewRow = (r) => {
+    const actions = h("div", { class: "actions" },
+      r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
+      r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null);
+    return h("div", { class: "cov-row leave-row" },
+      h("div", { class: "leave-main" }, h("b", {}, r.staff_name), h("span", {}, reviewDates(r)), h("span", { class: `leave-status ${r.status}` }, statusText[r.status] ?? r.status), r.note ? h("span", { class: "meta" }, r.note) : null),
+      actions);
+  };
+  const reviewGroup = (status, title) => {
+    const rows = review.filter((r) => r.status === status);
+    return h("div", { class: "leave-group" }, h("h3", {}, `${title} (${rows.length})`), rows.length ? rows.map(reviewRow) : h("p", { class: "meta" }, t("nothingToReview")));
+  };
+  const reviewBox = review.length || state.me.managed.length || state.me.me.is_admin ? h("section", { class: "panel" }, h("h2", {}, t("timeOffRequests")),
+    reviewGroup("requested", t("toAnswer")), reviewGroup("approved", t("grantedWord")), reviewGroup("denied", t("declinedWord"))) : null;
   // administrators decide in Administration → Congés; managers (no Administration access) keep the list here
   if (part === "review") return [reviewBox ?? h("p", { class: "meta" }, t("nothingToReview"))];
   return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);
