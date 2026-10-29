@@ -186,7 +186,6 @@ function renderChrome() {
   renderClientBanner();
   fsLabel();
   document.getElementById("lang-toggle").textContent = mqDesktop.matches ? (getLang() === "fr" ? "English" : "Français") : (getLang() === "fr" ? "EN" : "FR");
-  document.getElementById("footer").textContent = brandText("footer") || (state.brand.name === DEFAULT_BRAND.name ? t("footer") : state.brand.name);
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
@@ -1722,7 +1721,7 @@ function brandingPanel() {
   const name = text("name"), sender = text("sender_name");
   const color = h("input", { type: "color", value: b.color, "aria-label": t("brandColor") });
   const country = h("select", {}, [["CA", t("countryCA")], ["US", t("countryUS")], ["FR", t("countryFR")], ["BE", t("countryBE")], ["CH", t("countryCH")], ["OTHER", t("countryOTHER")]].map(([v, l]) => h("option", { value: v, selected: (b.country ?? "CA") === v }, l)));
-  const f = { title_fr: text("title_fr"), title_en: text("title_en"), intro_fr: text("intro_fr", 300), intro_en: text("intro_en", 300), footer_fr: text("footer_fr", 300), footer_en: text("footer_en", 300) };
+  const f = { title_fr: text("title_fr"), title_en: text("title_en"), intro_fr: text("intro_fr", 300), intro_en: text("intro_en", 300) };
   const logoBox = h("div", { class: "brand-logo" });
   const drawLogo = () => logoBox.replaceChildren(
     state.brand.logo ? h("img", { src: `/api/auth/logo?v=${state.brand.logo_v}`, alt: "", height: 56 }) : h("span", { class: "meta" }, "—"),
@@ -1751,7 +1750,6 @@ function brandingPanel() {
       h("h3", {}, t("brandLoginTexts")), h("p", { class: "meta" }, t("brandBlankDefault")),
       h("div", { class: "form-row r2" }, field(`${t("brandTitle")} (FR)`, f.title_fr), field(`${t("brandTitle")} (EN)`, f.title_en)),
       field(`${t("brandIntro")} (FR)`, f.intro_fr), field(`${t("brandIntro")} (EN)`, f.intro_en),
-      field(`${t("brandFooter")} (FR)`, f.footer_fr), field(`${t("brandFooter")} (EN)`, f.footer_en),
       h("button", { class: "btn primary", type: "submit" }, t("save"))));
 }
 
