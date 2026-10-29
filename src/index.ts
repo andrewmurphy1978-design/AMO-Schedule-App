@@ -1395,7 +1395,10 @@ app.get("/api/admin/incidents", requireAdmin, async (c) => {
   return c.json({ incidents: rows.results, last_12_months: counts.results });
 });
 
-app.post("/api/admin/incidents", requireAdmin, async (c) => {
+// Administrators, and the managers of an employee's department, record incidents (no-show, late arrival, early departure).
+// Only administrators can read or delete them.
+app.post("/api/admin/incidents", async (c) => {
+  const me = c.get("me");
   const b = await c.req.json<{ staff_id?: number; shift_id?: number | null; incident_date?: string; kind?: string; minutes?: number | null; notes?: string }>();
   if (!b.staff_id || !INCIDENT_KINDS.includes(b.kind ?? "")) return c.json({ error: "bad_request" }, 400);
   if (!DATE_RE3.test(b.incident_date ?? "")) return c.json({ error: "invalid_dates" }, 400);
@@ -1403,10 +1406,12 @@ app.post("/api/admin/incidents", requireAdmin, async (c) => {
   const minutes = b.minutes ?? null;
   if (minutes !== null && !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440)) return c.json({ error: "invalid_minutes" }, 400);
   if (!(await c.env.DB.prepare("SELECT 1 FROM staff WHERE id = ?").bind(b.staff_id).first())) return c.json({ error: "not_found" }, 404);
+  if (!(await canDecideFor(c.env.DB, me, b.staff_id))) return c.json({ error: "forbidden" }, 403); // not an administrator or a manager of that employee, or yourself
   let restaurantId: number | null = null;
   if (b.shift_id) {
-    const sh = await c.env.DB.prepare("SELECT restaurant_id, staff_id FROM shifts WHERE id = ?").bind(b.shift_id).first<{ restaurant_id: number; staff_id: number }>();
+    const sh = await c.env.DB.prepare("SELECT sh.restaurant_id, sh.staff_id, ro.department_id FROM shifts sh JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(b.shift_id).first<{ restaurant_id: number; staff_id: number; department_id: string }>();
     if (!sh) return c.json({ error: "shift_not_found" }, 404);
+    if (!me.is_admin && (sh.staff_id !== b.staff_id || !(await canManage(c.env.DB, me, sh.restaurant_id, sh.department_id)))) return c.json({ error: "forbidden" }, 403);
     restaurantId = sh.restaurant_id;
   }
   const r = await c.env.DB.prepare("INSERT INTO incidents (staff_id, shift_id, restaurant_id, incident_date, kind, minutes, notes, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -1422,8 +1427,9 @@ app.delete("/api/admin/incidents/:id", requireAdmin, async (c) => {
 });
 
 // An employee's shifts around a date, to link an incident to the right shift.
-app.get("/api/admin/staff/:id/shifts", requireAdmin, async (c) => {
+app.get("/api/admin/staff/:id/shifts", async (c) => {
   const id = intParam(c.req.param("id"));
+  if (!id || !(await canDecideFor(c.env.DB, c.get("me"), id))) return c.json({ error: "forbidden" }, 403);
   const date = c.req.query("date") ?? "";
   if (!id || !DATE_RE3.test(date)) return c.json({ error: "bad_request" }, 400);
   const r = await c.env.DB.prepare(

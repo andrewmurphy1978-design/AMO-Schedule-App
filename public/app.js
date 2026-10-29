@@ -1103,8 +1103,8 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   // Sticky header: title and every button (the form fields scroll underneath). Save submits the form through the form= attribute.
   const actions = h("div", { class: "dlg-actions wrap" },
     shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn sm", type: "button", title: t("reportAbsent"), onClick: async () => { const why = await absenceDialog({ forOther: true }); if (why) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST", body: why }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
-    shift && state.me.me.is_admin ? h("button", { class: "btn sm", type: "button", onClick: async () => {
-      const list = await api("/admin/overview").then((o) => o.staff).catch(() => []);
+    shift && (state.me.me.is_admin || data.editable) && shift.staff_id !== state.me.me.id ? h("button", { class: "btn sm", type: "button", onClick: async () => {
+      const list = await api("/staff").catch(() => []); // administrators: everybody; managers: the people they manage
       dlg.close(); incidentDialog({ staffList: list, staffId: shift.staff_id, date: dayOf(shift.start_at), shift });
     } }, t("recordIncident")) : null,
     shift ? h("button", { class: "btn sm danger", type: "button", onClick: del }, t("delete")) : null,
