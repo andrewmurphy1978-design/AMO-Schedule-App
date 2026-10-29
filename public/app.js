@@ -2126,7 +2126,7 @@ async function renderAdmin() {
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
-    h("button", { type: "button", "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
+    h("button", { type: "button", "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, mqDesktop.matches ? t(label) : t(`${label}Short`))));
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
 }
 
