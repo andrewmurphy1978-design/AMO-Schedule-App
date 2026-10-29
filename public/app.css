@@ -796,7 +796,9 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .hrs-row .mini{display:block}.hrs-row .mini>span{display:block;font-size:.75rem;color:var(--muted);font-weight:600;margin-bottom:2px}
 .hrs-until{font-size:.85rem}
 @media (min-width:900px){
-  .hrs-head,.hrs-row{grid-template-columns:100px repeat(2,minmax(0,1fr)) 90px repeat(2,minmax(0,1fr));padding-bottom:0;border:0}
+  .hrs-head,.hrs-row{grid-template-columns:90px 150px 150px 64px 150px 214px;justify-content:space-between;padding-bottom:0;border:0}
+  .hrs-row .time24{width:100%;max-width:none}.hrs-row .time24 select{min-width:0;flex:1;padding-left:.4rem;padding-right:.2rem}
+  .hrs-row .mini.dn .time24{flex:1}.hrs-row .mini.dn .check{flex:none}
   .hrs-head{display:grid;font-size:.8rem;color:var(--muted);font-weight:600}
   .hrs-row .mini>span{display:none}.hrs-row .hrs-until{display:none}
   .hrs-row strong{grid-column:auto}.hrs-row .mini.dn{display:flex;align-items:center;gap:.4rem}.hrs-row .hrs-bf{justify-content:center}
