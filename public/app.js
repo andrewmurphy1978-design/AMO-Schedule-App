@@ -144,7 +144,9 @@ function toast(msg) {
 
 function errorText(e) {
   const map = { forbidden: "forbidden", invalid_times: "invalidTimes", staff_does_not_hold_role_at_restaurant: "notHeld" };
-  return t(map[e?.body?.error] ?? "genericError");
+  const key = map[e?.body?.error];
+  // Unknown failures name their code so they can be traced.
+  return key ? t(key) : `${t("genericError")} (${e?.body?.error ?? e?.status ?? "network"})`;
 }
 
 // ---------- state ----------
@@ -983,7 +985,6 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const dlg = document.getElementById("modal");
   const sel = state.sel;
   const rolesById = new Map(state.roles.map((r) => [r.id, r]));
-  const deptRoles = state.roles.filter((r) => sel.departments.includes(r.department_id));
   const initial = shift
     ? { staff_id: shift.staff_id, role_id: shift.role_id, date: dayOf(shift.start_at), start: hhmm(shift.start_at), end: hhmm(shift.end_at), notes: shift.notes ?? "", until_close: !!shift.until_close }
     : { staff_id: prefill.staff_id ?? roster[0]?.staff_id, role_id: null, date: prefill.date ?? sel.day, start: "11:00", end: "17:00", notes: "", until_close: false };
@@ -1008,7 +1009,9 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const person = roster.find((r) => r.staff_id === Number(staffSel.value));
     const ids = person?.role_ids ?? [];
     const keep = Number(roleSel.value) || initial.role_id;
-    roleSel.replaceChildren(...deptRoles.filter((r) => ids.includes(r.id)).map((r) =>
+    // the shift's own main role stays selectable even when its department is not among the displayed ones
+    const offered = state.roles.filter((r) => ids.includes(r.id) && (sel.departments.includes(r.department_id) || (shift && r.id === shift.role_id && person?.staff_id === shift.staff_id)));
+    roleSel.replaceChildren(...offered.map((r) =>
       h("option", { value: r.id, selected: r.id === keep }, roleName(r, person?.sex))));
     drawAlso();
   };
