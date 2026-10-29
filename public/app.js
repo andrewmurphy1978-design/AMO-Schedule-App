@@ -609,7 +609,7 @@ async function renderSchedule() {
   const allDraft = datas.every((d) => !d.published);
   const barText = editableDepts.length
     ? (draftDepts.length ? `📝 ${t("draftState")}${editableDepts.length > 1 ? ` (${draftDepts.map((d) => t(`dept.${d}`)).join(", ")})` : ""} — ${t("draftHelp")}` : `✅ ${t("publishedState")}`)
-    : allDraft ? `📝 ${t("notPublishedYet")}` : `✅ ${t("publishedState")}`;
+    : allDraft ? `📝 ${t("notPublishedYet")}` : `✅ ${t("publishedStateEmployee")}`;
   const barButton = editableDepts.length
     ? (draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: tryPublish }, t("publishBtn"))
         : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
