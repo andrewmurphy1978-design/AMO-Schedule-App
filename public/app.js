@@ -284,7 +284,7 @@ function absenceDialog({ forOther = false } = {}) {
     const list = h("div", { class: "reason-list", role: "radiogroup", "aria-label": t("absenceReason") }, ABSENCE_REASONS.map((r) =>
       h("label", { class: "reason" }, h("input", { type: "radio", name: "absence-reason", value: r, onChange: () => { reason = r; go.disabled = false; } }), h("span", {}, t(`reason.${r}`)))));
     const title = forOther ? t("reportAbsent") : t("imAbsent");
-    dlg.replaceChildren(h("div", { class: "modal-body" },
+    dlg.replaceChildren(h("div", { class: `modal-body ${desktop ? "staff-dialog" : ""}` },
       desktop ? h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, title), h("div", { class: "dlg-actions" }, cancel, go))) : h("h2", {}, title),
       h("p", { class: "meta" }, t("absenceHelp")), list, note,
       desktop ? null : h("div", { class: "actions" }, cancel, go)));
