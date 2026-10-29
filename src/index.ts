@@ -188,8 +188,9 @@ function collectBodyIds(v: unknown, out: [Owned, number][], depth = 0) {
   if (Array.isArray(v)) { for (const x of v.slice(0, 2000)) collectBodyIds(x, out, depth + 1); return; }
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
     const kind = BODY_OWNERS[k];
-    if (kind && typeof x === "number" && Number.isInteger(x)) out.push([kind, x]);
-    else if (kind && typeof x === "string" && /^\d+$/.test(x)) out.push([kind, Number(x)]);
+    // 0 means "none" (e.g. set_id 0 = the base targets): there is nothing to own
+    if (kind && typeof x === "number" && Number.isInteger(x)) { if (x > 0) out.push([kind, x]); }
+    else if (kind && typeof x === "string" && /^\d+$/.test(x)) { if (Number(x) > 0) out.push([kind, Number(x)]); }
     else collectBodyIds(x, out, depth + 1);
   }
 }
