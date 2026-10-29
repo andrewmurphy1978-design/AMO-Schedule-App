@@ -2745,7 +2745,7 @@ function staffCard(s, ov) {
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
     // the kitchen tab only exists for Chef, Cook and Assistant cook
-    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", t("scheduleAccessTab")]];
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", mqDesktop.matches ? t("tabDaysOff") : t("fixedDaysOff")], ["availability", mqDesktop.matches ? t("tabAvailability") : t("availability")], ["timeoff", mqDesktop.matches ? t("tabTimeOff") : t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", mqDesktop.matches ? t("tabSchedules") : t("scheduleAccessTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
