@@ -735,3 +735,4 @@ button.vtl-cell{border:0;border-bottom:1px solid color-mix(in srgb,var(--line) 6
 button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2px solid var(--brand,#da291c);outline-offset:-2px}
 
 @media (min-width:900px){.gaps{display:grid;grid-template-columns:1fr 1fr;gap:.5rem .8rem;align-items:start}.gaps>*{margin:0 !important;min-width:0}.gaps>.wide{grid-column:1/-1}}
+@media (min-width:900px){.gaps.three{grid-template-columns:repeat(3,minmax(0,1fr))}}

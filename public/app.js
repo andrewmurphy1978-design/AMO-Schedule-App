@@ -820,7 +820,7 @@ function renderSummary({ days, payroll, sel, data, boxes }) {
   return h("section", { class: "timeline summary" },
     h("h2", {}, `${t("summaryTab")} — ${weekLabel(sel.week)}`),
     // the same warnings as the coverage view, for the whole week
-    h("div", { class: "gaps" }, boxes.gapBox, boxes.extraBox, conflictBox ? (conflictBox.classList.add("wide"), conflictBox) : null),
+    h("div", { class: `gaps ${conflictBox ? "three" : ""}` }, boxes.gapBox, boxes.extraBox, conflictBox),
     h("div", { class: "payroll" },
       h("table", { class: "pay-table" },
         h("thead", {}, h("tr", {}, h("th"), cols.map((c) => h("th", {}, t(`dept.${c.dept}`))), cols.length > 1 ? h("th", { class: "pay-total" }, t("total")) : null)),
