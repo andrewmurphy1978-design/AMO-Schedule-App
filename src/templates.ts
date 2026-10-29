@@ -76,6 +76,14 @@ export const T = {
     l === "fr" ? { subject: c.approved ? "Congé accordé" : "Congé refusé", text: `Ta demande de congé du ${c.from} au ${c.to} est ${c.approved ? "accordée" : "refusée"}.${c.note ? ` Note : ${c.note}` : ""}` }
                : { subject: c.approved ? "Time off approved" : "Time off declined", text: `Your time-off request from ${c.from} to ${c.to} was ${c.approved ? "approved" : "declined"}.${c.note ? ` Note: ${c.note}` : ""}` },
 
+  // Sent to every employee who works in a schedule when it is published. Email lists the shifts; SMS stays short.
+  schedulePublished: (l: Lang, c: { restaurant: string; from: string; to: string; lines: string[]; url: string; sms: boolean }): Msg => {
+    const n = c.lines.length;
+    return l === "fr"
+      ? { subject: `Horaire publié — ${c.restaurant}`, text: `Mikes: l’horaire du ${c.from} au ${c.to} (${c.restaurant}) est publié. ${c.sms ? `Tu as ${n} quart${n > 1 ? "s" : ""}.` : `Tes quarts :\n${c.lines.join("\n")}`}${c.url ? `\n${c.url}` : ""}` }
+      : { subject: `Schedule published — ${c.restaurant}`, text: `Mikes: the schedule for ${c.from} to ${c.to} (${c.restaurant}) is published. ${c.sms ? `You have ${n} shift${n > 1 ? "s" : ""}.` : `Your shifts:\n${c.lines.join("\n")}`}${c.url ? `\n${c.url}` : ""}` };
+  },
+
   test: (l: Lang): Msg =>
     l === "fr" ? { subject: "Message test", text: "Mikes: ceci est un message test. La messagerie fonctionne!" } : { subject: "Test message", text: "Mikes: this is a test message. Messaging works!" },
 };

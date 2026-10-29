@@ -155,6 +155,7 @@ const state = {
 
 const DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 state.zoomDay = null; // desktop coverage: a single day shown large (set by clicking a day header)
+state.notifyOnPublish = (() => { try { return localStorage.getItem("notifyOnPublish") !== "0"; } catch { return true; } })();
 state.scheduleTab = (() => { try { return localStorage.getItem("scheduleTab") || "coverage"; } catch { return "coverage"; } })();
 state.tableOrder = (() => { try { return localStorage.getItem("tableOrder") || "alpha"; } catch { return "alpha"; } })();
 state.showHourlyCost = (() => { try { return localStorage.getItem("hourlyCost") === "1"; } catch { return false; } })();
@@ -415,8 +416,8 @@ async function renderSchedule() {
   const today = ymd(new Date());
 
   // The table order and Print/PDF live in the publish bar below the sticky line.
-  const orderField = h("label", { class: "field desktop-only order-field" }, h("span", {}, t("tableOrder")),
-      h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
+  const orderField = h("label", { class: "field desktop-only order-field" },
+      h("select", { "aria-label": t("tableOrder"), title: t("tableOrder"), onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
         [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v, title: l }, l))));
   const printField = h("div", { class: "field desktop-only" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", title: t("printHint"), onClick: async () => {
@@ -600,8 +601,9 @@ async function renderSchedule() {
   };
   const setPublished = async (list, published) => {
     try {
-      await Promise.all(list.map((d) => api("/schedule/publish", { method: "POST", body: { restaurant_id: sel.restaurant, department_id: d, week: sel.week, published } })));
-      toast(published ? t("publishedToast") : t("unpublishedToast")); render();
+      const results = await Promise.all(list.map((d) => api("/schedule/publish", { method: "POST", body: { restaurant_id: sel.restaurant, department_id: d, week: sel.week, published, notify: state.notifyOnPublish } })));
+      const n = results.reduce((a, r) => a + (r.notified ?? 0), 0);
+      toast(published ? `${t("publishedToast")}${n ? ` ${n} ${t("employeesNotified")}` : ""}` : t("unpublishedToast")); render();
     } catch (e) { if (e.body?.error === "conflicts") await confirmDialog({ title: t("cannotPublishTitle"), message: t("fixConflictsFirst"), yes: t("ok") }); else toast(errorText(e)); }
   };
   const allDraft = datas.every((d) => !d.published);
@@ -613,7 +615,9 @@ async function renderSchedule() {
         : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
     : null;
   const publishBar = h("div", { class: `publish-bar ${editableDepts.length ? (draftDepts.length ? "draft" : "live") : allDraft ? "draft" : "live"}` },
-    h("span", { class: "pb-text" }, barText), h("div", { class: "pb-tools" }, barButton, orderField, printField));
+    h("span", { class: "pb-text" }, barText), h("div", { class: "pb-tools" },
+      draftDepts.length && editableDepts.length ? h("label", { class: "check notify-check" }, h("input", { type: "checkbox", checked: state.notifyOnPublish, onChange: (e) => { state.notifyOnPublish = e.target.checked; try { localStorage.setItem("notifyOnPublish", e.target.checked ? "1" : "0"); } catch { /* ignore */ } } }), h("span", {}, t("notifyEmployees"))) : null,
+      barButton, orderField, printField));
   $app.replaceChildren(...[printHead, controls, publishBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
   syncStickyOffsets();
 }

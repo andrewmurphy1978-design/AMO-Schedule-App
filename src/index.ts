@@ -13,10 +13,10 @@ import { DEFAULT_BOUNDARIES, periodKeys, remapPeriods, validBoundaries } from ".
 import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
 import { splitName, joinName, genderedRole } from "../public/names.js";
-import { loadConnections, deliver, notifyStaff } from "./notify.ts";
+import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
-import { T, formatWhen, type Lang } from "./templates.ts";
+import { T, formatWhen, formatDate, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { EVENTS, MAX_ENDPOINTS, queueEvent, flushDeliveries, validateUrl, validateEvents, newSecret, staffData, shiftData, timeOffData, coverageData, type EventName } from "./webhooks.ts";
@@ -1946,7 +1946,7 @@ app.get("/api/schedule", async (c) => {
 // Publish (or take back) one schedule: restaurant + department + week. Administrators, and managers of that department.
 app.post("/api/schedule/publish", async (c) => {
   const me = c.get("me");
-  const b = await c.req.json<{ restaurant_id?: number; department_id?: string; week?: string; published?: boolean }>().catch(() => ({} as any));
+  const b = await c.req.json<{ restaurant_id?: number; department_id?: string; week?: string; published?: boolean; notify?: boolean }>().catch(() => ({} as any));
   if (!b.restaurant_id || !b.department_id || !weekBounds(b.week ?? "") || typeof b.published !== "boolean") return c.json({ error: "bad_request" }, 400);
   if (!(await canManage(c.env.DB, me, b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
   if (b.published) {
@@ -1959,10 +1959,38 @@ app.post("/api/schedule/publish", async (c) => {
     ).bind(b.restaurant_id, b.department_id, wb.start, wb.end).first<{ n: number }>();
     if (clash?.n) return c.json({ error: "conflicts", count: clash.n }, 409);
   }
+  const wasPublished = !!(await c.env.DB.prepare("SELECT 1 FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).first());
   if (b.published) await c.env.DB.prepare("INSERT OR REPLACE INTO schedule_publications (restaurant_id, department_id, week_start, published_at, published_by) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.week, Date.now(), me.id).run();
   else await c.env.DB.prepare("DELETE FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).run();
   emit(c, b.published ? "schedule.published" : "schedule.unpublished", async () => ({ restaurant_id: b.restaurant_id, department_id: b.department_id, week: b.week }));
-  return c.json({ ok: true, published: b.published });
+  // Tell every employee who works in it (only when it goes from draft to published, and unless the caller says notify:false).
+  let notified = 0;
+  if (b.published && !wasPublished && b.notify !== false) {
+    const wb = weekBounds(b.week!)!;
+    const rows = (await c.env.DB.prepare(
+      `SELECT s.id, s.name, s.phone, s.email, s.lang, s.notify_channel, sh.start_at, sh.end_at, sh.until_close
+       FROM shifts sh JOIN staff s ON s.id = sh.staff_id
+       WHERE sh.restaurant_id = ? AND (SELECT department_id FROM roles WHERE id = sh.role_id) = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?
+         AND s.active = 1 AND s.client_id = ? ORDER BY sh.start_at`,
+    ).bind(b.restaurant_id, b.department_id, wb.start, wb.end, me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null; lang: string; notify_channel: string; start_at: string; end_at: string; until_close: number }>()).results;
+    const people = new Map<number, { person: StaffContact; shifts: typeof rows }>();
+    for (const r of rows) { const e = people.get(r.id) ?? { person: { id: r.id, name: r.name, phone: r.phone, email: r.email, lang: r.lang, notify_channel: r.notify_channel }, shifts: [] }; e.shifts.push(r); people.set(r.id, e); }
+    notified = people.size;
+    if (notified) c.executionCtx.waitUntil((async () => {
+      try {
+        const conn = await loadConnections(c.env, c.env.DB, me.client_id);
+        const restaurant = (await c.env.DB.prepare("SELECT name FROM restaurants WHERE id = ?").bind(b.restaurant_id).first<{ name: string }>())?.name ?? "";
+        const last = new Date(Date.parse(`${b.week}T00:00:00Z`) + 6 * 86_400_000).toISOString().slice(0, 10);
+        for (const { person, shifts } of people.values()) {
+          await notifyStaff(c.env.DB, conn, person, (lang, channel) => T.schedulePublished(lang, {
+            restaurant, from: formatDate(b.week!, lang), to: formatDate(last, lang), url: conn.appUrl, sms: channel === "sms",
+            lines: shifts.map((x) => formatWhen(x.start_at, x.end_at, !!x.until_close, lang)),
+          }), "schedule_published");
+        }
+      } catch { /* messaging never blocks publishing */ }
+    })());
+  }
+  return c.json({ ok: true, published: b.published, notified });
 });
 
 // The caller's own shifts across every restaurant and department.

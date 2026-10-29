@@ -59,7 +59,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Employees | `GET /admin/overview` (A: staff, roles, managers, restaurants), `GET /staff` (M), `POST /staff` (A), `PUT /staff/:id` (A), `PUT /staff/:id/active\|admin\|wage\|sin\|limit\|planning` (A) |
 | Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast\|periods` (A) |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
-| Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published}` (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=`, `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
+| Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=`, `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
 | Targets | `GET/PUT /targets`, `GET/POST/PUT/DELETE /target-sets` |
 | Time off / availability | `/time-off*`, `/availability*` |
 | Sick calls | `POST /shifts/:id/sick`, `GET /coverage`, `/coverage/:id/*` |
@@ -170,6 +170,7 @@ A schedule is one **restaurant + department + week (Monday)**. New schedules are
 (and API tokens, which act as administrators) can see their shifts. Employees do not see them in the schedule view, in "my shifts" or in their calendar feed until someone
 clicks **Publier** (or calls `POST /api/schedule/publish`). A shift follows the publication state of the department of its **main role**.
 Everything planned before this feature existed was marked published automatically. Taking a schedule back (`published:false`) hides it again.
+When a schedule goes from draft to published, every active employee who has a shift in it is told by SMS or email (their preferred channel and language), unless `notify:false` is sent (the browser has a "Notifier les employés" checkbox). Publishing an already-published schedule does not notify again.
 **Publishing is refused** with `409 {"error":"conflicts","count":n}` while anybody on that schedule is booked twice at the same time (any restaurant or department); fix the shifts first. (Staffing shortages/surpluses are only a warning in the browser; the API does not check them.) Unpublishing is always allowed.
 Webhooks (`shift.*`, `schedule.*`) are sent for drafts too (the CRM is an administrator-level reader); use `schedule.published` to know when employees can see a week.
 
