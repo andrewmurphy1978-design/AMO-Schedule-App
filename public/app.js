@@ -1550,7 +1550,7 @@ function availabilityEditor(staffId, part = "both") {
 }
 
 // Time-off requests and decisions, as a list of blocks (shown in Mon compte → Congés).
-async function timeOffNodes() {
+async function timeOffNodes(part = "mine") {
   const today = ymd(new Date());
   const [mine, review] = await Promise.all([api("/time-off/mine"), api("/time-off/review")]);
   const from = h("input", { type: "date", required: true, value: today });
@@ -1601,7 +1601,9 @@ async function timeOffNodes() {
         r.status !== "approved" ? h("button", { class: "btn primary", type: "button", onClick: () => decide(r, true) }, t("approve")) : null,
         r.status !== "denied" ? h("button", { class: "btn danger", type: "button", onClick: () => decide(r, false) }, t("deny")) : null)))
     : h("p", { class: "meta" }, t("nothingToReview"))) : null;
-  return [form, myList, reviewBox].filter(Boolean);
+  // administrators decide in Administration → Congés; managers (no Administration access) keep the list here
+  if (part === "review") return [reviewBox ?? h("p", { class: "meta" }, t("nothingToReview"))];
+  return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);
 }
 
 async function renderAccount() {
@@ -2051,7 +2053,7 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["branding", "adminBranding"], ["api", "adminApi"], ["webhooks", "adminWebhooks"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["targets", "adminTargets"], ["staff", "adminStaff"], ["messaging", "adminMessaging"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["timeoff", "adminTimeOff"], ["branding", "adminBranding"], ["api", "adminApi"], ["webhooks", "adminWebhooks"]];
 state.adminSection = "restaurants";
 
 async function renderAdmin() {
@@ -2097,6 +2099,7 @@ async function renderAdmin() {
     clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
+    timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
     h("button", { type: "button", "aria-current": state.adminSection === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, t(label))));
