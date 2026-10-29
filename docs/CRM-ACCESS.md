@@ -4,7 +4,7 @@
 > reach the schedule app. It is kept up to date with the app: the date and the change log at the bottom say
 > what changed last. **Never paste secrets into this file.**
 
-Last updated: 2026-10-28 · App version: webhooks (migration 0036) and later.
+Last updated: 2026-10-28 · App version: draft/publish schedules (migration 0037) and later.
 
 ## 1. What the app is
 
@@ -59,7 +59,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Employees | `GET /admin/overview` (A: staff, roles, managers, restaurants), `GET /staff` (M), `POST /staff` (A), `PUT /staff/:id` (A), `PUT /staff/:id/active\|admin\|wage\|sin\|limit\|planning` (A) |
 | Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast\|periods` (A) |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
-| Schedule | `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)`, `GET /my-shifts?week=`, `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
+| Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published}` (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=`, `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
 | Targets | `GET/PUT /targets`, `GET/POST/PUT/DELETE /target-sets` |
 | Time off / availability | `/time-off*`, `/availability*` |
 | Sick calls | `POST /shifts/:id/sick`, `GET /coverage`, `/coverage/:id/*` |
@@ -131,6 +131,7 @@ Webhooks are managed by a signed-in person only, never with an API token.
 | `shift.created` / `shift.updated` | shift saved | `{ shift: {id,staff_id,restaurant_id,role_id,start_at,end_at,until_close,notes,status} }` |
 | `shift.deleted` | shift removed | same (state just before deletion) |
 | `schedule.applied` | AI schedule applied | `{ restaurant_id, week, created, removed }` |
+| `schedule.published` / `schedule.unpublished` | a schedule (restaurant + department + week) published or taken back | `{ restaurant_id, department_id, week }` |
 | `time_off.requested` | employee asks for leave | `{ time_off: {id,staff_id,start_date,end_date,start_time,end_time,status,note,decision_note} }` |
 | `time_off.decided` | approved / denied (or entered already approved by a manager) | same |
 | `time_off.cancelled` | cancelled / withdrawn | same |
@@ -163,6 +164,14 @@ function verify(rawBody, header, secret) {
 **Delivery rules:** answer with any `2xx` within 8 seconds. Otherwise the app retries after 5 min, 15 min, 1 h, 6 h, 24 h (6 attempts in all), then marks it failed (it can be resent from the Journal). 30 failed deliveries in a row switch the endpoint off. Delivery is **at least once** and not strictly ordered: de-duplicate with `X-AMS-Delivery`, and when order matters re-read the object (`GET /api/...`) or compare `created_at`.
 Redirects are not followed. Events of one client only ever go to that client's endpoints.
 
+## 6c. Draft and published schedules
+
+A schedule is one **restaurant + department + week (Monday)**. New schedules are **drafts**: only administrators and the managers of that department
+(and API tokens, which act as administrators) can see their shifts. Employees do not see them in the schedule view, in "my shifts" or in their calendar feed until someone
+clicks **Publier** (or calls `POST /api/schedule/publish`). A shift follows the publication state of the department of its **main role**.
+Everything planned before this feature existed was marked published automatically. Taking a schedule back (`published:false`) hides it again.
+Webhooks (`shift.*`, `schedule.*`) are sent for drafts too (the CRM is an administrator-level reader); use `schedule.published` to know when employees can see a week.
+
 ## 7. Gaps / proposed work
 
 - [x] API tokens per client (read/write, revocable, hashed).
@@ -183,6 +192,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-29 | **Draft / publish** schedules (per restaurant + department + week), `POST /api/schedule/publish`, events `schedule.published` / `schedule.unpublished`, migration 0037. New "Sommaire" tab in the Horaire screen. |
 | 2026-10-28 | **Webhooks** (Administration → Webhooks; signed `POST`s, retries; migration 0036). |
 | 2026-10-28 | **API tokens** (Administration → Accès API; `Authorization: Bearer ams_...`; read/write; migration 0035). |
 | 2026-10-28 | File created. In-app sign-in, per-client branding, multi-client (clients, tenant guard), migration 0034 fix. |

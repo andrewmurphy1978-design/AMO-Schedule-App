@@ -558,12 +558,29 @@ async function renderSchedule() {
         data.hours ? totalCell(id) : null))
       : h("tr", {}, h("td", { colSpan: 9 }, h("div", { class: "empty" }, t("noShiftsWeek")))))));
 
-  const timeline = renderTimeline({ data, days, targets, sets, payroll, openEditor });
+  const onSummary = state.scheduleTab === "summary" && !!payroll;
+  const timeline = onSummary ? null : renderTimeline({ data, days, targets, sets, payroll, openEditor });
   const setTab = (v) => { state.scheduleTab = v; try { localStorage.setItem("scheduleTab", v); } catch { /* ignore */ } render(); };
+  if (state.scheduleTab === "summary" && !payroll) state.scheduleTab = "coverage"; // the summary exists for administrators only
   const subtabs = h("div", { class: "subtabs", role: "tablist" },
-    ...[["coverage", t("coverageTab")], ["table", t("tableTab")]].map(([v, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.scheduleTab === v), onClick: () => setTab(v) }, l)), status);
+    ...[["coverage", t("coverageTab")], ["table", t("tableTab")], ...(payroll ? [["summary", t("summaryTab")]] : [])].map(([v, l]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.scheduleTab === v), onClick: () => setTab(v) }, l)), status);
   const onTable = state.scheduleTab === "table";
-  $app.replaceChildren(...[printHead, controls, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : [timeline]), fab].filter(Boolean));
+  // Draft / published: new schedules are seen only by administrators and the managers of the department until published.
+  const editableDepts = depts.filter((d, i) => datas[i].editable);
+  const draftDepts = editableDepts.filter((d) => !datas[depts.indexOf(d)].published);
+  const setPublished = async (list, published) => {
+    try {
+      await Promise.all(list.map((d) => api("/schedule/publish", { method: "POST", body: { restaurant_id: sel.restaurant, department_id: d, week: sel.week, published } })));
+      toast(published ? t("publishedToast") : t("unpublishedToast")); render();
+    } catch (e) { toast(errorText(e)); }
+  };
+  const publishBar = editableDepts.length
+    ? h("div", { class: `publish-bar ${draftDepts.length ? "draft" : "live"}` },
+        h("span", {}, draftDepts.length ? `📝 ${t("draftState")}${editableDepts.length > 1 ? ` (${draftDepts.map((d) => t(`dept.${d}`)).join(", ")})` : ""} — ${t("draftHelp")}` : `✅ ${t("publishedState")}`),
+        draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: () => setPublished(draftDepts, true) }, t("publishBtn"))
+          : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
+    : datas.every((d) => !d.published) ? h("div", { class: "publish-bar draft" }, `📝 ${t("notPublishedYet")}`) : null;
+  $app.replaceChildren(...[printHead, controls, subtabs, publishBar, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
 }
 
 
@@ -613,13 +630,63 @@ function assignLanes(items) {
   return Math.max(1, lanes.length);
 }
 
-function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
+// Employees booked twice at the same time (in this schedule or elsewhere): one line per overlap.
+function conflictLines(data) {
+  const names = new Map(data.shifts.map((x) => [x.staff_id, x.staff_name]));
+  const by = new Map();
+  const add = (x, where) => { if (x.status && x.status !== "ok") return; const l = by.get(x.staff_id) ?? []; l.push({ a: x.start_at, b: x.end_at, where }); by.set(x.staff_id, l); };
+  for (const x of data.shifts) add(x, t(`dept.${x.department_id}`));
+  for (const x of data.elsewhere ?? []) add(x, `${x.restaurant ?? ""} ${t(`dept.${x.department_id}`)}`.trim());
+  const out = [];
+  for (const [id, list] of by) {
+    list.sort((p, q) => (p.a < q.a ? -1 : 1));
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++)
+      if (list[i].a < list[j].b && list[j].a < list[i].b)
+        out.push(`${names.get(id) ?? `#${id}`} · ${fmt(list[i].a.slice(0, 10), { weekday: "short", day: "numeric", month: "short" })} ${hhmm(list[i].a)}–${hhmm(list[i].b)} (${list[i].where}) ↔ ${hhmm(list[j].a)}–${hhmm(list[j].b)} (${list[j].where})`);
+  }
+  return out;
+}
+
+// "Sommaire" tab: hours and salary (administrators only): each day and the week, one column per selected department plus a total.
+function renderSummary({ days, payroll, sel, data, boxes }) {
+  const cols = payroll.byDept ?? [{ dept: sel.departments[0], payroll }];
+  const cell = (cents, hrsN, tag = "td", extra = "") => h(tag, { class: `pay-num ${extra}` }, h("b", {}, money(cents, true)), h("small", {}, `${hrs(hrsN)} ${t("hoursShort")}`));
+  const dayOf = (p, d) => p.department.days.find((x) => x.date === d);
+  const rows = [
+    ...days.map((d) => [fmt(d, { weekday: "long", day: "numeric", month: "short" }), (p) => { const x = dayOf(p, d); return [x?.cents ?? 0, x?.hours ?? 0]; }, false]),
+    [t("costWeek"), (p) => [p.department.total_cents, p.department.total_hours], true],
+  ];
+  const unrated = cols.reduce((n, c) => n + (c.payroll.department.unrated_hours ?? 0), 0);
+  const whole = cols[0].payroll.restaurant;
+  const conflicts = conflictLines(data);
+  const conflictBox = conflicts.length
+    ? h("div", { class: "alert", role: "alert" }, h("strong", {}, `⚠ ${t("conflictsTitle")}`), h("ul", {}, conflicts.map((l) => h("li", {}, l))))
+    : h("div", { class: "okmsg" }, t("noConflicts"));
+  return h("section", { class: "timeline summary" },
+    h("h2", {}, `${t("summaryTab")} — ${weekLabel(sel.week)}`),
+    // the same warnings as the coverage view, for the whole week
+    h("div", { class: "gaps" }, boxes.gapBox, boxes.extraBox, conflictBox),
+    h("div", { class: "payroll" },
+      h("table", { class: "pay-table" },
+        h("thead", {}, h("tr", {}, h("th"), cols.map((c) => h("th", {}, t(`dept.${c.dept}`))), cols.length > 1 ? h("th", { class: "pay-total" }, t("total")) : null)),
+        h("tbody", {}, rows.map(([label, get, strong]) => {
+          const vals = cols.map((c) => get(c.payroll));
+          const sum = vals.reduce((a, v) => [a[0] + v[0], a[1] + v[1]], [0, 0]);
+          return h("tr", { class: strong ? "pay-week" : "" }, h("th", { class: "pay-label" }, label), vals.map((v) => cell(v[0], v[1])), cols.length > 1 ? cell(sum[0], sum[1], "td", "pay-total") : null);
+        }))),
+      unrated > 0 ? h("div", { class: "warn" }, `${hrs(unrated)} ${t("unratedHours")}`) : null,
+      whole ? h("p", { class: "meta" }, `${t("summaryRestaurant")} : `, h("b", {}, money(whole.total_cents, true)), ` · ${hrs(whole.total_hours)} ${t("hoursShort")}`) : null,
+      h("button", { class: "btn", type: "button", onClick: () => { state.showHourlyCost = !state.showHourlyCost; try { localStorage.setItem("hourlyCost", state.showHourlyCost ? "1" : "0"); } catch { /* ignore */ } render(); } },
+        state.showHourlyCost ? t("hideHourlyCost") : t("showHourlyCost"))));
+}
+
+function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView = false }) {
   // The coverage view shows first names only (plus the last-name initial when two people share a first name).
   const shortOf = shortNames([...new Map(data.shifts.map((x) => [x.staff_id, { id: x.staff_id, name: x.staff_name, first_name: x.first_name, last_name: x.last_name }])).values()]);
   const sel = state.sel;
   const desktop = mqDesktop.matches;
-  const zoom = !!(desktop && state.zoomDay && days.includes(state.zoomDay));
-  const shown = zoom ? [state.zoomDay] : desktop ? days : [sel.day];
+  const zoom = !weekView && !!(desktop && state.zoomDay && days.includes(state.zoomDay));
+  const shown = weekView ? days : zoom ? [state.zoomDay] : desktop ? days : [sel.day];
 
   const perDay = shown.map((day) => {
     // Each department resolves its own layers (base/season/special day); the counts are then added together.
@@ -793,35 +860,11 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     h("button", { type: "button", "aria-pressed": String(d === sel.day), onClick: () => { sel.day = d; render(); } },
       h("span", { class: "dow" }, fmt(d, { weekday: "short" })), h("span", { class: "dom" }, fmt(d, { day: "numeric" })))));
 
-  // Summary only: hours and salary, one column per selected department plus a total column when several are shown.
-  const payrollBox = payroll ? (() => {
-    const cols = payroll.byDept ?? [{ dept: sel.departments[0], payroll }];
-    const day = (p) => p.department.days.find((x) => x.date === sel.day);
-    const cell = (cents, hrsN, strong) => h(strong ? "th" : "td", { class: "pay-num" }, h("b", {}, money(cents, true)), h("small", {}, `${hrs(hrsN)} ${t("hoursShort")}`));
-    const rowsDef = [
-      ...(shown.length === 1 ? [[t("costDay"), (p) => { const d = day(p); return [d?.cents ?? 0, d?.hours ?? 0]; }]] : []),
-      [t("costWeek"), (p) => [p.department.total_cents, p.department.total_hours]],
-    ];
-    const unrated = cols.reduce((n, c) => n + (c.payroll.department.unrated_hours ?? 0), 0);
-    return h("div", { class: "payroll" },
-      h("table", { class: "pay-table" },
-        h("thead", {}, h("tr", {}, h("th"), cols.map((c) => h("th", {}, t(`dept.${c.dept}`))), cols.length > 1 ? h("th", { class: "pay-total" }, t("total")) : null)),
-        h("tbody", {}, rowsDef.map(([label, get]) => {
-          const vals = cols.map((c) => get(c.payroll));
-          const sum = vals.reduce((a, v) => [a[0] + v[0], a[1] + v[1]], [0, 0]);
-          return h("tr", {}, h("th", { class: "pay-label" }, label), vals.map((v) => cell(v[0], v[1])), cols.length > 1 ? h("td", { class: "pay-num pay-total" }, h("b", {}, money(sum[0], true)), h("small", {}, `${hrs(sum[1])} ${t("hoursShort")}`)) : null);
-        }))),
-      unrated > 0 ? h("div", { class: "warn" }, `${hrs(unrated)} ${t("unratedHours")}`) : null,
-      h("button", { class: "btn", type: "button", onClick: () => { state.showHourlyCost = !state.showHourlyCost; try { localStorage.setItem("hourlyCost", state.showHourlyCost ? "1" : "0"); } catch { /* ignore */ } render(); } },
-        state.showHourlyCost ? t("hideHourlyCost") : t("showHourlyCost")));
-  })() : null;
-
-  return h("section", { class: "timeline" },
+  const tlSection = h("section", { class: "timeline" },
     h("h2", {}, shown.length > 1 ? t("coverageWeek") : `${t("coverage")} — ${fmt(shown[0], { weekday: "long", day: "numeric", month: "long" })}`),
     shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     zoomBar,
     dayTabs,
-    payrollBox,
     h("div", { class: "gaps" }, gapBox, postBox, extraBox),
     h("div", { class: "vtl-scroll" },
       h("div", { class: `vtl ${zoom ? "zoomed" : ""}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
@@ -829,6 +872,8 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor }) {
     h("div", { class: "tl-legend" },
       h("span", {}, h("i", { style: "background:#86efac" }), t("legendOk")), h("span", {}, h("i", { style: "background:#fca5a5" }), t("legendShort")),
       h("span", {}, h("i", { style: "background:#93c5fd" }), t("legendOver")), h("span", {}, h("i", { style: "background:var(--line)" }), t("legendNone"))));
+  tlSection.boxes = { gapBox, extraBox };
+  return tlSection;
 }
 
 // ---------- shift editor ----------

@@ -262,6 +262,15 @@ async function loadSettings(db: D1Database, clientId: number): Promise<Settings>
   return parseSettings(await clientSettingRows(db, clientId));
 }
 
+/** SQL condition "this shift may be seen by this person": administrators and the managers of the shift's department always,
+ *  everybody else only once the week is published for that restaurant and department. (`sh` = the shifts table alias.) */
+function shiftVisible(me: { id: number; is_admin: boolean }, sh = "sh"): string {
+  const dept = `(SELECT department_id FROM roles WHERE id = ${sh}.role_id)`;
+  const mine = me.is_admin ? "1" : `EXISTS (SELECT 1 FROM managers m WHERE m.staff_id = ${Math.trunc(me.id)} AND m.restaurant_id = ${sh}.restaurant_id AND m.department_id = ${dept})`;
+  return `(${mine} OR EXISTS (SELECT 1 FROM schedule_publications p WHERE p.restaurant_id = ${sh}.restaurant_id AND p.department_id = ${dept}
+    AND p.week_start = date(substr(${sh}.start_at, 1, 10), '-' || ((CAST(strftime('%w', substr(${sh}.start_at, 1, 10)) AS INTEGER) + 6) % 7) || ' days')))`;
+}
+
 const intParam = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
 
 // ---------- Me ----------
@@ -1850,7 +1859,7 @@ app.get("/api/schedule", async (c) => {
      FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.restaurant_id = ? AND (ro.department_id = ? OR EXISTS (SELECT 1 FROM shift_roles x JOIN roles r2 ON r2.id = x.role_id WHERE x.shift_id = sh.id AND r2.department_id = ?)
             OR EXISTS (SELECT 1 FROM shift_segments g JOIN roles r3 ON r3.id = g.role_id WHERE g.shift_id = sh.id AND r3.department_id = ?))
-       AND sh.start_at >= ? AND sh.start_at < ?
+       AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible(me)}
      ORDER BY sh.start_at, s.name`,
   )
     .bind(restaurantId, department, department, department, bounds.start, bounds.end)
@@ -1891,14 +1900,14 @@ app.get("/api/schedule", async (c) => {
       `SELECT staff_id,
               sum((julianday(end_at) - julianday(start_at)) * 24) AS h_all,
               sum(CASE WHEN restaurant_id = ? THEN (julianday(end_at) - julianday(start_at)) * 24 ELSE 0 END) AS h_here
-       FROM shifts WHERE status = 'ok' AND staff_id IN (${marks}) AND start_at >= ? AND start_at < ? GROUP BY staff_id`,
+       FROM shifts sh WHERE status = 'ok' AND staff_id IN (${marks}) AND start_at >= ? AND start_at < ? AND ${shiftVisible(me)} GROUP BY staff_id`,
     ).bind(restaurantId, ...visible, bounds.start, bounds.end).all<{ staff_id: number; h_all: number; h_here: number }>();
     for (const r of h.results) hours[r.staff_id] = { here: Math.round(r.h_here * 100) / 100, all: Math.round(r.h_all * 100) / 100 };
     if (editable) {
       elsewhere = (await c.env.DB.prepare(
         `SELECT sh.staff_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_en, ro.name_fr, sh.start_at, sh.end_at
          FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
-         WHERE sh.status = 'ok' AND sh.staff_id IN (${marks}) AND sh.start_at >= ? AND sh.start_at < ?
+         WHERE sh.status = 'ok' AND sh.staff_id IN (${marks}) AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible(me)}
            AND NOT (sh.restaurant_id = ? AND (ro.department_id = ? OR EXISTS (SELECT 1 FROM shift_roles x JOIN roles r2 ON r2.id = x.role_id WHERE x.shift_id = sh.id AND r2.department_id = ?) OR EXISTS (SELECT 1 FROM shift_segments g JOIN roles r3 ON r3.id = g.role_id WHERE g.shift_id = sh.id AND r3.department_id = ?)))
          ORDER BY sh.start_at`,
       ).bind(...visible, bounds.start, bounds.end, restaurantId, department, department, department).all()).results;
@@ -1919,7 +1928,7 @@ app.get("/api/schedule", async (c) => {
   const delivery_presence = department === "kitchen"
     ? (await c.env.DB.prepare(
         `SELECT sh.start_at, sh.end_at FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
-           WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery'
+           WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery' AND ${shiftVisible(me)}
          UNION SELECT sh.start_at, sh.end_at FROM shifts sh JOIN shift_roles x ON x.shift_id = sh.id JOIN roles ro ON ro.id = x.role_id
            WHERE sh.restaurant_id = ?1 AND sh.status = 'ok' AND sh.start_at >= ?2 AND sh.start_at < ?3 AND ro.department_id = 'delivery'
          UNION SELECT g.start_at, g.end_at FROM shift_segments g JOIN shifts sh ON sh.id = g.shift_id JOIN roles ro ON ro.id = g.role_id
@@ -1930,7 +1939,20 @@ app.get("/api/schedule", async (c) => {
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, dow FROM staff_availability WHERE kind = 'day_off' AND staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; dow: number }>()).results) (days_off[r.staff_id] ??= []).push(r.dow);
   const personal: Record<number, number> = {};
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; max_weekly_hours: number }>()).results) personal[r.staff_id] = r.max_weekly_hours;
-  return c.json({ week: c.req.query("week"), editable, shifts: shifts.results, hours, elsewhere, time_off, days_off, skills, any_skills: anySkills, delivery_presence, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
+  const published = !!(await c.env.DB.prepare("SELECT 1 FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(restaurantId, department, c.req.query("week")).first());
+  return c.json({ week: c.req.query("week"), editable, published, shifts: shifts.results, hours, elsewhere, time_off, days_off, skills, any_skills: anySkills, delivery_presence, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
+});
+
+// Publish (or take back) one schedule: restaurant + department + week. Administrators, and managers of that department.
+app.post("/api/schedule/publish", async (c) => {
+  const me = c.get("me");
+  const b = await c.req.json<{ restaurant_id?: number; department_id?: string; week?: string; published?: boolean }>().catch(() => ({} as any));
+  if (!b.restaurant_id || !b.department_id || !weekBounds(b.week ?? "") || typeof b.published !== "boolean") return c.json({ error: "bad_request" }, 400);
+  if (!(await canManage(c.env.DB, me, b.restaurant_id, b.department_id))) return c.json({ error: "forbidden" }, 403);
+  if (b.published) await c.env.DB.prepare("INSERT OR REPLACE INTO schedule_publications (restaurant_id, department_id, week_start, published_at, published_by) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.week, Date.now(), me.id).run();
+  else await c.env.DB.prepare("DELETE FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).run();
+  emit(c, b.published ? "schedule.published" : "schedule.unpublished", async () => ({ restaurant_id: b.restaurant_id, department_id: b.department_id, week: b.week }));
+  return c.json({ ok: true, published: b.published });
 });
 
 // The caller's own shifts across every restaurant and department.
@@ -1941,7 +1963,7 @@ app.get("/api/my-shifts", async (c) => {
     `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
-     WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
+     WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible(c.get("me"))} ORDER BY sh.start_at`,
   )
     .bind(c.get("me").id, bounds.start, bounds.end)
     .all();
@@ -2244,7 +2266,7 @@ app.get("/cal/:file", async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT sh.id, sh.start_at, sh.end_at, sh.until_close, sh.notes, rs.name AS restaurant, ro.name_fr, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
-     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`,
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible({ id: 0, is_admin: false })} ORDER BY sh.start_at`,
   ).bind(who.id, from, to).all<{ id: number; start_at: string; end_at: string; until_close: number; notes: string | null; restaurant: string; name_fr: string; sex: string | null }>();
   const brandName = (await loadBrand(c.env.DB, who.client_id)).name;
   const stamp = (v: string) => v.replace(/[-:]/g, "") + "00";
