@@ -38,6 +38,7 @@ import m0035 from "../migrations/0035_api_tokens.sql";
 import m0036 from "../migrations/0036_webhooks.sql";
 import m0037 from "../migrations/0037_publications.sql";
 import m0038 from "../migrations/0038_absence_reason.sql";
+import m0039 from "../migrations/0039_absences.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -78,6 +79,7 @@ const MIGRATIONS: [string, string][] = [
   ["0036_webhooks", m0036],
   ["0037_publications", m0037],
   ["0038_absence_reason", m0038],
+  ["0039_absences", m0039],
 ];
 
 const statements = (sql: string) =>

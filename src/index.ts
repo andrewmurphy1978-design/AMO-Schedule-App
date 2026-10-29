@@ -1340,6 +1340,41 @@ app.post("/api/time-off/:id/decide", async (c) => {
   return c.json({ ok: true, shifts_on_those_days: approve ? clash?.n ?? 0 : 0 });
 });
 
+// ---------- One employee's attendance file (ADMIN ONLY): announced absences + incidents entered by a manager ----------
+// "announced" = the employee declared it before the shift began; "late" = declared once the shift had begun;
+// "by_manager" = a manager declared the absence for them. Incidents (no-show, late arrival, early departure) are recorded by managers only.
+app.get("/api/staff/:id/attendance", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const tz = c.env.TIMEZONE ?? "America/Toronto";
+  const rows = (await c.env.DB.prepare(
+    `SELECT a.id, a.start_at, a.end_at, a.reason, a.note, a.declared_by, a.declared_at, a.outcome, rs.name AS restaurant, ro.name_fr, ro.name_en, ro.department_id,
+            (SELECT name FROM staff WHERE id = a.declared_by) AS declared_by_name, (SELECT name FROM staff WHERE id = a.replaced_by) AS replaced_by_name
+     FROM staff_absences a JOIN restaurants rs ON rs.id = a.restaurant_id LEFT JOIN roles ro ON ro.id = a.role_id
+     WHERE a.staff_id = ? ORDER BY a.start_at DESC LIMIT 300`,
+  ).bind(id).all<any>()).results;
+  const absences = rows.map((a) => ({
+    ...a,
+    kind: a.declared_by !== id ? "by_manager" : localNow(tz, new Date(a.declared_at)) < a.start_at ? "announced" : "late",
+  }));
+  const incidents = (await c.env.DB.prepare(
+    `SELECT i.id, i.incident_date, i.kind, i.minutes, i.notes, rs.name AS restaurant, rb.name AS recorded_by_name
+     FROM incidents i LEFT JOIN restaurants rs ON rs.id = i.restaurant_id LEFT JOIN staff rb ON rb.id = i.recorded_by
+     WHERE i.staff_id = ? ORDER BY i.incident_date DESC, i.id DESC LIMIT 300`,
+  ).bind(id).all<any>()).results;
+  const since = new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10);
+  const count = (f: (x: any) => boolean) => absences.filter((a) => a.start_at.slice(0, 10) >= since && f(a)).length;
+  return c.json({
+    absences, incidents,
+    last_12_months: {
+      announced: count((a) => a.kind === "announced"), late: count((a) => a.kind === "late"), by_manager: count((a) => a.kind === "by_manager"),
+      no_show: incidents.filter((i) => i.incident_date >= since && i.kind === "no_call_no_show").length,
+      late_arrival: incidents.filter((i) => i.incident_date >= since && i.kind === "late_arrival").length,
+      early_departure: incidents.filter((i) => i.incident_date >= since && i.kind === "early_departure").length,
+    },
+  });
+});
+
 // ---------- Attendance incidents (ADMIN ONLY) ----------
 // A private record of no call / no show, late arrivals and early departures that were not granted.
 // Employees and managers never see these: every endpoint requires admin.
@@ -2260,6 +2295,7 @@ app.delete("/api/shifts/:id", async (c) => {
   if (!(await canManage(c.env.DB, c.get("me"), existing.restaurant_id, existing.department_id)))
     return c.json({ error: "forbidden" }, 403);
   const before = await shiftData(c.env.DB, id);
+  await c.env.DB.prepare("UPDATE staff_absences SET outcome = 'shift_removed' WHERE outcome = 'open' AND request_id IN (SELECT id FROM coverage_requests WHERE shift_id = ?)").bind(id).run();
   await c.env.DB.prepare("DELETE FROM shifts WHERE id = ?").bind(id).run();
   emit(c, "shift.deleted", async () => before);
   return c.json({ ok: true });

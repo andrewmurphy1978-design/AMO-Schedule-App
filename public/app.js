@@ -1144,6 +1144,55 @@ function skillsBox(person) {
   return box;
 }
 
+// One employee's attendance file: absences they announced (or a manager reported) and incidents a manager recorded.
+function attendancePane(person, ov) {
+  const box = h("div", { class: "attendance" });
+  const st = { filter: "all" };
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short" });
+  async function load() {
+    const d = await api(`/staff/${person.id}/attendance`);
+    const m = d.last_12_months;
+    const chip = (n, label, cls) => h("span", { class: `att-chip ${cls}` }, h("b", {}, String(n)), ` ${label}`);
+    const items = [
+      ...d.absences.map((a) => ({ type: "absence", date: a.start_at, a })),
+      ...d.incidents.map((i) => ({ type: "incident", date: `${i.incident_date}T00:00`, i })),
+    ].sort((x, y) => (x.date < y.date ? 1 : -1)).filter((x) => st.filter === "all" || (st.filter === "absences" ? x.type === "absence" : x.type === "incident"));
+    const outcome = (a) => ({ open: t("attOutcome.open"), filled: `${t("attOutcome.filled")} ${a.replaced_by_name ?? ""}`, cancelled: t("attOutcome.cancelled"), shift_removed: t("attOutcome.shift_removed") })[a.outcome] ?? "";
+    const row = (x) => {
+      if (x.type === "absence") {
+        const a = x.a, kindCls = { announced: "att-ann", late: "att-late", by_manager: "att-mgr" }[a.kind];
+        return h("div", { class: `att-row ${kindCls}` },
+          h("div", { class: "att-head" }, h("span", { class: "att-badge" }, `🚫 ${t(`att.${a.kind}`)}`), h("b", {}, fmt(a.start_at.slice(0, 10), { weekday: "short", day: "numeric", month: "long", year: "numeric" }))),
+          h("div", {}, `${hhmm(a.start_at)}–${hhmm(a.end_at)} · ${a.restaurant}${a.name_fr ? ` · ${roleIcon(a)} ${roleName(a, person.sex)}` : ""}`),
+          a.reason ? h("div", {}, `${t("reasonLabel")} : ${t(`reason.${a.reason}`)}${a.note ? ` — ${a.note}` : ""}`) : null,
+          h("div", { class: "meta" }, `${outcome(a)} · ${t("attDeclared")} ${when(a.declared_at)}${a.kind === "by_manager" && a.declared_by_name ? ` ${t("attBy")} ${a.declared_by_name}` : ""}`));
+      }
+      const i = x.i;
+      return h("div", { class: "att-row att-inc avail-row" },
+        h("div", { class: "avail-text" },
+          h("div", { class: "att-head" }, h("span", { class: "att-badge" }, `⚠ ${incidentLabel(i.kind)}`), h("b", {}, fmt(i.incident_date, { weekday: "short", day: "numeric", month: "long", year: "numeric" }))),
+          h("div", {}, [i.restaurant, i.minutes ? `${i.minutes} min` : null].filter(Boolean).join(" · ")),
+          i.notes ? h("div", {}, i.notes) : null,
+          h("div", { class: "meta" }, `${t("attRecordedBy")} ${i.recorded_by_name ?? "—"}`)),
+        h("div", { class: "row-icons" }, h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => {
+          if (!(await ask(t("confirmDeleteIncident")))) return;
+          try { await api(`/admin/incidents/${i.id}`, { method: "DELETE" }); load(); } catch (e) { toast(errorText(e)); }
+        } }, "🗑️")));
+    };
+    box.replaceChildren(
+      h("div", { class: "att-summary" }, h("div", { class: "meta" }, t("attLast12")),
+        chip(m.announced, t("att.announced"), "att-ann"), chip(m.late, t("att.late"), "att-late"), chip(m.by_manager, t("att.by_manager"), "att-mgr"),
+        chip(m.no_show, t("inc.no_call_no_show"), "att-inc"), chip(m.late_arrival, t("inc.late_arrival"), "att-inc"), chip(m.early_departure, t("inc.early_departure"), "att-inc")),
+      h("div", { class: "att-tools" },
+        h("div", { class: "seg", role: "group" }, [["all", t("attAll")], ["absences", t("attAbsences")], ["incidents", t("attIncidents")]].map(([v, l]) =>
+          h("button", { type: "button", "aria-pressed": String(st.filter === v), onClick: () => { st.filter = v; load(); } }, l))),
+        h("button", { class: "btn primary", type: "button", onClick: () => incidentDialog({ staffList: ov.staff.map((x) => ({ id: x.id, name: x.name })), staffId: person.id, onSaved: load }) }, `+ ${t("recordIncident")}`)),
+      items.length ? h("div", { class: "att-list" }, items.map(row)) : h("p", { class: "meta" }, t("attNone")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 // Hours promised to the employee and notes for the planner (both are given to the AI when it builds a schedule).
 function planningForm(person) {
   const hoursIn = h("input", { type: "number", min: 0, max: 168, step: "0.5", inputMode: "decimal", placeholder: "—", value: person.promised_hours ?? "", "aria-label": t("promisedHours") });
@@ -2543,7 +2592,7 @@ function staffCard(s, ov) {
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
     // the kitchen tab only exists for Chef, Cook and Assistant cook
-    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")]];
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", t("fixedDaysOff")], ["availability", t("availability")], ["timeoff", t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
@@ -2560,6 +2609,7 @@ function staffCard(s, ov) {
       availability: () => [availabilityEditor(s.id, "times")],
       timeoff: () => [staffTimeOff(s)],
       planning: () => [planningForm(s)],
+      attendance: () => [attendancePane(s, ov)],
     };
     const drawTabs = () => {
       if (!tabList().some(([id]) => id === tab)) tab = "roles";

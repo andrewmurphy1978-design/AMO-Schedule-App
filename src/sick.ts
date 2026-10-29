@@ -88,6 +88,9 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
     "INSERT INTO coverage_requests (shift_id, restaurant_id, role_id, sick_staff_id, start_at, end_at, created_by, created_at, reason, reason_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).bind(shift.id, shift.restaurant_id, shift.role_id, shift.staff_id, shift.start_at, shift.end_at, actorId, Date.now(), absence.reason ?? null, absence.note ?? null).run();
   const requestId = created.meta.last_row_id as number;
+  // the permanent absence record (survives the shift being moved or removed)
+  await db.prepare("INSERT INTO staff_absences (staff_id, restaurant_id, role_id, start_at, end_at, reason, note, declared_by, declared_at, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(shift.staff_id, shift.restaurant_id, shift.role_id, shift.start_at, shift.end_at, absence.reason ?? null, absence.note ?? null, actorId, Date.now(), requestId).run();
 
   const cid = await clientOfRestaurant(db, shift.restaurant_id);
   const conn = await loadConnections(env, db, cid);
@@ -144,6 +147,7 @@ export async function fillRequest(env: FlowEnv, db: D1Database, conn: Connection
   const claim = await db.prepare("UPDATE coverage_requests SET status = 'filled', filled_by = ?, filled_at = ? WHERE id = ? AND status = 'open'").bind(staffId, Date.now(), requestId).run();
   if (!claim.meta.changes) return "filled_by_other"; // somebody else got there first
   await db.batch([
+    db.prepare("UPDATE staff_absences SET outcome = 'filled', replaced_by = ? WHERE request_id = ?").bind(staffId, requestId),
     db.prepare("UPDATE shifts SET staff_id = ?, status = 'ok', replaced_staff_id = ? WHERE id = ?").bind(staffId, req.sick_staff_id, req.shift_id),
     // the extra roles of a multi-role shift stay only if the replacement holds them too
     db.prepare("DELETE FROM shift_roles WHERE shift_id = ? AND role_id NOT IN (SELECT sr.role_id FROM staff_roles sr JOIN shifts sh ON sh.restaurant_id = sr.restaurant_id WHERE sr.staff_id = ? AND sh.id = ?)").bind(req.shift_id, staffId, req.shift_id),
@@ -197,6 +201,7 @@ export async function cancelRequest(db: D1Database, requestId: number) {
   if (req.status !== "open") throw new FlowError("not_open", 409);
   await db.batch([
     db.prepare("UPDATE coverage_requests SET status = 'cancelled' WHERE id = ?").bind(requestId),
+    db.prepare("UPDATE staff_absences SET outcome = 'cancelled' WHERE request_id = ?").bind(requestId),
     db.prepare("UPDATE shifts SET status = 'ok' WHERE id = ?").bind(req.shift_id),
     db.prepare("UPDATE coverage_offers SET status = 'closed', responded_at = ? WHERE request_id = ? AND status = 'sent'").bind(Date.now(), requestId),
   ]);

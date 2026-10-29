@@ -691,3 +691,18 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
   .my-pay .row{display:flex;flex:0 0 auto;justify-content:flex-start;gap:.5rem;align-items:baseline}
   .my-pay .meta{flex:1 0 100%}
 }
+
+/* attendance file */
+.att-summary{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}.att-summary .meta{flex:1 0 100%}
+.att-chip{border:1px solid var(--line,#e3dfd9);border-left-width:4px;border-radius:999px;padding:.2rem .7rem;font-size:.85rem;background:var(--card);color:var(--ink)}
+.att-tools{display:flex;justify-content:space-between;gap:.6rem;flex-wrap:wrap;margin:.7rem 0}
+.att-list{display:grid;gap:.5rem}
+.att-row{border:1px solid var(--line,#e3dfd9);border-left-width:5px;border-radius:10px;padding:.55rem .8rem;background:var(--card);color:var(--ink);display:grid;gap:.15rem}
+.att-row.avail-row{display:flex}
+.att-head{display:flex;flex-wrap:wrap;gap:.2rem .8rem;align-items:center}
+.att-badge{font-size:.78rem;font-weight:700;padding:.1rem .55rem;border-radius:999px;background:color-mix(in srgb,currentColor 10%,transparent)}
+.att-ann{border-left-color:#2563eb}.att-ann .att-badge{color:#2563eb}
+.att-late{border-left-color:#f59e0b}.att-late .att-badge{color:#b45309}
+.att-mgr{border-left-color:#6b7280}.att-mgr .att-badge{color:#6b7280}
+.att-inc{border-left-color:var(--brand)}.att-inc .att-badge{color:var(--brand)}
+.staff-dialog{grid-template-columns:minmax(0,1fr)}.staff-dialog>*{min-width:0}.dlg-top{max-width:100%}.dlg-tabs{max-width:100%}
