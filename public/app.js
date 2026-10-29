@@ -711,7 +711,7 @@ function hoursSlots(restaurantId, list = state.restaurants) {
 }
 
 // Quick edit of a staffing target from the coverage view (administrators): a time range, one number per department, one layer.
-function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
+function targetDialog({ day, minute, endMinute = minute + 30, dep, deps, targets, sets, onSaved }) {
   const restaurant = state.sel.restaurant;
   const dow = dowOf(day);
   const slots = hoursSlots(restaurant);
@@ -723,7 +723,10 @@ function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
     ...matching("special").filter((x) => x !== dateSet).map((x) => ({ id: x.id, dow: -1, label: `${t("onlyThisDay")} · ${x.name}` })),
     { id: dateSet?.id ?? null, dow: -1, create: !dateSet, label: `${t("onlyThis")} ${weekdayName(dow)}` }];
   const key = fromMin(Math.floor(minute / 30) * 30);
+  const rangeKeys = GRID_KEYS.filter((k) => toMin(k) >= toMin(key) && toMin(k) < endMinute);
   const current = (d) => resolveForDate(targets.filter((x) => x.department_id === d), sets, day).targets[key];
+  // several slots selected: the value is shown when they all agree, otherwise the box stays empty ("mixed") and is left alone
+  const valuesIn = (d) => { const all = resolveForDate(targets.filter((x) => x.department_id === d), sets, day).targets; return rangeKeys.map((k) => all[k]); };
   // the most specific layer that defines the value shown
   const sourceOf = (d) => [...layers].reverse().find((l) => l.id !== null && targets.some((x) => x.department_id === d && x.set_id === l.id && x.slot === key && (x.dow === l.dow || x.dow === -1))) ?? layers[0];
   return new Promise((resolve) => {
@@ -731,10 +734,13 @@ function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
     if (!dlg) { dlg = h("dialog", { id: "target-modal" }); document.body.append(dlg); }
     let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
     const fromSel = h("select", { "aria-label": t("from") }, slots.map((k) => h("option", { value: k, selected: k === key }, hm(k))));
-    const toSel = h("select", { "aria-label": t("to") }, [...slots.slice(1), fromMin(toMin(slots[slots.length - 1]) + 30)].map((k) => h("option", { value: k, selected: toMin(k) === toMin(key) + 30 }, hm(k))));
+    const toSel = h("select", { "aria-label": t("to") }, [...slots.slice(1), fromMin(toMin(slots[slots.length - 1]) + 30)].map((k) => h("option", { value: k, selected: toMin(k) === endMinute }, hm(k))));
     // one number per displayed department (even a single one), the clicked department first
     const order = [dep, ...deps.filter((d) => d !== dep)].filter((d) => deps.includes(d));
-    const counts = order.map((d) => { const v = current(d); return { d, v, input: h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", "aria-label": `${t(`dept.${d}`)} — ${t("peopleNeeded")}` }) }; });
+    const counts = order.map((d) => {
+      const vals = valuesIn(d), same = vals.every((x) => x === vals[0]), v = same ? vals[0] : undefined;
+      return { d, v, mixed: !same, input: h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", placeholder: same ? "" : "…", "aria-label": `${t(`dept.${d}`)} — ${t("peopleNeeded")}` }) };
+    });
     const layerSel = h("select", { "aria-label": t("appliesTo") }, layers.map((l, i) => h("option", { value: i }, l.label)));
     layerSel.value = String(Math.max(...order.map((d) => layers.indexOf(sourceOf(d)))));
     const save = async () => {
@@ -744,7 +750,7 @@ function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
         let setId = l.id;
         if (l.create) setId = (await api("/target-sets", { method: "POST", body: { restaurant_id: restaurant, name: fmt(day, { weekday: "short", day: "numeric", month: "short", year: "numeric" }), kind: "special", rule: { type: "date", date: day } } })).id;
         for (const c of counts) {
-          if (c.input.value === "" && c.v === undefined) continue; // nothing there, nothing entered
+          if (c.input.value === "" && (c.v === undefined || c.mixed)) continue; // nothing there (or mixed values left untouched), nothing entered
           await api("/targets/range", { method: "PUT", body: { restaurant_id: restaurant, department_id: c.d, set_id: setId, dow: l.dow, from: fromSel.value, to: toSel.value, count: c.input.value === "" ? null : Number(c.input.value) } });
         }
         toast(t("saved")); finish(true); onSaved?.();
@@ -844,6 +850,21 @@ function renderSummary({ days, payroll, sel, data, boxes }) {
         state.showHourlyCost ? t("hideHourlyCost") : t("showHourlyCost"))));
 }
 
+// Mouse drag over the coverage cells of one day selects a time range (highlighted while dragging); a click or shift-click also works.
+let rangeSuppressClick = false, rangeAnchor = null;
+function beginRangeSelect(day, startT, done) {
+  const cells = [...document.querySelectorAll(`.vtl-cell.editable[data-day="${day}"]`)];
+  let endT = startT, moved = false;
+  const paint = () => cells.forEach((c) => { const m = Number(c.dataset.t); c.classList.toggle("picked", m >= Math.min(startT, endT) && m <= Math.max(startT, endT)); });
+  const over = (e) => { const c = e.target.closest?.(`.vtl-cell.editable[data-day="${day}"]`); if (c) { const m = Number(c.dataset.t); if (m !== endT) { endT = m; moved = true; paint(); } } };
+  const up = () => {
+    document.removeEventListener("pointermove", over); document.removeEventListener("pointerup", up);
+    cells.forEach((c) => c.classList.remove("picked"));
+    if (moved) { done(startT, endT); setTimeout(() => { rangeSuppressClick = false; }, 0); } // a plain click is handled by the click event
+  };
+  document.addEventListener("pointermove", over); document.addEventListener("pointerup", up);
+}
+
 function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView = false }) {
   // The coverage view shows first names only (plus the last-name initial when two people share a first name).
   const shortOf = shortNames([...new Map(data.shifts.map((x) => [x.staff_id, { id: x.staff_id, name: x.staff_name, first_name: x.first_name, last_name: x.last_name }])).values()]);
@@ -930,10 +951,17 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
         : (tg === undefined ? String(b.count) : `${b.count}/${tg}`);
       const cellProps = { class: `vtl-cell ${cls}`, style: `top:${y(b.t)}px;height:${ph / 2}px`, title };
       // administrators: click a cell to change the staffing target of that time (and department)
-      return state.me.me.is_admin && data.editable
-        ? h("button", { ...cellProps, type: "button", class: `vtl-cell ${cls} editable`, title: `${title} — ${t("editTargetHint")}`,
-            onClick: (e) => targetDialog({ day: d.day, minute: b.t, dep: e.target.closest("[data-dep]")?.dataset.dep ?? sel.departments[0], deps: sel.departments, targets, sets, onSaved: render }) }, content)
-        : h("div", cellProps, content);
+      if (!(state.me.me.is_admin && data.editable)) return h("div", cellProps, content);
+      // drag over several cells (or shift-click) to change the targets of a whole range at once
+      const open = (a, z, e) => targetDialog({ day: d.day, minute: Math.min(a, z), endMinute: Math.max(a, z) + 30, dep: e?.target?.closest?.("[data-dep]")?.dataset.dep ?? sel.departments[0], deps: sel.departments, targets, sets, onSaved: render });
+      return h("button", { ...cellProps, type: "button", class: `vtl-cell ${cls} editable`, "data-day": d.day, "data-t": b.t, title: `${title} — ${t("editTargetHint")}`,
+        onPointerDown: (e) => { if (e.pointerType !== "mouse" || e.button !== 0 || e.shiftKey) return; beginRangeSelect(d.day, b.t, (a, z) => { rangeSuppressClick = true; open(a, z, e); }); },
+        onClick: (e) => {
+          if (rangeSuppressClick) { rangeSuppressClick = false; return; }
+          const last = rangeAnchor?.day === d.day ? rangeAnchor.t : b.t;
+          rangeAnchor = { day: d.day, t: b.t };
+          open(e.shiftKey ? last : b.t, b.t, e);
+        } }, content);
     });
 
     const clipped = d.items.map((x) => ({ ...x, from: Math.max(x.span.s, startMin), to: Math.min(x.span.e, endMin) }));

@@ -759,3 +759,4 @@ button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2
 .target-dialog select,.target-dialog input{min-height:38px;font-size:15px;padding-top:0;padding-bottom:0}
 .target-dialog .field{gap:.15rem}.target-dialog .field>span{font-size:.78rem}
 .td-times{gap:.5rem}.td-dept input{width:4rem}.target-dialog .meta{font-size:.78rem}
+button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2px;filter:brightness(.92)}.vtl-cell.editable{user-select:none;-webkit-user-select:none}
