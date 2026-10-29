@@ -820,7 +820,7 @@ function renderSummary({ days, payroll, sel, data, boxes }) {
   return h("section", { class: "timeline summary" },
     h("h2", {}, `${t("summaryTab")} — ${weekLabel(sel.week)}`),
     // the same warnings as the coverage view, for the whole week
-    h("div", { class: "gaps" }, boxes.gapBox, boxes.extraBox, conflictBox),
+    h("div", { class: "gaps" }, boxes.gapBox, boxes.extraBox, conflictBox ? (conflictBox.classList.add("wide"), conflictBox) : null),
     h("div", { class: "payroll" },
       h("table", { class: "pay-table" },
         h("thead", {}, h("tr", {}, h("th"), cols.map((c) => h("th", {}, t(`dept.${c.dept}`))), cols.length > 1 ? h("th", { class: "pay-total" }, t("total")) : null)),
@@ -1025,7 +1025,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
     zoomBar,
     dayTabs,
     // staffing notices are for the people who run the schedule, not for employees
-    data.editable ? h("div", { class: "gaps" }, gapBox, postBox, extraBox) : null,
+    data.editable ? h("div", { class: "gaps" }, gapBox, extraBox, postBox ? (postBox.classList.add("wide"), postBox) : null) : null,
     shown.length > 1 && desktop ? h("p", { class: "zoom-hint" }, `🔍 ${t("zoomHint")}`) : null,
     h("div", { class: "vtl-scroll" },
       h("div", { class: `vtl ${zoom ? "zoomed" : ""} ${data.editable ? "" : "no-cov"}`, style: `--cols:${shown.length};--hours:${hours};--ph:${ph}px;${shown.length === 1 ? `--cov:${Math.max(58, 14 + sel.departments.length * 56)}px;` : ""}--colmin:${zoom ? 420 : desktop ? (payroll && state.showHourlyCost ? 160 : 118) : 240}px` },
