@@ -684,3 +684,10 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
   .mine-card .sick-btn{width:auto;white-space:nowrap;margin:0;padding:0 1.1rem}
 }
 .summary .payroll{overflow-x:auto}.pay-table{font-size:.9rem}@media (max-width:600px){.pay-table th,.pay-table td{padding:.35rem .4rem}.pay-table .pay-label{white-space:nowrap}}
+/* desktop: the title, the total hours and the gross salary on one line */
+@media (min-width:900px){
+  .my-pay{display:flex!important;align-items:baseline;flex-wrap:wrap;gap:.3rem 2rem}
+  .my-pay h3{margin:0;flex:1 1 auto}
+  .my-pay .row{display:flex;flex:0 0 auto;justify-content:flex-start;gap:.5rem;align-items:baseline}
+  .my-pay .meta{flex:1 0 100%}
+}
