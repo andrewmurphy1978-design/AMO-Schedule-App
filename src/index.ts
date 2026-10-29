@@ -16,7 +16,7 @@ import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
-import { T, formatWhen, formatDate, type Lang } from "./templates.ts";
+import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { EVENTS, MAX_ENDPOINTS, queueEvent, flushDeliveries, validateUrl, validateEvents, newSecret, staffData, shiftData, timeOffData, coverageData, type EventName } from "./webhooks.ts";
@@ -1630,7 +1630,9 @@ app.post("/api/shifts/:id/sick", async (c) => {
   if (!row) return c.json({ error: "not_found" }, 404);
   if (row.staff_id !== me.id && !(await canManage(c.env.DB, me, row.restaurant_id, row.department_id))) return c.json({ error: "forbidden" }, 403);
   try {
-    const started = await startSickCall(c.env, c.env.DB, id, me.id);
+    const b = await c.req.json<{ reason?: string; note?: string }>().catch(() => ({} as { reason?: string; note?: string }));
+    const reason = (ABSENCE_REASONS as readonly string[]).includes(b.reason ?? "") ? b.reason! : null;
+    const started = await startSickCall(c.env, c.env.DB, id, me.id, { reason, note: (b.note ?? "").trim().slice(0, 200) || null });
     emit(c, "coverage.opened", () => coverageData(c.env.DB, started.request_id));
     return c.json(started, 201);
   } catch (e) { return flowError(c, e); }
@@ -1641,7 +1643,7 @@ app.get("/api/coverage", async (c) => {
   const me = c.get("me");
   const since = Date.now() - 7 * 86_400_000;
   const rows = await c.env.DB.prepare(
-    `SELECT cr.id, cr.shift_id, cr.status, cr.restaurant_id, rs.name AS restaurant, cr.start_at, cr.end_at, cr.created_at, cr.escalated_at, cr.filled_at,
+    `SELECT cr.id, cr.shift_id, cr.status, cr.restaurant_id, cr.reason, cr.reason_note, rs.name AS restaurant, cr.start_at, cr.end_at, cr.created_at, cr.escalated_at, cr.filled_at,
             ro.department_id, ro.name_fr, ro.name_en, sh.until_close, sick.name AS sick_name, sick.sex AS sex, fb.name AS filled_by_name,
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id) AS offers,
             (SELECT count(*) FROM coverage_offers WHERE request_id = cr.id AND status = 'declined') AS declined,
@@ -2010,7 +2012,25 @@ app.get("/api/my-shifts", async (c) => {
   const total_hours = Math.round((rows.filter((x) => x.status === "ok").reduce((n, x) => n + minutes(x.start_at, x.end_at), 0) / 60) * 100) / 100;
   const mine = await c.env.DB.prepare("SELECT max_weekly_hours FROM staff_limits WHERE staff_id = ?").bind(c.get("me").id).first<{ max_weekly_hours: number }>();
   const general = (await loadSettings(c.env.DB, c.get("me").client_id)).overtime_hours;
-  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
+  // Gross pay for the shifts shown (their own rate, else the role's / the general default; a multi-role shift is paid at its highest rate).
+  const me = c.get("me"), cid = me.client_id;
+  const payRows = (await c.env.DB.prepare(
+    `SELECT sh.id, sh.start_at, sh.end_at, COALESCE(rw.hourly_cents, w.hourly_cents, ${roleRateSql(cid)}, ${generalRateSql(cid)}) AS rate_cents
+     FROM shifts sh JOIN roles ro ON ro.id = sh.role_id LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = sh.role_id
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible(me)}`,
+  ).bind(me.id, bounds.start, bounds.end).all<{ id: number; start_at: string; end_at: string; rate_cents: number | null }>()).results;
+  const extraRates = (await c.env.DB.prepare(
+    `SELECT x.shift_id, COALESCE(rw.hourly_cents, w.hourly_cents, ${roleRateSql(cid)}, ${generalRateSql(cid)}) AS rate_cents
+     FROM (SELECT shift_id, role_id FROM shift_roles UNION SELECT shift_id, role_id FROM shift_segments) x JOIN shifts sh ON sh.id = x.shift_id JOIN roles ro ON ro.id = x.role_id
+          LEFT JOIN staff_wages w ON w.staff_id = sh.staff_id LEFT JOIN staff_role_wages rw ON rw.staff_id = sh.staff_id AND rw.role_id = x.role_id
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at >= ? AND sh.start_at < ?`,
+  ).bind(me.id, bounds.start, bounds.end).all<{ shift_id: number; rate_cents: number | null }>()).results;
+  const bestRate = new Map<number, number>();
+  for (const e of extraRates) if (e.rate_cents != null) bestRate.set(e.shift_id, Math.max(bestRate.get(e.shift_id) ?? 0, e.rate_cents));
+  for (const x of payRows) { const b = bestRate.get(x.id); if (b != null && (x.rate_cents == null || b > x.rate_cents)) x.rate_cents = b; }
+  const weekDays = Array.from({ length: 8 }, (_, i) => new Date(Date.parse(`${bounds.start.slice(0, 10)}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
+  const pay = computeCosts(payRows, weekDays);
+  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, gross_cents: pay.total_cents, unrated_hours: pay.unrated_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
 });
 
 // SQL sorts "Édouard" after "Zack" (byte order). Names are sorted here instead, accents ignored, French rules.
@@ -2362,7 +2382,7 @@ app.post("/hooks/twilio", async (c) => {
     ).bind(person.id, now, soon.toISOString().slice(0, 16)).first<{ id: number }>();
     if (!shift) return twiml(T.noUpcomingShift(lang).text);
     try {
-      const started = await startSickCall(c.env, c.env.DB, shift.id, person.id);
+      const started = await startSickCall(c.env, c.env.DB, shift.id, person.id, { reason: "sick" });
       emitTo(c, clientId, "coverage.opened", () => coverageData(c.env.DB, started.request_id));
       const row = await c.env.DB.prepare("SELECT sh.start_at, sh.end_at, sh.until_close, rs.name AS restaurant, ro.name_fr, ro.name_en FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id WHERE sh.id = ?").bind(shift.id).first<{ start_at: string; end_at: string; until_close: number; restaurant: string; name_fr: string; name_en: string }>();
       return twiml(row ? T.sickRecorded(lang, { restaurant: row.restaurant, role: genderedRole(lang === "fr" ? row.name_fr : row.name_en, person.sex), when: formatWhen(row.start_at, row.end_at, !!row.until_close, lang) }).text : undefined);

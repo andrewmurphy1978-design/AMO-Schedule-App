@@ -19,13 +19,19 @@ export function formatWhen(startAt: string, endAt: string, untilClose: boolean, 
   return `${formatDate(startAt.slice(0, 10), lang)} ${startAt.slice(11, 16)}–${untilClose ? "F" : endAt.slice(11, 16)}`;
 }
 
+export const ABSENCE_REASONS = ["sick", "medical", "family", "transport", "personal", "other"] as const;
+export type AbsenceReason = (typeof ABSENCE_REASONS)[number];
+const REASON_FR: Record<AbsenceReason, string> = { sick: "Maladie", medical: "Rendez-vous médical", family: "Urgence familiale", transport: "Problème de transport", personal: "Raison personnelle", other: "Autre" };
+const REASON_EN: Record<AbsenceReason, string> = { sick: "Sick", medical: "Medical appointment", family: "Family emergency", transport: "Transportation problem", personal: "Personal reason", other: "Other" };
+export const reasonLabel = (r: string | null | undefined, l: Lang) => (r && (ABSENCE_REASONS as readonly string[]).includes(r) ? (l === "fr" ? REASON_FR : REASON_EN)[r as AbsenceReason] : "");
+
 export interface Ctx { restaurant: string; role: string; when: string }
 
 export const T = {
-  sickNotice: (l: Lang, c: Ctx & { sick: string; offers: number }): Msg =>
+  sickNotice: (l: Lang, c: Ctx & { sick: string; offers: number; reason?: string | null; note?: string | null }): Msg =>
     l === "fr"
-      ? { subject: `Malade : ${c.sick} (${c.restaurant})`, text: `${c.sick} est malade — ${c.role}, ${c.restaurant}, ${c.when}. ${c.offers > 0 ? `Une demande de remplacement a été envoyée à ${c.offers} personne(s).` : "Aucun remplaçant disponible n’a pu être joint."} (Information seulement.)` }
-      : { subject: `Sick call: ${c.sick} (${c.restaurant})`, text: `${c.sick} called in sick — ${c.role}, ${c.restaurant}, ${c.when}. ${c.offers > 0 ? `A replacement request was sent to ${c.offers} people.` : "No available replacement could be reached."} (For information only.)` },
+      ? { subject: `Absence : ${c.sick} (${c.restaurant})`, text: `${c.sick} sera absent(e) — ${c.role}, ${c.restaurant}, ${c.when}.${c.reason ? ` Raison : ${reasonLabel(c.reason, "fr")}${c.note ? ` (${c.note})` : ""}.` : ""} ${c.offers > 0 ? `Une demande de remplacement a été envoyée à ${c.offers} personne(s).` : "Aucun remplaçant disponible n’a pu être joint."} (Information seulement.)` }
+      : { subject: `Absence: ${c.sick} (${c.restaurant})`, text: `${c.sick} will be absent — ${c.role}, ${c.restaurant}, ${c.when}.${c.reason ? ` Reason: ${reasonLabel(c.reason, "en")}${c.note ? ` (${c.note})` : ""}.` : ""} ${c.offers > 0 ? `A replacement request was sent to ${c.offers} people.` : "No available replacement could be reached."} (For information only.)` },
 
   offer: (l: Lang, c: Ctx & { url: string; sms: boolean }): Msg =>
     l === "fr"

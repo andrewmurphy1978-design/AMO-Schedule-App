@@ -76,7 +76,7 @@ export async function gatherCandidates(db: D1Database, req: { restaurant_id: num
 }
 
 // ---------- report a sick call ----------
-export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: number, actorId: number | null) {
+export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: number, actorId: number | null, absence: { reason?: string | null; note?: string | null } = {}) {
   const shift = await db.prepare(`${shiftSql} WHERE sh.id = ?`).bind(shiftId).first<ShiftRow>();
   if (!shift) throw new FlowError("not_found", 404);
   if (shift.status !== "ok") throw new FlowError("already_sick", 409);
@@ -85,8 +85,8 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
   const claim = await db.prepare("UPDATE shifts SET status = 'sick_open' WHERE id = ? AND status = 'ok'").bind(shiftId).run();
   if (!claim.meta.changes) throw new FlowError("already_sick", 409);
   const created = await db.prepare(
-    "INSERT INTO coverage_requests (shift_id, restaurant_id, role_id, sick_staff_id, start_at, end_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(shift.id, shift.restaurant_id, shift.role_id, shift.staff_id, shift.start_at, shift.end_at, actorId, Date.now()).run();
+    "INSERT INTO coverage_requests (shift_id, restaurant_id, role_id, sick_staff_id, start_at, end_at, created_by, created_at, reason, reason_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(shift.id, shift.restaurant_id, shift.role_id, shift.staff_id, shift.start_at, shift.end_at, actorId, Date.now(), absence.reason ?? null, absence.note ?? null).run();
   const requestId = created.meta.last_row_id as number;
 
   const cid = await clientOfRestaurant(db, shift.restaurant_id);
@@ -108,7 +108,7 @@ export async function startSickCall(env: FlowEnv, db: D1Database, shiftId: numbe
     }
   }
   // Managers hear about it immediately (information only).
-  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.sickNotice(lang, { ...ctxOf(shift, lang, shift.sex), sick: shift.staff_name, offers: offersSent }), "sick_notice");
+  await notifyManagers(db, conn, shift.restaurant_id, shift.department_id, (lang) => T.sickNotice(lang, { ...ctxOf(shift, lang, shift.sex), sick: shift.staff_name, offers: offersSent, reason: absence.reason, note: absence.note }), "sick_notice");
   // Nobody could even be asked: tell the managers to act right away.
   let escalated = false;
   if (offersSent === 0) escalated = await escalate(env, db, conn, requestId);

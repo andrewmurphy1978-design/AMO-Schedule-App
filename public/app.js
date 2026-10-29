@@ -251,6 +251,44 @@ function confirmDialog({ title, message, yes, no, lines }) {
   });
 }
 
+// Simple yes/no question in the app's own dialog (never the browser's, which would show the web address).
+const ask = (message, yes) => confirmDialog({ title: t("confirmTitle"), message, yes: yes ?? t("confirmYes"), no: t("cancel") });
+
+// A short text question in the app's own dialog; resolves to the text, or null when cancelled.
+function promptDialog({ title, label, yes }) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("prompt-modal");
+    if (!dlg) { dlg = h("dialog", { id: "prompt-modal" }); document.body.append(dlg); }
+    let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
+    const input = h("input", { maxLength: 300, autocomplete: "off", "aria-label": label });
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); finish(input.value); } },
+      h("h2", {}, title), h("label", { class: "field" }, h("span", {}, label), input),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, yes ?? t("confirmYes")))));
+    dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
+    dlg.showModal(); input.focus();
+  });
+}
+
+// "Je serai absent": the employee picks a reason (only managers see it). Resolves to { reason, note } or null.
+const ABSENCE_REASONS = ["sick", "medical", "family", "transport", "personal", "other"];
+function absenceDialog({ forOther = false } = {}) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("absence-modal");
+    if (!dlg) { dlg = h("dialog", { id: "absence-modal" }); document.body.append(dlg); }
+    let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
+    let reason = null;
+    const note = h("input", { maxLength: 200, placeholder: t("absenceNote"), "aria-label": t("absenceNote") });
+    const go = h("button", { class: "btn primary", type: "button", disabled: true, onClick: () => finish({ reason, note: note.value.trim() }) }, t("absenceConfirm"));
+    const list = h("div", { class: "reason-list", role: "radiogroup", "aria-label": t("absenceReason") }, ABSENCE_REASONS.map((r) =>
+      h("label", { class: "reason" }, h("input", { type: "radio", name: "absence-reason", value: r, onChange: () => { reason = r; go.disabled = false; } }), h("span", {}, t(`reason.${r}`)))));
+    dlg.replaceChildren(h("div", { class: "modal-body" },
+      h("h2", {}, forOther ? t("reportAbsent") : t("imAbsent")), h("p", { class: "meta" }, t("absenceHelp")), list, note,
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")), go)));
+    dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
+    dlg.showModal();
+  });
+}
+
 // ---------- schedule ----------
 // Long last names are folded so the name column stays narrow: a break opportunity after every 9 letters of a long word
 // ("Constantineau" -> "Constanti / neau"); hyphens and spaces already break lines ("Douville- / Bondu").
@@ -312,12 +350,12 @@ function coveragePanel(onChange) {
     if (!open.length && !recent.length) return;
     box.hidden = false;
     const line = (r) => h("div", { class: `cov-row ${r.status}` },
-      h("div", {}, h("b", {}, `${r.sick_name}`), ` · ${roleName(r)} · ${r.restaurant}`, h("div", { class: "meta" }, `${fmt(r.start_at.slice(0, 10), { weekday: "short", day: "numeric", month: "short" })} ${hhmm(r.start_at)}–${r.until_close ? "F" : hhmm(r.end_at)}`)),
+      h("div", {}, h("b", {}, `${r.sick_name}`), ` · ${roleName(r)} · ${r.restaurant}`, r.reason ? h("div", { class: "meta" }, `${t("reasonLabel")} : ${t(`reason.${r.reason}`)}${r.reason_note ? ` — ${r.reason_note}` : ""}`) : null, h("div", { class: "meta" }, `${fmt(r.start_at.slice(0, 10), { weekday: "short", day: "numeric", month: "short" })} ${hhmm(r.start_at)}–${r.until_close ? "F" : hhmm(r.end_at)}`)),
       h("div", { class: "meta" }, r.status === "open" ? `${t("asked")}: ${r.offers} · ${t("waiting")}: ${r.waiting} · ${t("declined")}: ${r.declined}${r.escalated_at ? ` · ⚠ ${t("actionRequired")}` : ""}`
         : r.status === "filled" ? `✔ ${t("filledBy")} ${r.filled_by_name ?? ""}` : t("cancelled")),
       r.status === "open" ? h("div", { class: "actions" },
         h("button", { class: "btn primary", type: "button", onClick: () => assignDialog(r, onChange) }, t("assignManually")),
-        h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmCancelSick"))) { try { await api(`/coverage/${r.id}/cancel`, { method: "POST" }); onChange(); } catch (e) { toast(errorText(e)); } } } }, t("cancelSick"))) : null);
+        h("button", { class: "btn danger", type: "button", onClick: async () => { if ((await ask(t("confirmCancelSick")))) { try { await api(`/coverage/${r.id}/cancel`, { method: "POST" }); onChange(); } catch (e) { toast(errorText(e)); } } } }, t("cancelSick"))) : null);
     box.replaceChildren(h("h2", {}, t("replacements")), open.map(line), recent.length ? h("details", {}, h("summary", {}, t("recent")), recent.map(line)) : null);
   }).catch(() => {});
   return box;
@@ -484,7 +522,7 @@ async function renderSchedule() {
           const sickDay = s.status === "sick_open";
           const card = [h("span", { class: "time" }, range(s)), h("span", { class: "who" }, avatar(s.staff_id, s.staff_name, s.staff_color, s.photo_v, 40), s.staff_name),
             h("span", { class: "meta" }, [`${shiftRoleIcons(s)} ${shiftRoleLabel(s)}`, s.notes].filter(Boolean).join(" · ")),
-            sickDay ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            sickDay ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
             s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
           const cls = `card ${sickDay ? "sick" : ""} ${data.conflicts.shifts.has(s.id) ? "conflict" : ""}`;
           return data.editable ? h("button", { class: cls, type: "button", onClick: () => openEditor(s) }, card) : h("div", { class: cls }, card);
@@ -564,7 +602,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), sick ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -1054,13 +1092,13 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     }
   };
   const del = async () => {
-    if (!confirm(t("confirmDelete"))) return;
+    if (!(await ask(t("confirmDelete")))) return;
     try { await api(`/shifts/${shift.id}`, { method: "DELETE" }); dlg.close(); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert" }, errorText(e))); }
   };
 
   // Sticky header: title and every button (the form fields scroll underneath). Save submits the form through the form= attribute.
   const actions = h("div", { class: "dlg-actions wrap" },
-    shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn sm", type: "button", title: t("reportSick"), onClick: async () => { if (confirm(t("confirmSickFor"))) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST" }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
+    shift && shift.status === "ok" && shift.end_at > nowLocal() ? h("button", { class: "btn sm", type: "button", title: t("reportAbsent"), onClick: async () => { const why = await absenceDialog({ forOther: true }); if (why) { try { await api(`/shifts/${shift.id}/sick`, { method: "POST", body: why }); dlg.close(); toast(t("sickStarted")); render(); } catch (e) { alertBox.replaceChildren(h("div", { class: "alert", role: "alert" }, errorText(e))); } } } }, `🤒 ${t("reportSick")}`) : null,
     shift && state.me.me.is_admin ? h("button", { class: "btn sm", type: "button", onClick: async () => {
       const list = await api("/admin/overview").then((o) => o.staff).catch(() => []);
       dlg.close(); incidentDialog({ staffList: list, staffId: shift.staff_id, date: dayOf(shift.start_at), shift });
@@ -1240,7 +1278,7 @@ function staffTimeOff(person) {
         h("div", { class: "row-icons" },
           r.status !== "approved" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("approve"), "aria-label": t("approve"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: true } })) }, "✅") : null,
           r.status !== "denied" ? h("button", { class: "icon-btn avail-del", type: "button", title: t("deny"), "aria-label": t("deny"), onClick: () => act(() => api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve: false } })) }, "❌") : null,
-          h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: () => { if (confirm(t("confirmCancelOff"))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️"))))
+          h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { if ((await ask(t("confirmCancelOff")))) act(() => api(`/time-off/${r.id}/withdraw`, { method: "POST" })); } }, "🗑️"))))
         : h("p", { class: "meta" }, t("noTimeOff")),
       h("h4", {}, t("addLeaveFor")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
@@ -1339,10 +1377,12 @@ async function renderTimeOff() {
   const myList = h("section", { class: "panel" }, h("h2", {}, t("myTimeOff")), mine.length ? mine.map((r) =>
     h("div", { class: "cov-row" }, h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
       h("div", { class: "meta" }, `${statusText[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`),
-      r.status === "requested" || r.status === "approved" ? h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmCancelOff"))) { await api(`/time-off/${r.id}/cancel`, { method: "POST" }); render(); } } }, t("cancel")) : null))
+      r.status === "requested" || r.status === "approved" ? h("button", { class: "btn", type: "button", onClick: async () => { if ((await ask(t("confirmCancelOff")))) { await api(`/time-off/${r.id}/cancel`, { method: "POST" }); render(); } } }, t("cancel")) : null))
     : h("p", { class: "meta" }, t("noTimeOff")));
   const decide = async (r, approve) => {
-    const dn = prompt(t("decisionNote")) ?? "";
+    const asked = await promptDialog({ title: t("decisionNote"), label: t("optional") });
+    if (asked === null) return; // cancelled
+    const dn = asked;
     try {
       const res = await api(`/time-off/${r.id}/decide`, { method: "POST", body: { approve, note: dn } });
       toast(res.shifts_on_those_days ? `${t("saved")} — ⚠ ${res.shifts_on_those_days} ${t("shiftsOnThoseDays")}` : t("saved")); render();
@@ -1378,7 +1418,7 @@ async function renderAccount() {
       h("div", { class: "actions" },
         h("a", { class: "btn primary", target: "_blank", rel: "noopener", href: `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(`webcal://${host}`)}` }, t("addToGoogle")),
         h("button", { class: "btn", type: "button", onClick: async () => { try { await navigator.clipboard.writeText(url); toast(t("copied")); } catch { toast(url); } } }, t("copyLink")),
-        h("button", { class: "btn", type: "button", onClick: async () => { if (confirm(t("confirmNewLink"))) drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url); } }, t("newLink")),
+        h("button", { class: "btn", type: "button", onClick: async () => { if ((await ask(t("confirmNewLink")))) drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url); } }, t("newLink")),
         h("button", { class: "btn danger", type: "button", onClick: async () => { await api("/account/calendar-token", { method: "DELETE" }); drawCal(null); } }, t("stopSharing"))),
     ] : [h("button", { class: "btn primary", type: "button", onClick: async () => drawCal((await api("/account/calendar-token", { method: "POST" })).calendar_url) }, t("createLink"))]));
   };
@@ -1420,19 +1460,25 @@ async function renderMine() {
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prev"), onClick: () => { sel.week = addDays(sel.week, -7); render(); } }, "‹"),
     h("div", { class: "label" }, weekLabel(sel.week)),
     h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); render(); } }, "›"));
-  const myHours = h("div", { class: `payroll ${data.total_hours > (data.limits?.overtime_hours ?? 40) ? "over" : ""}` },
-    h("div", { class: "row" }, h("span", {}, t("myWeekHours")), h("b", {}, `${hrs(data.total_hours)} ${t("hoursShort")}${data.total_hours > (data.limits?.overtime_hours ?? 40) ? " ⚠" : ""}`)));
+  // Hours and gross pay of the week (their own rate; overtime hours are flagged).
+  const over = data.total_hours > (data.limits?.overtime_hours ?? 40);
+  const myHours = h("div", { class: `payroll my-pay ${over ? "over" : ""}` },
+    h("h3", {}, t("myWeekHours")),
+    h("div", { class: "row" }, h("span", {}, t("totalHours")), h("b", {}, `${hrs(data.total_hours)} ${t("hoursShort")}${over ? " ⚠" : ""}`)),
+    h("div", { class: "row" }, h("span", {}, t("grossSalary")), h("b", {}, data.unrated_hours > 0 && !data.gross_cents ? "—" : money(data.gross_cents ?? 0, true))),
+    data.unrated_hours > 0 ? h("div", { class: "meta" }, `${hrs(data.unrated_hours)} ${t("hoursShort")} ${t("noRateForHours")}`) : null);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i)).filter((d) => data.shifts.some((s) => dayOf(s.start_at) === d));
   const body = days.length
     ? days.map((d) => h("section", {}, h("h2", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
         h("div", { class: "list", style: "margin-bottom:1rem" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
           h("div", { class: "card" }, h("span", { class: "time" }, range(s)),
             h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🤒 ${t("sickOpen")}`) : null,
+            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
             s.status === "ok" && s.end_at > nowLocal() ? h("button", { class: "btn sick-btn", type: "button", onClick: async () => {
-              if (!confirm(t("confirmSick"))) return;
-              try { await api(`/shifts/${s.id}/sick`, { method: "POST" }); toast(t("sickStarted")); render(); } catch (e) { toast(e.body?.error === "already_sick" ? t("alreadySick") : errorText(e)); }
-            } }, `🤒 ${t("imSick")}`) : null)))))
+              const why = await absenceDialog();
+              if (!why) return;
+              try { await api(`/shifts/${s.id}/sick`, { method: "POST", body: why }); toast(t("sickStarted")); render(); } catch (e) { toast(e.body?.error === "already_sick" ? t("alreadySick") : errorText(e)); }
+            } }, `🚫 ${t("imAbsent")}`) : null)))))
     : [h("div", { class: "empty" }, t("noShiftsWeek"))];
   $app.replaceChildren(nav, myHours, ...body);
 }
@@ -1494,7 +1540,7 @@ function incidentsPanel(ov) {
         h("div", {}, h("span", { class: `badge inc-${i.kind}` }, incidentLabel(i.kind)), i.minutes ? ` ${i.minutes} min` : "", i.restaurant ? ` · ${i.restaurant}` : ""),
         i.notes ? h("div", { class: "meta" }, i.notes) : null,
         h("div", { class: "meta" }, `${t("recordedBy")} ${i.recorded_by_name ?? "—"}`),
-        h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmDeleteIncident"))) { await api(`/admin/incidents/${i.id}`, { method: "DELETE" }); load(); } } }, t("delete"))))) : h("div", { class: "empty" }, t("noIncidents")));
+        h("button", { class: "btn danger", type: "button", onClick: async () => { if ((await ask(t("confirmDeleteIncident")))) { await api(`/admin/incidents/${i.id}`, { method: "DELETE" }); load(); } } }, t("delete"))))) : h("div", { class: "empty" }, t("noIncidents")));
   }
   load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
   return box;
@@ -1613,7 +1659,7 @@ function payslipsAdminPanel(ov) {
         h("div", { class: sinOk ? "ok-line" : "warn" }, sinOk ? `✔ ${t("matchedBySin")} (${r.suggested_name}, …${r.suggested_last3})` : r.match_kind === "name" ? `⚠ ${t("matchedByName")}` : `⚠ ${t("noMatch")}`),
         h("div", { class: "actions" }, pick,
           h("button", { class: "btn primary", type: "button", onClick: async () => { if (!pick.value) return toast(t("chooseEmployee")); try { await api(`/admin/payslips/${r.id}/assign`, { method: "POST", body: { staff_id: Number(pick.value) } }); load(); } catch (e) { toast(errorText(e)); } } }, t("confirm")),
-          h("button", { class: "btn danger", type: "button", onClick: async () => { if (confirm(t("confirmDeleteSlip"))) { await api(`/admin/payslips/${r.id}`, { method: "DELETE" }); load(); } } }, t("delete"))));
+          h("button", { class: "btn danger", type: "button", onClick: async () => { if ((await ask(t("confirmDeleteSlip")))) { await api(`/admin/payslips/${r.id}`, { method: "DELETE" }); load(); } } }, t("delete"))));
     });
     const sure = rows.filter((r) => r.match_kind === "sin");
     box.replaceChildren(
@@ -2100,7 +2146,7 @@ function targetsPanel(ov) {
         h("div", { class: "period-bar" },
           h("button", { class: "btn", type: "button", onClick: () => periodDialog({ restaurantId: st.restaurant, kind: set.kind, set, onSaved: reload }) }, t("editPeriod")),
           h("button", { class: "btn danger", type: "button", onClick: async () => {
-            if (!confirm(t("confirmDeletePeriod"))) return;
+            if (!(await ask(t("confirmDeletePeriod")))) return;
             try { await api(`/target-sets/${set.id}`, { method: "DELETE" }); st.setId = 0; reload(); } catch (e) { toast(errorText(e)); }
           } }, t("deletePeriod")))) : null,
       st.setId !== 0 ? h("p", { class: "meta" }, t("inheritNote")) : null,

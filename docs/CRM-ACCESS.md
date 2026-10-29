@@ -59,10 +59,10 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Employees | `GET /admin/overview` (A: staff, roles, managers, restaurants), `GET /staff` (M), `POST /staff` (A), `PUT /staff/:id` (A), `PUT /staff/:id/active\|admin\|wage\|sin\|limit\|planning` (A) |
 | Restaurants | `GET /restaurants`, `POST /restaurants` (A), `PUT /restaurants/:id/hours\|breakfast\|periods` (A) |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
-| Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=`, `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
+| Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=` (also `total_hours`, `gross_cents` = the caller's own gross pay for the week), `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
 | Targets | `GET/PUT /targets`, `GET/POST/PUT/DELETE /target-sets` |
 | Time off / availability | `/time-off*`, `/availability*` |
-| Sick calls | `POST /shifts/:id/sick`, `GET /coverage`, `/coverage/:id/*` |
+| Absences / sick calls | `POST /shifts/:id/sick` `{reason?: sick\|medical\|family\|transport\|personal\|other, note?}` (the reason is shown only to managers/administrators and is not sent in webhooks), `GET /coverage`, `/coverage/:id/*` |
 | Payroll (A) | `GET /admin/payroll`, `/admin/default-rates`, `/admin/payslips*`, `GET /payslips` |
 | Messaging (A) | `GET/PUT /connections`, `POST /connections/test`, `GET /admin/notifications` |
 | Branding (A) | `GET /auth/branding` (public; includes `country` CA/US/FR/BE/CH/OTHER, which sets "déjeuner" vs "petit-déjeuner" in the French screens), `PUT /admin/branding`, `PUT/DELETE /admin/branding/logo` |
