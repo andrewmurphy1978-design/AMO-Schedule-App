@@ -705,53 +705,57 @@ function hoursSlots(restaurantId, list = state.restaurants) {
   return GRID_KEYS.filter((k) => toMin(k) >= lo && toMin(k) < hi);
 }
 
-// Quick edit of a staffing target from the coverage view (administrators): one department, one time range, one layer.
+// Quick edit of a staffing target from the coverage view (administrators): a time range, one number per department, one layer.
 function targetDialog({ day, minute, dep, deps, targets, sets, onSaved }) {
   const restaurant = state.sel.restaurant;
   const dow = dowOf(day);
   const slots = hoursSlots(restaurant);
-  const nameOf = (s) => (s.kind === "special" ? s.name : `${weekdayName(dow)} · ${s.name}`);
-  // layers that apply on this date, least to most specific; each one stores its values under (set, dow)
+  const matching = (kind) => sets.filter((x) => x.kind === kind && ruleMatches(x.rule, day)).sort((x, y) => x.id - y.id);
+  const dateSet = sets.find((x) => x.kind === "special" && x.rule.type === "date" && x.rule.date === day);
+  // where the values are stored, least to most specific: every weekday, seasons, special days, then only this date
   const layers = [{ id: 0, dow, label: `${t("everyWeekday")} ${weekdayName(dow)}` },
-    ...sets.filter((x) => x.kind === "season" && ruleMatches(x.rule, day)).map((x) => ({ id: x.id, dow, label: nameOf(x) })),
-    ...sets.filter((x) => x.kind === "special" && ruleMatches(x.rule, day)).map((x) => ({ id: x.id, dow: -1, label: nameOf(x) }))];
+    ...matching("season").map((x) => ({ id: x.id, dow, label: `${t("everyWeekday")} ${weekdayName(dow)} · ${x.name}` })),
+    ...matching("special").filter((x) => x !== dateSet).map((x) => ({ id: x.id, dow: -1, label: `${t("onlyThisDay")} · ${x.name}` })),
+    { id: dateSet?.id ?? null, dow: -1, create: !dateSet, label: `${t("onlyThis")} ${weekdayName(dow)}` }];
   const key = fromMin(Math.floor(minute / 30) * 30);
   const current = (d) => resolveForDate(targets.filter((x) => x.department_id === d), sets, day).targets[key];
-  // where the value shown comes from: the most specific layer that defines it
-  const sourceOf = (d) => [...layers].reverse().find((l) => targets.some((x) => x.department_id === d && x.set_id === l.id && x.slot === key && (x.dow === l.dow || x.dow === -1))) ?? layers[0];
+  // the most specific layer that defines the value shown
+  const sourceOf = (d) => [...layers].reverse().find((l) => l.id !== null && targets.some((x) => x.department_id === d && x.set_id === l.id && x.slot === key && (x.dow === l.dow || x.dow === -1))) ?? layers[0];
   return new Promise((resolve) => {
     let dlg = document.getElementById("target-modal");
     if (!dlg) { dlg = h("dialog", { id: "target-modal" }); document.body.append(dlg); }
     let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
-    const fromSel = h("select", {}, slots.map((k) => h("option", { value: k, selected: k === key }, hm(k))));
-    const toSel = h("select", {}, [...slots.slice(1), fromMin(toMin(slots[slots.length - 1]) + 30)].map((k) => h("option", { value: k, selected: toMin(k) === toMin(key) + 30 }, hm(k))));
-    // one number per displayed department, all saved together; the clicked one comes first
+    const fromSel = h("select", { "aria-label": t("from") }, slots.map((k) => h("option", { value: k, selected: k === key }, hm(k))));
+    const toSel = h("select", { "aria-label": t("to") }, [...slots.slice(1), fromMin(toMin(slots[slots.length - 1]) + 30)].map((k) => h("option", { value: k, selected: toMin(k) === toMin(key) + 30 }, hm(k))));
+    // one number per displayed department (even a single one), the clicked department first
     const order = [dep, ...deps.filter((d) => d !== dep)].filter((d) => deps.includes(d));
-    const counts = order.map((d) => { const v = current(d); const input = h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", "aria-label": t(`dept.${d}`) }); return { d, v, input }; });
-    const layerSel = h("select", {}, layers.map((l, i) => h("option", { value: i }, l.label)));
-    // the layer the shown values come from (most specific across the departments)
+    const counts = order.map((d) => { const v = current(d); return { d, v, input: h("input", { type: "number", min: 0, max: 99, inputMode: "numeric", value: v ?? "", "aria-label": `${t(`dept.${d}`)} — ${t("peopleNeeded")}` }) }; });
+    const layerSel = h("select", { "aria-label": t("appliesTo") }, layers.map((l, i) => h("option", { value: i }, l.label)));
     layerSel.value = String(Math.max(...order.map((d) => layers.indexOf(sourceOf(d)))));
     const save = async () => {
       const l = layers[Number(layerSel.value)];
       if (toMin(toSel.value) <= toMin(fromSel.value)) { toast(t("invalidTimes")); return; }
       try {
+        let setId = l.id;
+        if (l.create) setId = (await api("/target-sets", { method: "POST", body: { restaurant_id: restaurant, name: fmt(day, { weekday: "short", day: "numeric", month: "short", year: "numeric" }), kind: "special", rule: { type: "date", date: day } } })).id;
         for (const c of counts) {
           if (c.input.value === "" && c.v === undefined) continue; // nothing there, nothing entered
-          await api("/targets/range", { method: "PUT", body: { restaurant_id: restaurant, department_id: c.d, set_id: l.id, dow: l.dow, from: fromSel.value, to: toSel.value, count: c.input.value === "" ? null : Number(c.input.value) } });
+          await api("/targets/range", { method: "PUT", body: { restaurant_id: restaurant, department_id: c.d, set_id: setId, dow: l.dow, from: fromSel.value, to: toSel.value, count: c.input.value === "" ? null : Number(c.input.value) } });
         }
         toast(t("saved")); finish(true); onSaved?.();
       } catch (e) { toast(errorText(e)); }
     };
-    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); save(); } },
-      h("h2", {}, t("editTarget")), h("p", { class: "meta" }, fmt(day, { weekday: "long", day: "numeric", month: "long" })),
-      h("div", { class: "times" }, h("label", { class: "field" }, h("span", {}, t("from")), fromSel), h("label", { class: "field" }, h("span", {}, t("to")), toSel)),
-      h("div", { class: "field" }, h("span", {}, t("peopleNeeded")),
-        counts.map((c) => h("label", { class: "check", style: "justify-content:space-between" }, h("span", {}, `${deptIcon(c.d)} ${t(`dept.${c.d}`)}`), c.input))),
-      layers.length > 1 ? h("label", { class: "field" }, h("span", {}, t("appliesTo")), layerSel) : h("p", { class: "meta" }, `${t("appliesTo")} : ${layers[0].label}`),
-      h("p", { class: "meta" }, t("clearHint")),
-      h("div", { class: "actions" },
-        h("button", { class: "btn", type: "button", onClick: () => finish(false) }, t("cancel")),
-        h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    const title = h("div", {}, h("h2", {}, t("editTarget")), h("span", { class: "meta" }, fmt(day, { weekday: "long", day: "numeric", month: "long" })));
+    // sticky header: title and buttons stay in view
+    dlg.replaceChildren(h("div", { class: "modal-body target-dialog" },
+      h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, title,
+        h("div", { class: "dlg-actions" }, h("button", { class: "btn", type: "button", onClick: () => finish(false) }, t("cancel")), h("button", { class: "btn primary", type: "button", onClick: save }, t("save"))))),
+      h("form", { class: "td-body", onSubmit: (e) => { e.preventDefault(); save(); } },
+        h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("from")), fromSel), h("label", { class: "field" }, h("span", {}, t("to")), toSel)),
+        h("div", { class: "td-depts" }, counts.map((c) => h("label", { class: "td-dept" }, h("span", {}, `${deptIcon(c.d)} ${t(`dept.${c.d}`)}`), c.input))),
+        h("label", { class: "field" }, h("span", {}, t("appliesTo")), layerSel),
+        h("p", { class: "meta" }, t("clearHint")),
+        h("button", { type: "submit", hidden: true }))));
     dlg.addEventListener("close", () => { if (!done) { done = true; resolve(false); } }, { once: true });
     dlg.showModal();
   });

@@ -736,3 +736,12 @@ button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2
 
 @media (min-width:900px){.gaps{display:grid;grid-template-columns:1fr 1fr;gap:.5rem .8rem;align-items:start}.gaps>*{margin:0 !important;min-width:0}.gaps>.wide{grid-column:1/-1}}
 @media (min-width:900px){.gaps.three{grid-template-columns:repeat(3,minmax(0,1fr))}}
+
+.target-dialog{display:grid;gap:0;padding:0 .9rem .8rem;max-height:90vh;overflow:auto;align-content:start;min-width:min(92vw,380px)}
+.target-dialog .dlg-top{position:sticky;top:0;z-index:2;background:var(--card);margin:0 -.9rem;padding:.6rem .9rem;border-bottom:1px solid var(--line)}
+.target-dialog .dlg-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem}
+.target-dialog .dlg-head h2{margin:0;font-size:1.05rem}.target-dialog .dlg-head .meta{font-size:.8rem}
+.target-dialog .td-body{display:grid;gap:.55rem;padding-top:.6rem}.target-dialog .field{margin:0}
+.td-times{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+.td-depts{display:grid;gap:.3rem}.td-dept{display:flex;align-items:center;justify-content:space-between;gap:.6rem;font-weight:600}
+.td-dept input{width:4.5rem;text-align:center}.target-dialog .meta{margin:0}
