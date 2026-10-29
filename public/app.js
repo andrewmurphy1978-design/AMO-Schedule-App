@@ -2085,7 +2085,7 @@ async function renderAdmin() {
   const ov = await api("/admin/overview");
 
   // Restaurant pills: small franchise logo + name (an owner can have restaurants of several franchises); click to edit the franchise.
-  const logoSrc = (r) => (r.franchise?.logo ? `/api/restaurants/${r.id}/logo?v=${r.franchise.logo_v}` : state.brand.logo ? `/api/auth/logo?v=${state.brand.logo_v}` : null);
+  const logoSrc = (r) => (r.franchise?.logo ? `/api/restaurants/${r.id}/logo?v=${r.franchise.logo_v}` : state.brand.logo ? `/api/auth/logo?v=${state.brand.logo_v}` : "logo.png");
   const restaurantsPanel = h("section", { class: "panel" },
     h("div", { class: "resto-head" }, h("h2", {}, t("restaurants")), h("p", { class: "meta" }, t("addRestaurantInfo"))),
     h("div", { class: "resto-pills" }, ov.restaurants.map((r) => h("button", { class: "resto-pill", type: "button", title: t("franchiseEdit"), onClick: () => franchiseDialog(r, ov) },
