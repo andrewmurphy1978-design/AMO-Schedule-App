@@ -853,3 +853,10 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .rs-menu[hidden]{display:none}.rs-opt{padding:.55rem .6rem;border-radius:8px;cursor:pointer}.rs-opt.active{background:color-mix(in srgb,var(--brand) 12%,var(--card))}.rs-opt[aria-selected=true] .rs-item span:last-child{font-weight:700}
 .controls .rs{min-width:220px}
 .rs-menu{right:auto;min-width:100%;width:max-content;max-width:90vw}
+
+.icon-mobile .ic{display:none}
+@media (max-width:899px){
+  .icon-mobile .ic{display:inline;font-size:1.2rem;line-height:1}.icon-mobile .tx{display:none}.icon-mobile{min-width:48px;padding:0 .8rem}
+  .sh-inline{width:100%}.sh-inline .field{flex:1 1 0;min-width:0}.sh-inline .time24{max-width:none;width:100%}
+}
+@media (max-width:899px){.sh-line .sh-inline label.field{flex:1 1 0;min-width:0}.sh-line .sh-inline{flex:1 1 100%}.sh-line .sh-inline .time24 select{flex:1;min-width:0}}

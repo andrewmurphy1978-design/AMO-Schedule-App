@@ -2508,8 +2508,9 @@ function specialHoursPanel(ov) {
         // line 2: special hours, description, all restaurants, Add
         h("div", { class: "sh-line" }, hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
           h("div", { class: "sh-end" }, ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
-            cur ? h("button", { class: "btn", type: "button", onClick: () => { st.editing = null; draw(); } }, t("cancel")) : null,
-            h("button", { class: "btn primary", type: "submit" }, cur ? t("save") : t("add"))))));
+            cur ? h("button", { class: "btn icon-mobile", type: "button", "aria-label": t("cancel"), title: t("cancel"), onClick: () => { st.editing = null; draw(); } }, h("span", { class: "ic", "aria-hidden": "true" }, "✕"), h("span", { class: "tx" }, t("cancel"))) : null,
+            cur ? h("button", { class: "btn primary icon-mobile", type: "submit", "aria-label": t("save"), title: t("save") }, h("span", { class: "ic", "aria-hidden": "true" }, "✓"), h("span", { class: "tx" }, t("save")))
+              : h("button", { class: "btn primary", type: "submit" }, t("add"))))));
   }
   draw();
   return box;
@@ -2835,7 +2836,7 @@ function staffCard(s, ov) {
     // the kitchen tab only exists for Chef, Cook and Assistant cook
     const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", mqDesktop.matches ? t("tabDaysOff") : t("fixedDaysOff")], ["availability", mqDesktop.matches ? t("tabAvailability") : t("availability")], ["timeoff", mqDesktop.matches ? t("tabTimeOff") : t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", mqDesktop.matches ? t("tabSchedules") : t("scheduleAccessTab")]];
     let tab = "details";
-    const saveBtn = h("button", { class: "btn primary", type: "submit", form: `staff-form-${s.id}` }, t("save"));
+    const saveBtn = h("button", { class: "btn primary icon-mobile", type: "submit", form: `staff-form-${s.id}`, "aria-label": t("save"), title: t("save") }, h("span", { class: "ic", "aria-hidden": "true" }, "✓"), h("span", { class: "tx" }, t("save")));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
     const tabBar = h("div", { class: "dlg-tabs", role: "tablist" });
     const content = h("div", { class: "dlg-content" });
@@ -2869,7 +2870,7 @@ function staffCard(s, ov) {
     dlg.replaceChildren(h("div", { class: "modal-body staff-dialog" },
       // Sticky header: Save submits the details form (form= attribute), Close just closes.
       h("div", { class: "dlg-top" },
-        h("div", { class: "dlg-head" }, h("h2", {}, s.name), h("div", { class: "dlg-actions" }, saveBtn, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))),
+        h("div", { class: "dlg-head" }, h("h2", {}, s.name), h("div", { class: "dlg-actions" }, saveBtn, h("button", { class: "btn icon-mobile", type: "button", "aria-label": t("close"), title: t("close"), onClick: () => dlg.close() }, h("span", { class: "ic", "aria-hidden": "true" }, "✕"), h("span", { class: "tx" }, t("close"))))),
         tabBar),
       content));
     draw();
