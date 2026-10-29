@@ -183,6 +183,7 @@ function renderClientBanner() {
 
 function renderChrome() {
   renderClientBanner();
+  fsLabel();
   document.getElementById("lang-toggle").textContent = mqDesktop.matches ? (getLang() === "fr" ? "English" : "Français") : (getLang() === "fr" ? "EN" : "FR");
   document.getElementById("footer").textContent = brandText("footer") || (state.brand.name === DEFAULT_BRAND.name ? t("footer") : state.brand.name);
   document.title = `${state.brand.name} · ${t("app")}`;
@@ -217,6 +218,15 @@ async function render() {
     console.error("render failed:", e);
     $app.replaceChildren(h("div", { class: "empty" }, errorText(e)));
   }
+}
+
+// Full screen (desktop header button).
+const fsBtn = document.getElementById("fs-toggle");
+const fsLabel = () => { if (fsBtn) fsBtn.textContent = document.fullscreenElement ? `⤢ ${t("exitFullscreen")}` : `⛶ ${t("fullscreen")}`; };
+if (fsBtn) {
+  if (!document.fullscreenEnabled) fsBtn.hidden = true;
+  fsBtn.addEventListener("click", () => { (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()).catch(() => {}); });
+  document.addEventListener("fullscreenchange", fsLabel);
 }
 
 document.getElementById("lang-toggle").addEventListener("click", () => {
@@ -404,6 +414,18 @@ async function renderSchedule() {
   if (!days.includes(sel.day)) sel.day = days.includes(ymd(new Date())) ? ymd(new Date()) : days[0];
   const today = ymd(new Date());
 
+  // The table order and Print/PDF live in the publish bar below the sticky line.
+  const orderField = h("label", { class: "field desktop-only order-field" }, h("span", {}, t("tableOrder")),
+      h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
+        [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v, title: l }, l))));
+  const printField = h("div", { class: "field desktop-only" }, h("span", {}, " "),
+      h("button", { class: "btn", type: "button", title: t("printHint"), onClick: async () => {
+        // the printout is the table: show it for printing, then go back to the tab you were on
+        const prev = state.scheduleTab;
+        if (prev !== "table") { state.scheduleTab = "table"; await render(); }
+        window.addEventListener("afterprint", () => { if (state.scheduleTab !== prev) { state.scheduleTab = prev; render(); } }, { once: true });
+        setTimeout(() => window.print(), 150);
+      } }, `🖨 ${t("printSchedule")}`));
   const controls = h("div", { class: "controls" },
     h("label", { class: "field" }, h("span", {}, t("restaurant")),
       h("select", { onChange: (e) => { sel.restaurant = Number(e.target.value); render(); } },
@@ -424,19 +446,9 @@ async function renderSchedule() {
         h("button", { class: "icon-btn", type: "button", "aria-label": t("next"), onClick: () => { sel.week = addDays(sel.week, 7); sel.day = sel.week; render(); } }, "›"))),
     h("div", { class: "field" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", onClick: () => { sel.week = mondayOf(new Date()); sel.day = ymd(new Date()); render(); } }, t("today"))),
-    h("label", { class: "field desktop-only order-field" }, h("span", {}, t("tableOrder")),
-      h("select", { onChange: (e) => { state.tableOrder = e.target.value; try { localStorage.setItem("tableOrder", state.tableOrder); } catch { /* ignore */ } render(); } },
-        [["alpha", t("orderAlpha")], ["arrival", t("orderArrival")], ["custom", t("orderCustom")]].map(([v, l]) => h("option", { value: v, selected: state.tableOrder === v, title: l }, l)))),
     state.me.me.is_admin ? h("div", { class: "field desktop-only" }, h("span", {}, " "),
       h("button", { class: "btn", type: "button", title: t("aiTitle"), onClick: () => aiScheduleDialog({ restaurantId: sel.restaurant, departments: [...sel.departments], currentWeek: sel.week }) }, `✨ ${t("aiButton")}`)) : null,
-    h("div", { class: "field desktop-only" }, h("span", {}, " "),
-      h("button", { class: "btn", type: "button", title: t("printHint"), onClick: async () => {
-        // the printout is the table: show it for printing, then go back to the tab you were on
-        const prev = state.scheduleTab;
-        if (prev !== "table") { state.scheduleTab = "table"; await render(); }
-        window.addEventListener("afterprint", () => { if (state.scheduleTab !== prev) { state.scheduleTab = prev; render(); } }, { once: true });
-        setTimeout(() => window.print(), 150);
-      } }, `🖨 ${t("printSchedule")}`)),
+
   );
   // Only shown on paper: a title above the week table so the printed/PDF schedule can be posted in the restaurant.
   const printHead = h("div", { class: "print-head" },
@@ -445,7 +457,17 @@ async function renderSchedule() {
 
   const status = h("p", { class: "status-line" }, h("span", { class: `badge ${data.editable ? "edit" : ""}` }, data.editable ? t("canEdit") : t("viewOnly")));
   const byDay = (d) => data.shifts.filter((s) => dayOf(s.start_at) === d);
-  const openEditor = (shift, prefill) => openShiftModal({ shift, prefill, roster, data });
+  // Changing a schedule that employees can already see: ask once per schedule (until the page is reloaded).
+  state.ackPublished ??= new Set();
+  const openEditor = async (shift, prefill) => {
+    const involved = shift?.department_id ? [shift.department_id] : sel.departments;
+    const pending = involved.filter((d) => datas[depts.indexOf(d)]?.published && !state.ackPublished.has(`${sel.restaurant}|${d}|${sel.week}`));
+    if (pending.length) {
+      if (!(await confirmDialog({ title: t("publishedChangeTitle"), message: t("publishedChangeAsk"), yes: t("changeAnyway"), no: t("cancel") }))) return;
+      pending.forEach((d) => state.ackPublished.add(`${sel.restaurant}|${d}|${sel.week}`));
+    }
+    openShiftModal({ shift, prefill, roster, data });
+  };
 
   // Mobile: day tabs + list
   const daytabs = h("div", { class: "daytabs", role: "group" }, days.map((d) =>
@@ -582,15 +604,37 @@ async function renderSchedule() {
       toast(published ? t("publishedToast") : t("unpublishedToast")); render();
     } catch (e) { if (e.body?.error === "conflicts") await confirmDialog({ title: t("cannotPublishTitle"), message: t("fixConflictsFirst"), yes: t("ok") }); else toast(errorText(e)); }
   };
-  const publishBar = editableDepts.length
-    ? h("div", { class: `publish-bar ${draftDepts.length ? "draft" : "live"}` },
-        h("span", {}, draftDepts.length ? `📝 ${t("draftState")}${editableDepts.length > 1 ? ` (${draftDepts.map((d) => t(`dept.${d}`)).join(", ")})` : ""} — ${t("draftHelp")}` : `✅ ${t("publishedState")}`),
-        draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: tryPublish }, t("publishBtn"))
-          : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
-    : datas.every((d) => !d.published) ? h("div", { class: "publish-bar draft" }, `📝 ${t("notPublishedYet")}`) : null;
-  $app.replaceChildren(...[printHead, controls, subtabs, publishBar, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
+  const allDraft = datas.every((d) => !d.published);
+  const barText = editableDepts.length
+    ? (draftDepts.length ? `📝 ${t("draftState")}${editableDepts.length > 1 ? ` (${draftDepts.map((d) => t(`dept.${d}`)).join(", ")})` : ""} — ${t("draftHelp")}` : `✅ ${t("publishedState")}`)
+    : allDraft ? `📝 ${t("notPublishedYet")}` : `✅ ${t("publishedState")}`;
+  const barButton = editableDepts.length
+    ? (draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: tryPublish }, t("publishBtn"))
+        : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
+    : null;
+  const publishBar = h("div", { class: `publish-bar ${editableDepts.length ? (draftDepts.length ? "draft" : "live") : allDraft ? "draft" : "live"}` },
+    h("span", { class: "pb-text" }, barText), h("div", { class: "pb-tools" }, barButton, orderField, printField));
+  $app.replaceChildren(...[printHead, controls, publishBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
+  syncStickyOffsets();
 }
 
+
+// The header, the Restaurant/Department/Week line and the publish bar stay on top while scrolling (desktop):
+// each sticks just under the previous one, so their heights are published as CSS variables.
+function syncStickyOffsets() {
+  const set = () => {
+    const root = document.documentElement.style;
+    root.setProperty("--topbar-h", `${document.querySelector(".topbar")?.offsetHeight ?? 0}px`);
+    root.setProperty("--controls-h", `${document.querySelector(".controls")?.offsetHeight ?? 0}px`);
+  };
+  set();
+  if (!state.stickyObserver && "ResizeObserver" in window) {
+    state.stickyObserver = new ResizeObserver(set);
+    state.stickyObserver.observe(document.querySelector(".topbar"));
+  }
+  document.querySelectorAll(".controls").forEach((el) => state.stickyObserver?.observe(el));
+}
+window.addEventListener("resize", () => { if (document.querySelector(".controls")) syncStickyOffsets(); });
 
 // Zoom the coverage view on one day (desktop) or just select it (phone), then bring it into view.
 async function zoomTo(day) {
