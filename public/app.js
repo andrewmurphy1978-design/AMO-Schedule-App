@@ -1217,7 +1217,16 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     h("button", { class: "btn sm primary", type: "submit", form: "shift-form" }, t("save")));
   const form = h("form", { id: "shift-form", class: "modal-body shift-dialog", method: "dialog", onSubmit: (e) => { e.preventDefault(); save(false); } },
     h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, shift ? t("editShift") : t("addShift")), actions), alertBox),
-    h("label", { class: "field" }, h("span", {}, t("employee")), staffSel),
+    h("label", { class: "field" }, h("span", {}, t("employee")),
+      // administrators: open the employee's file (roles, availability, wages…) without leaving the shift
+      state.me.me.is_admin ? h("div", { class: "staff-pick" }, staffSel, h("button", { class: "btn", type: "button", title: t("employeeFile"), "aria-label": t("employeeFile"), onClick: async (e) => {
+        e.preventDefault();
+        try {
+          const ov = await api("/admin/overview");
+          const person = ov.staff.find((x) => x.id === Number(staffSel.value));
+          if (person) staffCard(person, ov).click();
+        } catch (err) { toast(errorText(err)); }
+      } }, "👤")) : staffSel),
     h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox, segBox,
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),

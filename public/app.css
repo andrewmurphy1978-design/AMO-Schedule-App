@@ -760,3 +760,4 @@ button.vtl-cell.editable{cursor:pointer}button.vtl-cell.editable:hover{outline:2
 .target-dialog .field{gap:.15rem}.target-dialog .field>span{font-size:.78rem}
 .td-times{gap:.5rem}.td-dept input{width:4rem}.target-dialog .meta{font-size:.78rem}
 button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2px;filter:brightness(.92)}.vtl-cell.editable{user-select:none;-webkit-user-select:none}
+.staff-pick{display:flex;gap:.4rem;align-items:stretch}.staff-pick select{flex:1;min-width:0}.staff-pick .btn{flex:none;padding:0 .8rem}
