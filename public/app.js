@@ -2511,7 +2511,7 @@ function hoursPanel(ov) {
       const open = timeField(resto.open_by_dow?.[i] ?? resto.open_time), close = timeField(resto.close_by_dow?.[i] ?? resto.close_time);
       const bfOn = h("input", { type: "checkbox", checked: !!bf, "aria-label": `${mealWord()} — ${weekdayName(i)}` }), bfEnd = timeField(bf?.end ?? "11:00");
       const dnOn = h("input", { type: "checkbox", checked: !!dn, "aria-label": `${t("dinnerStarts")} — ${weekdayName(i)}` }), dnAt = timeField(dn ?? "17:00");
-      const sync = () => { bfEnd.hidden = !bfOn.checked; dnAt.hidden = !dnOn.checked; };
+      const sync = () => { bfEnd.hidden = !bfOn.checked; if (bfEnd.parentElement) bfEnd.parentElement.style.visibility = bfOn.checked ? "" : "hidden"; dnAt.hidden = !dnOn.checked; };
       bfOn.addEventListener("change", sync); dnOn.addEventListener("change", sync); sync();
       return { open, close, bfOn, bfEnd, dnOn, dnAt };
     });
