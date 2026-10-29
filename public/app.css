@@ -558,7 +558,7 @@ main { max-width: 1680px; }
 }
 @media (min-width: 900px) and (max-width: 1300px) { .controls { flex-wrap: wrap; } }
 @media (max-width: 899px) {
-  .desktop-only, .payroll, .tl-legend, .zoom-hint { display: none !important; }   /* no print, ordering or cost panels on a phone */
+  .desktop-only, .tl-legend, .zoom-hint { display: none !important; }   /* no print or ordering panels on a phone (the hours and salary cards stay) */
   .subtabs button { flex: 1; }
   .subtabs .status-line { display: none; }
 }
@@ -683,3 +683,4 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
   .mine-card .mine-info{display:flex;flex-direction:column;gap:.15rem;min-width:0}
   .mine-card .sick-btn{width:auto;white-space:nowrap;margin:0;padding:0 1.1rem}
 }
+.summary .payroll{overflow-x:auto}.pay-table{font-size:.9rem}@media (max-width:600px){.pay-table th,.pay-table td{padding:.35rem .4rem}.pay-table .pay-label{white-space:nowrap}}
