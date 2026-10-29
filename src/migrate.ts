@@ -43,6 +43,7 @@ import m0040 from "../migrations/0040_view_access.sql";
 import m0041 from "../migrations/0041_half_hour_targets.sql";
 import m0042 from "../migrations/0042_special_hours.sql";
 import m0043 from "../migrations/0043_dinner_start.sql";
+import m0044 from "../migrations/0044_restaurant_franchise.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -88,6 +89,7 @@ const MIGRATIONS: [string, string][] = [
   ["0041_half_hour_targets", m0041],
   ["0042_special_hours", m0042],
   ["0043_dinner_start", m0043],
+  ["0044_restaurant_franchise", m0044],
 ];
 
 const statements = (sql: string) =>

@@ -246,10 +246,12 @@ async function withOpenHours<T extends { id: number; open_time: string; close_ti
   const hours = await db.prepare("SELECT restaurant_id, dow, open_time, close_time, dinner_time FROM restaurant_open_hours").all<{ restaurant_id: number; dow: number; open_time: string; close_time: string | null; dinner_time: string | null }>();
   const bfRows = (await db.prepare("SELECT restaurant_id, dow, start_time, end_time FROM restaurant_breakfast").all<{ restaurant_id: number; dow: number; start_time: string; end_time: string }>()).results;
   const specials = (await db.prepare("SELECT id, restaurant_id, date, yearly, closed, open_time, close_time, note FROM restaurant_special_hours ORDER BY date").all<{ id: number; restaurant_id: number; date: string; yearly: number; closed: number; open_time: string | null; close_time: string | null; note: string | null }>()).results;
+  const franchises = (await db.prepare("SELECT restaurant_id, name, logo_type, logo_v FROM restaurant_franchise").all<{ restaurant_id: number; name: string | null; logo_type: string | null; logo_v: number }>()).results;
   return rows.map((r) => {
     const day = (d: number) => hours.results.find((h) => h.restaurant_id === r.id && h.dow === d);
     return {
       ...r,
+      franchise: (() => { const f = franchises.find((x) => x.restaurant_id === r.id); return { name: f?.name ?? null, logo: !!f?.logo_type, logo_v: f?.logo_v ?? 0 }; })(),
       dinner_by_dow: Array.from({ length: 7 }, (_, d) => day(d)?.dinner_time ?? null),
       special_hours: specials.filter((x) => x.restaurant_id === r.id).map((x) => ({ ...x, yearly: x.yearly === 1, closed: x.closed === 1 })),
       breakfast_by_dow: Array.from({ length: 7 }, (_, d) => { const b = bfRows.find((x) => x.restaurant_id === r.id && x.dow === d); return b ? { start: b.start_time, end: b.end_time } : null; }),
@@ -749,6 +751,31 @@ app.put("/api/targets", async (c) => {
     return c.json({ error: "invalid_reference" }, 400);
   }
   return c.json({ ok: true });
+});
+
+// Franchise of a restaurant: name and small logo (shown on the restaurant pills in Administration).
+app.put("/api/restaurants/:id/franchise", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ name?: string | null; type?: string; data?: string; remove_logo?: boolean }>().catch(() => ({} as { name?: string | null; type?: string; data?: string; remove_logo?: boolean }));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await c.env.DB.prepare("SELECT 1 FROM restaurants WHERE id = ?").bind(id).first())) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("INSERT OR IGNORE INTO restaurant_franchise (restaurant_id) VALUES (?)").bind(id).run();
+  if (b.name !== undefined) await c.env.DB.prepare("UPDATE restaurant_franchise SET name = ? WHERE restaurant_id = ?").bind((b.name ?? "").trim().slice(0, 80) || null, id).run();
+  if (b.remove_logo) await c.env.DB.prepare("UPDATE restaurant_franchise SET logo = NULL, logo_type = NULL, logo_v = ? WHERE restaurant_id = ?").bind(Date.now(), id).run();
+  if (b.data !== undefined) {
+    if (!b.type || !(LOGO_TYPES as readonly string[]).includes(b.type)) return c.json({ error: "invalid_type" }, 400);
+    if (!/^[A-Za-z0-9+/]+=*$/.test(b.data) || b.data.length * 0.75 > MAX_LOGO_BYTES) return c.json({ error: "invalid_or_too_large" }, 400);
+    await c.env.DB.prepare("UPDATE restaurant_franchise SET logo = ?, logo_type = ?, logo_v = ? WHERE restaurant_id = ?").bind(b.data, b.type, Date.now(), id).run();
+  }
+  return c.json({ ok: true });
+});
+app.get("/api/restaurants/:id/logo", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.body(null, 404);
+  const f = await c.env.DB.prepare("SELECT logo, logo_type FROM restaurant_franchise WHERE restaurant_id = ?").bind(id).first<{ logo: string | null; logo_type: string | null }>();
+  if (!f?.logo || !f.logo_type) return c.body(null, 404);
+  const bytes = Uint8Array.from(atob(f.logo), (ch) => ch.charCodeAt(0));
+  return new Response(bytes, { headers: { "content-type": f.logo_type, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" } });
 });
 
 // Closed days and special opening hours (administrators). One entry per restaurant and date; saving again replaces it.

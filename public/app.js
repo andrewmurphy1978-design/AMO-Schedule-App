@@ -2076,7 +2076,7 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"], ["targets", "adminTargets"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -2084,9 +2084,13 @@ const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.
 async function renderAdmin() {
   const ov = await api("/admin/overview");
 
-  const restaurantsPanel = h("section", { class: "panel" }, h("h2", {}, t("restaurants")),
-    h("p", {}, ov.restaurants.map((r) => h("span", { class: "badge", style: "margin-right:.4rem" }, r.name))),
-    h("p", { class: "meta" }, t("addRestaurantInfo")));
+  // Restaurant pills: small franchise logo + name (an owner can have restaurants of several franchises); click to edit the franchise.
+  const logoSrc = (r) => (r.franchise?.logo ? `/api/restaurants/${r.id}/logo?v=${r.franchise.logo_v}` : state.brand.logo ? `/api/auth/logo?v=${state.brand.logo_v}` : null);
+  const restaurantsPanel = h("section", { class: "panel" },
+    h("div", { class: "resto-head" }, h("h2", {}, t("restaurants")), h("p", { class: "meta" }, t("addRestaurantInfo"))),
+    h("div", { class: "resto-pills" }, ov.restaurants.map((r) => h("button", { class: "resto-pill", type: "button", title: t("franchiseEdit"), onClick: () => franchiseDialog(r, ov) },
+      logoSrc(r) ? h("img", { src: logoSrc(r), alt: "", width: 28, height: 28 }) : h("span", { class: "resto-ico", "aria-hidden": "true" }, "🍽"),
+      h("span", { class: "resto-names" }, h("b", {}, r.name), r.franchise?.name ? h("small", {}, r.franchise.name) : null)))));
 
   // One "+ Add" button; the new employee's name goes in a small dialog.
   const addStaff = h("button", { class: "btn primary", type: "button", onClick: () => {
@@ -2128,6 +2132,32 @@ async function renderAdmin() {
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
     h("button", { type: "button", "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, mqDesktop.matches ? t(label) : t(`${label}Short`))));
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
+}
+
+// Franchise of a restaurant: name and logo.
+function franchiseDialog(resto, ov) {
+  let dlg = document.getElementById("franchise-modal");
+  if (!dlg) { dlg = h("dialog", { id: "franchise-modal" }); document.body.append(dlg); }
+  const name = h("input", { value: resto.franchise?.name ?? "", maxLength: 80, placeholder: t("franchiseName") });
+  const reload = async () => { state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); render(); };
+  const upload = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", hidden: true, onChange: async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 300 * 1024) { toast(t("brandLogoTooBig")); return; }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    try { await api(`/restaurants/${resto.id}/franchise`, { method: "PUT", body: { type: file.type, data: btoa(bin) } }); dlg.close(); await reload(); toast(t("saved")); } catch (err) { toast(errorText(err)); }
+  } });
+  dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
+    e.preventDefault();
+    try { await api(`/restaurants/${resto.id}/franchise`, { method: "PUT", body: { name: name.value } }); dlg.close(); await reload(); toast(t("saved")); } catch (err) { toast(errorText(err)); }
+  } }, h("h2", {}, resto.name),
+    h("label", { class: "field" }, h("span", {}, t("franchiseName")), name),
+    h("div", { class: "field" }, h("span", {}, t("brandLogo")), h("div", { class: "brand-logo" },
+      resto.franchise?.logo ? h("img", { src: `/api/restaurants/${resto.id}/logo?v=${resto.franchise.logo_v}`, alt: "", height: 48 }) : h("span", { class: "meta" }, t("franchiseLogoDefault")),
+      h("label", { class: "btn" }, t("brandLogoUpload"), upload),
+      resto.franchise?.logo ? h("button", { class: "btn", type: "button", onClick: async () => { try { await api(`/restaurants/${resto.id}/franchise`, { method: "PUT", body: { remove_logo: true } }); dlg.close(); await reload(); } catch (err) { toast(errorText(err)); } } }, t("brandLogoRemove")) : null)),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+  dlg.showModal();
 }
 
 // ---- seasons / special days ----
@@ -2413,11 +2443,11 @@ function specialHoursPanel(ov) {
   function draw() {
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
     if (!resto) { box.replaceChildren(); return; }
-    const date = h("input", { type: "date", required: true, "aria-label": t("date") });
-    const endDate = h("input", { type: "date", "aria-label": t("toDate") });
+    const date = h("input", { type: "date", class: "sh-date", required: true, "aria-label": t("date") });
+    const endDate = h("input", { type: "date", class: "sh-date", "aria-label": t("toDate") });
     date.addEventListener("change", () => { endDate.min = date.value; if (endDate.value && endDate.value < date.value) endDate.value = date.value; });
     // a whole week (construction, big clean-up): Monday to Sunday of the chosen date
-    const wholeWeek = h("button", { class: "btn sm", type: "button", onClick: () => { if (!date.value) { date.focus(); return; } const mon = mondayOf(parseYmd(date.value)); date.value = mon; endDate.value = addDays(mon, 6); yearly.checked = false; } }, t("wholeWeek"));
+    const wholeWeek = h("button", { class: "btn", type: "button", onClick: () => { if (!date.value) { date.focus(); return; } const mon = mondayOf(parseYmd(date.value)); date.value = mon; endDate.value = addDays(mon, 6); yearly.checked = false; } }, t("wholeWeek"));
     const yearly = h("input", { type: "checkbox" });
     const closed = h("input", { type: "checkbox", checked: true });
     const open = timeField("10:00"), close = timeField("17:00");
@@ -2445,9 +2475,9 @@ function specialHoursPanel(ov) {
       h("form", { class: "td-body sh-form", onSubmit: add },
         // line 1: the dates and Closed
         h("div", { class: "sh-line" }, h("label", { class: "field" }, h("span", {}, t("fromDate")), date), h("label", { class: "field" }, h("span", {}, `${t("toDate")} (${t("optional").toLowerCase()})`), endDate),
-          h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek, h("div", { class: "seg" }, btnClosed)),
+          h("label", { class: "check" }, yearly, h("span", {}, t("everyYear"))), wholeWeek, h("div", { class: "seg" }, btnClosed, btnSpecial)),
         // line 2: special hours, description, all restaurants, Add
-        h("div", { class: "sh-line" }, h("div", { class: "seg" }, btnSpecial), hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
+        h("div", { class: "sh-line" }, hoursRow, h("label", { class: "field sh-note" }, h("span", {}, t("descriptionWord")), note),
           ov.restaurants.length > 1 ? h("label", { class: "check" }, all, h("span", {}, t("allRestaurants"))) : null,
           h("button", { class: "btn primary", type: "submit" }, t("add")))));
   }
@@ -2511,7 +2541,7 @@ function hoursPanel(ov) {
       const open = timeField(resto.open_by_dow?.[i] ?? resto.open_time), close = timeField(resto.close_by_dow?.[i] ?? resto.close_time);
       const bfOn = h("input", { type: "checkbox", checked: !!bf, "aria-label": `${mealWord()} — ${weekdayName(i)}` }), bfEnd = timeField(bf?.end ?? "11:00");
       const dnOn = h("input", { type: "checkbox", checked: !!dn, "aria-label": `${t("dinnerStarts")} — ${weekdayName(i)}` }), dnAt = timeField(dn ?? "17:00");
-      const sync = () => { bfEnd.hidden = !bfOn.checked; if (bfEnd.parentElement) bfEnd.parentElement.style.visibility = bfOn.checked ? "" : "hidden"; dnAt.hidden = !dnOn.checked; };
+      const sync = () => { bfEnd.hidden = !bfOn.checked; dnAt.hidden = !dnOn.checked; for (const [el, on] of [[bfEnd, bfOn.checked], [dnAt, dnOn.checked]]) if (el.parentElement) el.parentElement.style.visibility = on ? "" : "hidden"; };
       bfOn.addEventListener("change", sync); dnOn.addEventListener("change", sync); sync();
       return { open, close, bfOn, bfEnd, dnOn, dnAt };
     });
@@ -2526,13 +2556,14 @@ function hoursPanel(ov) {
         h("select", { onChange: (e) => { st.restaurant = Number(e.target.value); draw(); } },
           ov.restaurants.map((r) => h("option", { value: r.id, selected: r.id === st.restaurant }, r.name)))),
       h("div", { class: "hrs-table" },
-        h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerStarts"))),
+        h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerWord")), h("span", {}, t("startsAt"))),
         rows.map((r, i) => h("div", { class: "hrs-row" }, h("strong", {}, weekdayName(i)),
           h("label", { class: "mini" }, h("span", {}, t("openTime")), r.open),
           h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.close),
           h("label", { class: "check hrs-bf" }, r.bfOn, h("span", { class: "hrs-until" }, mealWord())),
           h("div", { class: "mini" }, h("span", {}, t("breakfastUntil")), r.bfEnd),
-          h("div", { class: "mini dn" }, h("label", { class: "check" }, r.dnOn, h("span", { class: "hrs-until" }, t("dinnerStarts"))), r.dnAt)))),
+          h("label", { class: "check hrs-bf" }, r.dnOn, h("span", { class: "hrs-until" }, t("dinnerWord"))),
+          h("div", { class: "mini" }, h("span", {}, t("startsAt")), r.dnAt)))),
       h("div", { class: "actions" },
         h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
@@ -2543,7 +2574,7 @@ function hoursPanel(ov) {
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
           } catch (e) { toast(e.body?.error === "invalid_times" ? t("opensBeforeCloses") : errorText(e)); }
         } }, t("save"))));
-    rows.forEach((r) => r.bfOn.dispatchEvent(new Event("change"))); // sets the visibility of the "until" cells now they are attached
+    rows.forEach((r) => { r.bfOn.dispatchEvent(new Event("change")); }); // sets the visibility of the "until" cells now they are attached
   }
   draw();
   return box;
