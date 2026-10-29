@@ -672,3 +672,14 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .reason span{display:block;text-align:left}
 #absence-modal .dlg-top{margin:0}
 #absence-modal .modal-body>p{margin:.7rem 0 .2rem}
+
+/* Mes quarts: on desktop the date is on the left and the shift cards on the right; each card has the absence button on its right */
+.mine-day .list{margin-bottom:1rem}
+@media (min-width:900px){
+  .mine-day{display:grid;grid-template-columns:230px minmax(0,1fr);gap:1rem;align-items:start;margin-bottom:.4rem;border-top:1px solid var(--line,#e3dfd9);padding-top:.8rem}
+  .mine-day>h2{margin:.2rem 0 0;position:sticky;top:calc(var(--topbar-h,56px) + 10px)}
+  .mine-day .list{margin-bottom:.6rem}
+  .mine-card{display:grid!important;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:1rem}
+  .mine-card .mine-info{display:flex;flex-direction:column;gap:.15rem;min-width:0}
+  .mine-card .sick-btn{width:auto;white-space:nowrap;margin:0;padding:0 1.1rem}
+}

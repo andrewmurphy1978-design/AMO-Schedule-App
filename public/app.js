@@ -1473,11 +1473,13 @@ async function renderMine() {
     data.unrated_hours > 0 ? h("div", { class: "meta" }, `${hrs(data.unrated_hours)} ${t("hoursShort")} ${t("noRateForHours")}`) : null);
   const days = Array.from({ length: 7 }, (_, i) => addDays(sel.week, i)).filter((d) => data.shifts.some((s) => dayOf(s.start_at) === d));
   const body = days.length
-    ? days.map((d) => h("section", {}, h("h2", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
-        h("div", { class: "list", style: "margin-bottom:1rem" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
-          h("div", { class: "card" }, h("span", { class: "time" }, range(s)),
-            h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
-            h("span", { class: "meta" }, [roleName(s), s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
+    ? days.map((d) => h("section", { class: "mine-day" }, h("h2", {}, fmt(d, { weekday: "long", day: "numeric", month: "long" })),
+        h("div", { class: "list" }, data.shifts.filter((s) => dayOf(s.start_at) === d).map((s) =>
+          // desktop: the date sits on the left, the shift cards on the right, and each card has its "Je serai absent" button on its right
+          h("div", { class: "card mine-card" },
+            h("div", { class: "mine-info" }, h("span", { class: "time" }, range(s)),
+              h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
+              h("span", { class: "meta" }, [`${roleIcon(s)} ${roleName(s)}`, s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null),
             s.status === "ok" && s.end_at > nowLocal() ? h("button", { class: "btn sick-btn", type: "button", onClick: async () => {
               const why = await absenceDialog();
               if (!why) return;
