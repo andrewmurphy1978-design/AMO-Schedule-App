@@ -61,6 +61,7 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Visible schedules (admin) | `GET/PUT /staff/:id/view-access` `{custom, access:[{restaurant_id, department_id}]}`: which schedules an employee may look at (automatic = where they hold a role; custom = the ticked list). `GET /me` returns the effective `schedules` for non-administrators |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
 | Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=` (also `total_hours`, `gross_cents` = the caller's own gross pay for the week), `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
+| Shift reminders (own settings, never for API tokens) | `GET/PUT /account/reminders` (`items`: up to 5 × `{ minutes_before 5-2880, channel push\|sms\|email }`) |
 | Web Push (a person's own devices, never for API tokens) | `GET /push/key`, `GET /push/status`, `POST/DELETE /push/subscribe`, `POST /push/test` |
 | Communities | `GET /communities` (the ones the caller belongs to: a role or a managed department of the group; admins see all), `GET/POST /communities/:id/posts` (`body`, optional `parent_id`), `DELETE /community-posts/:id` (author or moderator), `PUT /community-posts/:id/pin` (moderator), admin: `GET/POST /admin/communities`, `PUT/DELETE /admin/communities/:id` (`name`, `departments`) |
 | Targets | `GET/PUT /targets`, `PUT /targets/range`, `GET/POST/PUT/DELETE /target-sets` |
@@ -198,6 +199,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-30 | **Shift reminders** ("your shift starts in …", several per person, by push / SMS / email, published schedules only; sent by the 5-minute cron, never twice; migration 0047). |
 | 2026-10-30 | **Web Push notifications** (phone / Windows / macOS notification panel): installable app (manifest + service worker), `/api/push/*`, VAPID keys generated on first use and kept in `settings`; sent for published schedules, replacement offers (also SMS/email), leave decisions/requests and community messages; migration 0046. |
 | 2026-10-30 | **Communities** (message board per restaurant and group of departments, automatic membership through roles; migration 0045; a restaurant created by the CRM gets one "Équipe" community with every department). |
 | 2026-10-29 | Special hours accept a date range (`end_date`, max 60 days) to close a whole week; the "Congés" screen moved into Mon compte (UI only). |

@@ -1747,6 +1747,35 @@ function installControls() {
   return box;
 }
 
+// "Your shift starts soon" reminders: how long before, and by which channel; up to 5.
+const REMINDER_PRESETS = [15, 30, 45, 60, 90, 120, 180, 720, 1440];
+function durationLabel(min) {
+  if (min >= 1440 && min % 1440 === 0) { const d = min / 1440; return getLang() === "fr" ? `${d} jour${d > 1 ? "s" : ""}` : `${d} day${d > 1 ? "s" : ""}`; }
+  if (min >= 60) { const hh = Math.floor(min / 60), m = min % 60; return m ? `${hh} h ${String(m).padStart(2, "0")}` : `${hh} h`; }
+  return `${min} min`;
+}
+function reminderControls() {
+  const box = h("div", { class: "reminders" });
+  let items = [];
+  const draw = () => {
+    const rows = items.map((it, i) => {
+      const opts = REMINDER_PRESETS.includes(it.minutes_before) ? REMINDER_PRESETS : [...REMINDER_PRESETS, it.minutes_before].sort((a, b) => a - b);
+      const when = h("select", { "aria-label": t("reminderBefore"), onChange: (e) => { it.minutes_before = Number(e.target.value); } }, opts.map((m) => h("option", { value: m, selected: m === it.minutes_before }, `${durationLabel(m)} ${t("reminderBeforeWord")}`)));
+      const how = h("select", { "aria-label": t("reminderHow"), onChange: (e) => { it.channel = e.target.value; } }, [["push", t("reminderPush")], ["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: v === it.channel }, l)));
+      return h("div", { class: "reminder-row" }, h("div", { class: "reminder-sels" }, when, how), h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), title: t("delete"), onClick: () => { items.splice(i, 1); draw(); } }, "🗑️"));
+    });
+    box.replaceChildren(h("p", { class: "meta" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
+      h("div", { class: "actions push-actions" },
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push" }); draw(); } }, `+ ${t("addReminder")}`) : null,
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try { await api("/account/reminders", { method: "PUT", body: { items } }); toast(t("saved")); }
+          catch (e) { toast(e.body?.error === "duplicate" ? t("reminderDuplicate") : errorText(e)); }
+        } }, t("saveReminders"))));
+  };
+  api("/account/reminders").then((rows) => { items = rows; draw(); }).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 // Notifications on this device (phone, Windows / macOS notification panel).
 function pushControls() {
   const box = h("div", { class: "push-box" });
@@ -1817,6 +1846,7 @@ async function renderAccount() {
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("div", { class: "field push-field" }, h("span", {}, t("installTitle")), installControls()),
     h("div", { class: "field push-field" }, h("span", {}, t("pushTitle")), pushControls()),
+    h("div", { class: "field push-field" }, h("span", {}, t("remindersTitle")), reminderControls()),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
   const tabs = [
@@ -2230,6 +2260,7 @@ function clientsPanel() {
 
 const ADMIN_SECTIONS_MARK = 0;
 const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -2284,7 +2315,8 @@ async function renderAdmin() {
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
-    h("button", { type: "button", "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } }, mqDesktop.matches ? t(label) : t(`${label}Short`))));
+    h("button", { type: "button", "aria-label": t(label), title: t(label), "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } },
+      h("span", { class: "tab-ic", "aria-hidden": "true" }, ADMIN_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, t(label)))));
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
 }
 

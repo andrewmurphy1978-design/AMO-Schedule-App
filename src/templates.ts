@@ -19,6 +19,13 @@ export function formatWhen(startAt: string, endAt: string, untilClose: boolean, 
   return `${formatDate(startAt.slice(0, 10), lang)} ${startAt.slice(11, 16)}–${untilClose ? "F" : endAt.slice(11, 16)}`;
 }
 
+/** 30 -> "30 min", 60 -> "1 h", 90 -> "1 h 30", 1440 -> "1 jour". */
+export function durationText(min: number, l: Lang): string {
+  if (min >= 1440 && min % 1440 === 0) { const d = min / 1440; return l === "fr" ? `${d} jour${d > 1 ? "s" : ""}` : `${d} day${d > 1 ? "s" : ""}`; }
+  if (min >= 60) { const h = Math.floor(min / 60), m = min % 60; return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`; }
+  return `${min} min`;
+}
+
 export const ABSENCE_REASONS = ["sick", "medical", "family", "transport", "personal", "other"] as const;
 export type AbsenceReason = (typeof ABSENCE_REASONS)[number];
 const REASON_FR: Record<AbsenceReason, string> = { sick: "Maladie", medical: "Rendez-vous médical", family: "Urgence familiale", transport: "Problème de transport", personal: "Raison personnelle", other: "Autre" };
@@ -88,6 +95,15 @@ export const T = {
     return l === "fr"
       ? { subject: `Horaire publié — ${c.restaurant}`, text: `Mikes: l’horaire du ${c.from} au ${c.to} (${c.restaurant}) est publié. ${c.sms ? `Tu as ${n} quart${n > 1 ? "s" : ""}.` : `Tes quarts :\n${c.lines.join("\n")}`}${c.url ? `\n${c.url}` : ""}` }
       : { subject: `Schedule published — ${c.restaurant}`, text: `Mikes: the schedule for ${c.from} to ${c.to} (${c.restaurant}) is published. ${c.sms ? `You have ${n} shift${n > 1 ? "s" : ""}.` : `Your shifts:\n${c.lines.join("\n")}`}${c.url ? `\n${c.url}` : ""}` };
+  },
+
+  /** Reminder before a shift; `short` is the one-line detail used as the body of a push. */
+  shiftReminder: (l: Lang, c: { minutes: number; restaurant: string; role: string; start: string; end: string; untilClose: boolean; url: string; sms: boolean }): Msg & { short: string } => {
+    const span = `${c.start}–${c.untilClose ? "F" : c.end}`;
+    const dur = durationText(c.minutes, l);
+    return l === "fr"
+      ? { subject: `⏰ Ton quart commence dans ${dur}`, short: `${c.restaurant} · ${span} · ${c.role}`, text: `Mikes: ton quart commence dans ${dur} — ${c.role}, ${c.restaurant}, ${span}.${c.sms || !c.url ? "" : `\n${c.url}`}` }
+      : { subject: `⏰ Your shift starts in ${dur}`, short: `${c.restaurant} · ${span} · ${c.role}`, text: `Mikes: your shift starts in ${dur} — ${c.role}, ${c.restaurant}, ${span}.${c.sms || !c.url ? "" : `\n${c.url}`}` };
   },
 
   test: (l: Lang): Msg =>

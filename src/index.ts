@@ -15,6 +15,7 @@ import { resolveForDate } from "../public/rules.js";
 import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
 import { getVapid, pushToStaff } from "./push.ts";
+import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminders.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
@@ -1188,6 +1189,28 @@ app.put("/api/account", async (c) => {
   return c.json(await accountView(c));
 });
 // Creates the personal calendar link, or replaces it (the old link then stops working).
+// Reminders before a shift (the person's own settings).
+app.get("/api/account/reminders", async (c) =>
+  c.json((await c.env.DB.prepare("SELECT minutes_before, channel FROM shift_reminders WHERE staff_id = ? ORDER BY minutes_before DESC").bind(c.get("me").id).all()).results));
+app.put("/api/account/reminders", async (c) => {
+  const b = await c.req.json<{ items?: { minutes_before?: number; channel?: string }[] }>().catch(() => ({} as { items?: { minutes_before?: number; channel?: string }[] }));
+  const items = b.items ?? [];
+  if (!Array.isArray(items) || items.length > MAX_REMINDERS) return c.json({ error: "too_many" }, 400);
+  const seen = new Set<string>();
+  for (const x of items) {
+    if (!Number.isInteger(x.minutes_before) || x.minutes_before! < 5 || x.minutes_before! > 2880 || !(REMINDER_CHANNELS as readonly string[]).includes(x.channel ?? "")) return c.json({ error: "invalid_reminder" }, 400);
+    const key = `${x.minutes_before}|${x.channel}`;
+    if (seen.has(key)) return c.json({ error: "duplicate" }, 400);
+    seen.add(key);
+  }
+  const id = c.get("me").id;
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM shift_reminders WHERE staff_id = ?").bind(id),
+    ...items.map((x) => c.env.DB.prepare("INSERT INTO shift_reminders (staff_id, minutes_before, channel) VALUES (?, ?, ?)").bind(id, x.minutes_before, x.channel)),
+  ]);
+  return c.json({ ok: true });
+});
+
 app.post("/api/account/calendar-token", async (c) => {
   await c.env.DB.prepare("INSERT OR REPLACE INTO calendar_tokens (staff_id, token, created_at) VALUES (?, ?, ?)").bind(c.get("me").id, newToken(), Date.now()).run();
   return c.json(await accountView(c));
@@ -2746,6 +2769,6 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await flushDeliveries(env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await flushDeliveries(env.DB); })());
   },
 };

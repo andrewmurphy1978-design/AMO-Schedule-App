@@ -48,3 +48,10 @@ test("dates and messages come out in both languages", () => {
   assert.match(T.escalation("en", { ...ctx, sick: "Marc", minutes: 30 }).text, /ACTION NEEDED/);
   assert.match(T.sickNotice("fr", { ...ctx, sick: "Marc", offers: 0 }).text, /Aucun remplaçant/);
 });
+
+test("shift reminder wording and durations", () => {
+  assert.equal(T.shiftReminder("fr", { minutes: 60, restaurant: "Saint-Sauveur", role: "Livreur", start: "17:00", end: "21:00", untilClose: false, url: "", sms: true }).subject, "⏰ Ton quart commence dans 1 h");
+  const m = T.shiftReminder("en", { minutes: 90, restaurant: "Ste-Agathe", role: "Cook", start: "09:00", end: "14:00", untilClose: true, url: "", sms: true });
+  assert.equal(m.subject, "⏰ Your shift starts in 1 h 30");
+  assert.equal(m.short, "Ste-Agathe · 09:00–F · Cook");
+});
