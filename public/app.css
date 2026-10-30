@@ -912,3 +912,6 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .react{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:.15rem .6rem;font:inherit;font-size:.85rem;cursor:pointer;min-height:30px}
 .react.mine{background:color-mix(in srgb,var(--brand) 14%,var(--card));border-color:var(--brand)}.react.add{color:var(--muted)}
 .comm-compose,.comm-reply{position:relative}
+
+.cp-short{display:none}
+@media (max-width:899px){.cp-full{display:none}.cp-short{display:inline;font-size:1.05rem;letter-spacing:.05em}.comm-pills button{padding:.4rem .8rem}}

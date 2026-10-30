@@ -1717,10 +1717,16 @@ async function renderCommunity() {
   if (!list.some((x) => x.id === state.communityId)) state.communityId = (list.find((x) => x.unread) ?? list[0]).id;
   const manyRestos = new Set(list.map((x) => x.restaurant_id)).size > 1;
   const short = (n) => n.split(/-des-|\sdes\s/)[0];
+  // "Saint-Sauveur" -> SS, "Ste-Agathe-des-Monts" -> SA
+  const restoCode = (n) => n.split(/[-\s]+/).filter((w) => w && !/^(des?|du|la|le|les)$/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+  const shortIcons = (deps) => { const list = deps.filter((d) => d !== "admin"); return [...(list.length ? list : deps)].sort((a, b) => DEPTS.indexOf(a) - DEPTS.indexOf(b)).map(deptIcon).join(""); };
   const feed = h("div", { class: "comm-feed" });
   const pills = h("div", { class: "comm-pills", role: "tablist" }, list.map((x) =>
-    h("button", { type: "button", role: "tab", "aria-selected": String(x.id === state.communityId), onClick: () => { state.communityId = x.id; renderCommunity(); } },
-      manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name, x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)));
+    h("button", { type: "button", role: "tab", "aria-selected": String(x.id === state.communityId), title: `${x.restaurant} · ${x.name}`, "aria-label": `${x.restaurant} · ${x.name}`, onClick: () => { state.communityId = x.id; renderCommunity(); } },
+      // desktop: the names; phone: the restaurant code (SS, SA…) and the icons of the departments
+      h("span", { class: "cp-full" }, manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name),
+      h("span", { class: "cp-short" }, `${manyRestos ? `${restoCode(x.restaurant)} ` : ""}${shortIcons(x.departments)}`),
+      x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)));
   const id = state.communityId;
   let moderator = false;
   const body = h("textarea", { maxLength: 2000, rows: 2, placeholder: t("writePost"), "aria-label": t("writePost") });

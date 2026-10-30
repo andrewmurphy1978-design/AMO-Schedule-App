@@ -2251,7 +2251,7 @@ app.post("/api/push/test", async (c) => {
 // administrators see them all. Managers of a department of the group, and administrators, moderate (pin, delete).
 const COMMUNITY_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 type CommunityRow = { id: number; name: string; restaurant_id: number; restaurant: string; position: number };
-async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null })[]> {
+async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null; departments: string[] })[]> {
   const base = "SELECT DISTINCT c.id, c.name, c.restaurant_id, r.name AS restaurant, c.position FROM communities c JOIN restaurants r ON r.id = c.restaurant_id";
   const rows = me.is_admin
     ? (await db.prepare(`${base} WHERE r.client_id = ? ORDER BY r.name, c.position, c.id`).bind(me.client_id).all<CommunityRow>()).results
@@ -2270,7 +2270,8 @@ async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { 
             (SELECT count(*) FROM community_posts p WHERE p.community_id = c.id AND p.staff_id != ? AND p.id > coalesce((SELECT last_post_id FROM community_reads WHERE community_id = c.id AND staff_id = ?), 0)) AS unread
      FROM communities c WHERE c.id IN (${marks})`,
   ).bind(me.id, me.id, ...rows.map((r) => r.id)).all<{ id: number; last_post_at: string | null; unread: number }>()).results;
-  return rows.map((r) => ({ ...r, ...(stats.find((x) => x.id === r.id) ?? { unread: 0, last_post_at: null }) }));
+  const deps = (await db.prepare(`SELECT community_id, department_id FROM community_departments WHERE community_id IN (${marks})`).bind(...rows.map((r) => r.id)).all<{ community_id: number; department_id: string }>()).results;
+  return rows.map((r) => ({ ...r, departments: deps.filter((d) => d.community_id === r.id).map((d) => d.department_id), ...(stats.find((x) => x.id === r.id) ?? { unread: 0, last_post_at: null }) }));
 }
 async function communityAccess(db: D1Database, me: Me, id: number) {
   return (await myCommunities(db, me)).find((x) => x.id === id) ?? null;
