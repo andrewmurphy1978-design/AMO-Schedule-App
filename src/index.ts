@@ -163,7 +163,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
@@ -175,6 +175,7 @@ const OWNER_SQL: Record<Owned, string> = {
   payslip: "SELECT 1 FROM payslips WHERE id = ?1 AND client_id = ?2",
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
+  community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
   community_post: "SELECT 1 FROM community_posts p JOIN communities c ON c.id = p.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE p.id = ?1 AND r.client_id = ?2",
 };
 const PATH_OWNERS: [RegExp, Owned][] = [
@@ -183,7 +184,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"],
+  [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -2303,7 +2304,9 @@ app.get("/api/communities/:id/posts", async (c) => {
     `SELECT p.id, p.parent_id, p.body, p.created_at, p.staff_id, s.name AS author, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v
      FROM community_posts p JOIN staff s ON s.id = p.staff_id WHERE p.parent_id IN (${page.map(() => "?").join(",")}) ORDER BY p.id`,
   ).bind(...page.map((x) => x.id)).all<{ id: number; parent_id: number; staff_id: number }>()).results : [];
-  const mark = (x: { staff_id: number }) => ({ ...x, mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
+  const allIds = [...page.map((x) => x.id), ...replies.map((x) => x.id)];
+  const media = allIds.length ? (await db.prepare(`SELECT id, post_id, kind, mime FROM community_media WHERE post_id IN (${allIds.map(() => "?").join(",")}) ORDER BY id`).bind(...allIds).all<{ id: number; post_id: number; kind: string; mime: string }>()).results : [];
+  const mark = (x: { id: number; staff_id: number }) => ({ ...x, media: media.filter((m) => m.post_id === x.id), mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
   if (!before) {
     const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM community_posts WHERE community_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
     await db.prepare("INSERT INTO community_reads (community_id, staff_id, last_post_id) VALUES (?, ?, ?) ON CONFLICT (community_id, staff_id) DO UPDATE SET last_post_id = excluded.last_post_id").bind(id, me.id, last).run();
@@ -2314,16 +2317,24 @@ app.get("/api/communities/:id/posts", async (c) => {
 app.post("/api/communities/:id/posts", async (c) => {
   const me = c.get("me"), db = c.env.DB;
   const id = intParam(c.req.param("id"));
-  const b = await c.req.json<{ body?: string; parent_id?: number }>().catch(() => ({} as { body?: string; parent_id?: number }));
+  const b = await c.req.json<{ body?: string; parent_id?: number; media_ids?: number[] }>().catch(() => ({} as { body?: string; parent_id?: number; media_ids?: number[] }));
   if (!id) return c.json({ error: "bad_id" }, 400);
   if (!(await communityAccess(db, me, id))) return c.json({ error: "forbidden" }, 403);
   const body = (b.body ?? "").trim();
-  if (!body || body.length > 2000) return c.json({ error: "invalid_body" }, 400);
+  const mediaIds = [...new Set((b.media_ids ?? []).filter((x) => Number.isInteger(x)))];
+  if (mediaIds.length > MAX_MEDIA_PER_POST || body.length > 2000 || (!body && !mediaIds.length)) return c.json({ error: "invalid_body" }, 400);
+  // only the caller's own, not yet published uploads of this community
+  if (mediaIds.length) {
+    const ok = await db.prepare(`SELECT count(*) AS n FROM community_media WHERE id IN (${mediaIds.map(() => "?").join(",")}) AND staff_id = ? AND community_id = ? AND post_id IS NULL`).bind(...mediaIds, me.id, id).first<{ n: number }>();
+    if (ok?.n !== mediaIds.length) return c.json({ error: "invalid_media" }, 400);
+  }
   if (b.parent_id) {
     const parent = await db.prepare("SELECT 1 FROM community_posts WHERE id = ? AND community_id = ? AND parent_id IS NULL").bind(b.parent_id, id).first();
     if (!parent) return c.json({ error: "not_found" }, 404);
   }
   const r = await db.prepare("INSERT INTO community_posts (community_id, parent_id, staff_id, body) VALUES (?, ?, ?, ?)").bind(id, b.parent_id ?? null, me.id, body).run();
+  if (mediaIds.length) await db.prepare(`UPDATE community_media SET post_id = ? WHERE id IN (${mediaIds.map(() => "?").join(",")})`).bind(r.meta.last_row_id, ...mediaIds).run();
+  const preview = body ? "" : (await db.prepare("SELECT kind FROM community_media WHERE post_id = ? LIMIT 1").bind(r.meta.last_row_id).first<{ kind: string }>())?.kind === "video" ? "🎥" : "📷";
   // everyone of the community who enabled notifications (the author excepted)
   c.executionCtx.waitUntil((async () => {
     try {
@@ -2335,10 +2346,68 @@ app.post("/api/communities/:id/posts", async (c) => {
            OR s.id IN (SELECT m.staff_id FROM managers m JOIN community_departments cd ON cd.department_id = m.department_id WHERE cd.community_id = ?3 AND m.restaurant_id = ?4))`,
       ).bind(me.id, me.client_id, id, community.restaurant_id).all<{ id: number }>()).results;
       const first = me.name.split(" ")[0];
-      for (const p of people) await pushToStaff(db, p.id, { title: `${first} · ${community.name}`, body: body.slice(0, 140), url: `/?view=community&c=${id}`, tag: `community-${id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+      for (const p of people) await pushToStaff(db, p.id, { title: `${first} · ${community.name}`, body: (body || preview).slice(0, 140), url: `/?view=community&c=${id}`, tag: `community-${id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
     } catch { /* notifications never block a post */ }
   })());
   return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+// Photos and videos of community posts. Uploaded first (raw body), attached to the post when it is published.
+const MEDIA_TYPES: Record<string, "image" | "video"> = { "image/jpeg": "image", "image/png": "image", "image/webp": "image", "video/mp4": "video", "video/quicktime": "video", "video/webm": "video" };
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024, MAX_VIDEO_BYTES = 20 * 1024 * 1024, MAX_MEDIA_PER_POST = 4, MEDIA_CHUNK = 600_000;
+function sniffMedia(b: Uint8Array, mime: string): boolean {
+  const at = (i: number, ...v: number[]) => v.every((x, k) => b[i + k] === x);
+  if (mime === "image/jpeg") return at(0, 0xff, 0xd8);
+  if (mime === "image/png") return at(0, 0x89, 0x50, 0x4e, 0x47);
+  if (mime === "image/webp") return at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50);
+  if (mime === "video/webm") return at(0, 0x1a, 0x45, 0xdf, 0xa3);
+  return at(4, 0x66, 0x74, 0x79, 0x70); // mp4 / mov: "ftyp"
+}
+const toB64 = (u: Uint8Array) => { let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); };
+app.post("/api/communities/:id/media", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await communityAccess(db, me, id))) return c.json({ error: "forbidden" }, 403);
+  const mime = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const kind = MEDIA_TYPES[mime];
+  if (!kind) return c.json({ error: "invalid_type" }, 400);
+  const limit = kind === "video" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+  if (Number(c.req.header("content-length") ?? 0) > limit) return c.json({ error: "too_large", max: limit }, 413);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (!bytes.length || bytes.length > limit) return c.json({ error: bytes.length ? "too_large" : "invalid_media", max: limit }, bytes.length ? 413 : 400);
+  if (!sniffMedia(bytes, mime)) return c.json({ error: "invalid_media" }, 400);
+  const r = await db.prepare("INSERT INTO community_media (community_id, staff_id, kind, mime, size, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, me.id, kind, mime, bytes.length, Date.now()).run();
+  const mid = r.meta.last_row_id as number;
+  for (let i = 0, n = 0; i < bytes.length; i += MEDIA_CHUNK, n++) {
+    await db.prepare("INSERT INTO community_media_chunks (media_id, idx, data) VALUES (?, ?, ?)").bind(mid, n, toB64(bytes.subarray(i, i + MEDIA_CHUNK))).run();
+  }
+  return c.json({ id: mid, kind, mime }, 201);
+});
+app.get("/api/community-media/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.body(null, 404);
+  const m = await db.prepare("SELECT community_id, mime, size FROM community_media WHERE id = ?").bind(id).first<{ community_id: number; mime: string; size: number }>();
+  if (!m) return c.body(null, 404);
+  if (!(await communityAccess(db, me, m.community_id))) return c.body(null, 403);
+  let start = 0, end = m.size - 1, status = 200;
+  const range = /^bytes=(\d*)-(\d*)$/.exec(c.req.header("range") ?? "");
+  if (range && (range[1] || range[2])) {
+    if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), m.size - 1) : m.size - 1; }
+    else { start = Math.max(0, m.size - Number(range[2])); }
+    if (start > end || start >= m.size) return new Response(null, { status: 416, headers: { "content-range": `bytes */${m.size}` } });
+    status = 206;
+  }
+  const first = Math.floor(start / MEDIA_CHUNK), last = Math.floor(end / MEDIA_CHUNK);
+  const rows = (await db.prepare("SELECT idx, data FROM community_media_chunks WHERE media_id = ? AND idx BETWEEN ? AND ? ORDER BY idx").bind(id, first, last).all<{ idx: number; data: string }>()).results;
+  const parts = rows.map((r) => Uint8Array.from(atob(r.data), (ch) => ch.charCodeAt(0)));
+  const joined = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { joined.set(p, o); o += p.length; }
+  const out = joined.subarray(start - first * MEDIA_CHUNK, end - first * MEDIA_CHUNK + 1);
+  return new Response(out, { status, headers: {
+    "content-type": m.mime, "content-length": String(out.length), "accept-ranges": "bytes", "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; sandbox",
+    ...(status === 206 ? { "content-range": `bytes ${start}-${end}/${m.size}` } : {}),
+  } });
 });
 
 app.delete("/api/community-posts/:id", async (c) => {
@@ -2769,6 +2838,6 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await flushDeliveries(env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await flushDeliveries(env.DB); })());
   },
 };

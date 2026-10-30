@@ -47,6 +47,7 @@ import m0044 from "../migrations/0044_restaurant_franchise.sql";
 import m0045 from "../migrations/0045_communities.sql";
 import m0046 from "../migrations/0046_push.sql";
 import m0047 from "../migrations/0047_shift_reminders.sql";
+import m0048 from "../migrations/0048_community_media.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -96,6 +97,7 @@ const MIGRATIONS: [string, string][] = [
   ["0045_communities", m0045],
   ["0046_push", m0046],
   ["0047_shift_reminders", m0047],
+  ["0048_community_media", m0048],
 ];
 
 const statements = (sql: string) =>

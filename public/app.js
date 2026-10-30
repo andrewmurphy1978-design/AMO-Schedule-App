@@ -1660,6 +1660,35 @@ async function timeOffNodes(part = "mine") {
   return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);
 }
 
+// Photos are shrunk in the browser before they are sent; videos go as they are (20 MB at most).
+async function shrinkImage(file) {
+  if (file.type === "image/png" && file.size < 400 * 1024) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement("canvas"); canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
+    const ctx = canvas.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    return await new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("invalid_media"))), "image/jpeg", 0.82));
+  } catch { return file; }
+}
+async function uploadCommunityMedia(communityId, file) {
+  const isVideo = file.type.startsWith("video/");
+  if (!isVideo && !file.type.startsWith("image/")) throw new Error("invalid_type");
+  if (isVideo && file.size > 20 * 1024 * 1024) throw new Error("too_large");
+  const blob = isVideo ? file : await shrinkImage(file);
+  const res = await fetch(`/api/communities/${communityId}/media`, { method: "POST", headers: { "content-type": blob.type || file.type, ...clientHeader() }, body: blob });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(j.error ?? "error"), { body: j });
+  return { id: j.id, kind: j.kind, url: URL.createObjectURL(blob) };
+}
+// the pictures and videos of a post (tap a picture to see it full size)
+function mediaGrid(list = []) {
+  if (!list.length) return null;
+  return h("div", { class: `post-media n${Math.min(list.length, 4)}` }, list.map((m) => m.kind === "video"
+    ? h("video", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata", playsinline: true })
+    : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" }))));
+}
+
 // ---------- Communities ----------
 // A message board per restaurant and group of departments; people are in the ones matching their roles.
 const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -1676,11 +1705,28 @@ async function renderCommunity() {
   const id = state.communityId;
   let moderator = false;
   const body = h("textarea", { maxLength: 2000, rows: 2, placeholder: t("writePost"), "aria-label": t("writePost") });
+  // photos and videos: uploaded as soon as they are picked, attached to the post when it is published
+  let attached = [];
+  const previews = h("div", { class: "comm-previews" });
+  const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
+    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : h("img", { src: m.url, alt: "" }),
+    h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); } }, "✕"))));
+  const picker = h("input", { type: "file", accept: "image/*,video/*", multiple: true, hidden: true, onChange: async (e) => {
+    const files = [...e.target.files]; e.target.value = "";
+    for (const file of files) {
+      if (attached.length >= 4) { toast(t("mediaTooMany")); break; }
+      try { toast(t("mediaUploading")); attached.push(await uploadCommunityMedia(id, file)); drawPreviews(); }
+      catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
+    }
+  } });
   const compose = h("form", { class: "comm-compose", onSubmit: async (e) => {
     e.preventDefault();
-    if (!body.value.trim()) return;
-    try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value } }); body.value = ""; await load(); } catch (err) { toast(errorText(err)); }
-  } }, body, h("button", { class: "btn primary", type: "submit" }, t("publishPost")));
+    if (!body.value.trim() && !attached.length) return;
+    try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value, media_ids: attached.map((m) => m.id) } }); body.value = ""; attached = []; drawPreviews(); await load(); } catch (err) { toast(errorText(err)); }
+  } }, body, previews,
+    h("div", { class: "comm-compose-actions" },
+      h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
+      h("button", { class: "btn primary", type: "submit" }, t("publishPost"))));
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
   const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
   const postCard = (x) => {
@@ -1691,12 +1737,12 @@ async function renderCommunity() {
     } }, h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") }), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
     return h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
       x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
-      author(x), h("p", { class: "post-body" }, x.body),
+      author(x), x.body ? h("p", { class: "post-body" }, x.body) : null, mediaGrid(x.media),
       h("div", { class: "post-actions" },
         h("button", { class: "btn sm", type: "button", onClick: () => { replyBox.hidden = !replyBox.hidden; if (!replyBox.hidden) replyBox.querySelector("input").focus(); } }, t("reply")),
         moderator ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } }, x.pinned ? t("unpin") : t("pin")) : null,
         del(x)),
-      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), h("p", { class: "post-body" }, r.body), h("div", { class: "post-actions" }, del(r))))) : null,
+      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), r.body ? h("p", { class: "post-body" }, r.body) : null, mediaGrid(r.media), h("div", { class: "post-actions" }, del(r))))) : null,
       replyBox);
   };
   let posts = [];
