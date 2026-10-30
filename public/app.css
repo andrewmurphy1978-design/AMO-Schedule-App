@@ -950,3 +950,4 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .pb-cards{display:none}.pb-card{display:grid;gap:.5rem;margin:.5rem 0}.pb-card.live{border-left:4px solid #22a45d}
 @media (max-width:899px){.pb-scroll{display:none}.pb-cards{display:block}}
 @media (min-width:900px) and (max-width:1500px){#main-tabs button{padding:0 .5rem;font-size:.9rem}#main-tabs .tab-ic{margin-right:.25rem;font-size:.95rem}.nav-badge{margin-left:.25rem}}
+.pb-na{color:var(--muted);opacity:.5}

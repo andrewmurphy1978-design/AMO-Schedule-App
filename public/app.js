@@ -1780,6 +1780,7 @@ async function renderPostBoard() {
       h("th", { class: "pb-who", scope: "row" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 30), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
       data.posts.map((p) => {
         const on = sh.posts.includes(p.id);
+        if (p.kind === "breakfast" && !sh.breakfast && !on) return h("td", {}, h("span", { class: "pb-na", title: t("postsBreakfastClosed") }, "–"));
         const cell = h("button", { type: "button", class: `pb-cell ${on ? "on" : ""}`, "aria-pressed": String(on), title: `${sh.staff_name} · ${nm(p)}`, onClick: () => toggle(sh, p, cell) }, on ? "✓" : sh.skills.includes(p.id) ? h("span", { class: "pb-skill", title: t("postsSkilled") }, "★") : "");
         return h("td", {}, cell);
       }));
@@ -1789,7 +1790,7 @@ async function renderPostBoard() {
     // phone: one card per shift with the posts as chips
     const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
       h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
-      h("div", { class: "cl-posts" }, data.posts.map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}`); return b; })))));
+      h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}`); return b; })))));
     holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null);
   };
   const dayNav = h("div", { class: "weeknav" },

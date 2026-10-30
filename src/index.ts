@@ -2227,6 +2227,14 @@ const sortByName = <T extends { name: string }>(rows: T[]): T[] => [...rows].sor
 
 // ---------- Roster & admin overview ----------
 // Staff who can be scheduled on a given restaurant+department (managers/admin only).
+// Breakfast posts only matter for shifts that overlap the restaurant's breakfast hours that day: once breakfast is closed, nobody is asked about them.
+async function breakfastRelevant(db: D1Database, restaurantId: number, startAt: string, endAt: string): Promise<boolean> {
+  const date = startAt.slice(0, 10);
+  const dow = (new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7;
+  const w = await db.prepare("SELECT start_time, end_time FROM restaurant_breakfast WHERE restaurant_id = ? AND dow = ?").bind(restaurantId, dow).first<{ start_time: string; end_time: string }>();
+  return !!w && startAt < `${date}T${w.end_time}` && endAt > `${date}T${w.start_time}`;
+}
+
 // ---------- End-of-shift checklists ----------
 async function checklistShift(c: any, id: number) {
   const me = c.get("me") as Me, db: D1Database = c.env.DB;
@@ -2244,7 +2252,8 @@ app.get("/api/shifts/:id/checklist", async (c) => {
   // kitchen workers choose the post(s) they worked
   const kitchen = (await ctx.db.prepare("SELECT 1 FROM roles WHERE id IN (SELECT ?1 UNION SELECT role_id FROM shift_roles WHERE shift_id = ?2 UNION SELECT role_id FROM shift_segments WHERE shift_id = ?2) AND department_id = 'kitchen' LIMIT 1").bind(ctx.sh.role_id, ctx.sh.id).first()) ? true : false;
   const picked = new Set(lists.filter((l) => l.kind === "post").map((l) => l.target_id));
-  const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string }>()).results.map((p) => ({ ...p, picked: picked.has(p.id) })) : [];
+  const bfOk = kitchen && (await breakfastRelevant(ctx.db, ctx.sh.restaurant_id, ctx.sh.start_at, ctx.sh.end_at));
+  const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string; kind: string }>()).results.filter((p) => p.kind !== "breakfast" || picked.has(p.id) || bfOk).map((p) => ({ id: p.id, name_fr: p.name_fr, name_en: p.name_en, picked: picked.has(p.id) })) : [];
   return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts });
 });
 app.post("/api/shifts/:id/checklist/posts", async (c) => {
@@ -2254,6 +2263,8 @@ app.post("/api/shifts/:id/checklist/posts", async (c) => {
   if (!ctx || !b.post_id) return c.json({ error: "not_found" }, 404);
   const list = await ctx.db.prepare("SELECT id FROM checklists WHERE client_id = ? AND kind = 'post' AND target_id = ?").bind(ctx.me.client_id, b.post_id).first<{ id: number }>();
   if (!list) return c.json({ error: "not_found" }, 404);
+  const kindOf = (await ctx.db.prepare("SELECT kind FROM posts WHERE id = ?").bind(b.post_id).first<{ kind: string }>())?.kind;
+  if (kindOf === "breakfast" && !(await breakfastRelevant(ctx.db, ctx.sh.restaurant_id, ctx.sh.start_at, ctx.sh.end_at))) return c.json({ error: "breakfast_closed" }, 422);
   await ctx.db.prepare("INSERT OR IGNORE INTO shift_checklists (shift_id, checklist_id, assigned_by) VALUES (?, ?, ?)").bind(ctx.sh.id, list.id, ctx.me.id).run();
   return c.json({ ok: true });
 });
@@ -2297,10 +2308,14 @@ app.get("/api/post-board", async (c) => {
             OR EXISTS (SELECT 1 FROM shift_segments g JOIN roles r3 ON r3.id = g.role_id WHERE g.shift_id = sh.id AND r3.department_id = 'kitchen'))
      ORDER BY sh.start_at, sh.end_at, s.name`,
   ).bind(restaurantId, date).all<{ id: number; staff_id: number }>()).results;
-  const posts = (await db.prepare("SELECT p.id, p.code, p.name_fr, p.name_en FROM posts p JOIN checklists k ON k.target_id = p.id AND k.kind = 'post' AND k.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(me.client_id).all<{ id: number }>()).results;
+  const posts = (await db.prepare("SELECT p.id, p.code, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists k ON k.target_id = p.id AND k.kind = 'post' AND k.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(me.client_id).all<{ id: number }>()).results;
   const assigned = shifts.length ? (await db.prepare(`SELECT sc.shift_id, k.target_id AS post_id FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' WHERE sc.shift_id IN (${shifts.map(() => "?").join(",")})`).bind(...shifts.map((x) => x.id)).all<{ shift_id: number; post_id: number }>()).results : [];
   const skills = shifts.length ? (await db.prepare(`SELECT staff_id, post_id FROM staff_post_skills WHERE staff_id IN (${[...new Set(shifts.map((x) => x.staff_id))].map(() => "?").join(",")})`).bind(...new Set(shifts.map((x) => x.staff_id))).all<{ staff_id: number; post_id: number }>()).results : [];
-  return c.json({ posts, shifts: shifts.map((x) => ({ ...x, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
+  const withBf = [];
+  for (const x of shifts as { id: number; staff_id: number; start_at: string; end_at: string }[]) withBf.push({ ...x, breakfast: await breakfastRelevant(db, restaurantId, x.start_at, x.end_at) });
+  // breakfast columns only exist on days when someone's shift overlaps breakfast
+  const anyBf = withBf.some((x) => x.breakfast);
+  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
 });
 
 // Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.
