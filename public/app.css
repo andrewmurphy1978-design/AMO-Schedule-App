@@ -887,8 +887,8 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 
 .admin-nav .tab-ic{margin-right:.55rem;font-size:1.05rem}
 @media (max-width:899px){
-  .admin-nav{justify-content:space-between;gap:.2rem}
-  .admin-nav button{flex:1 1 0;min-width:0;padding:0 .3rem;text-align:center}
+  .admin-nav{display:grid;grid-template-columns:repeat(6,1fr);gap:.3rem;overflow:visible}
+  .admin-nav button{min-width:0;padding:0 .3rem;text-align:center;border-radius:12px}
   .admin-nav .tab-ic{margin:0;font-size:1.3rem}.admin-nav .tab-tx{display:none}
 }
 
