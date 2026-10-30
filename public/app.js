@@ -1689,6 +1689,25 @@ function mediaGrid(list = []) {
     : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" }))));
 }
 
+// ---- emojis: a picker for messages and quick reactions on posts ----
+const EMOJIS = "😀 😁 😂 🤣 😊 😍 😘 😎 🤔 😅 😉 🙂 😢 😭 😡 😴 🤯 🥳 😬 🙄 😇 🤗 😋 🤒 👍 👎 👏 🙌 🙏 💪 👌 ✌️ 🤝 👋 ❤️ 💔 🔥 ⭐ 🎉 🎂 ✅ ❌ ⚠️ 🚗 🍕 🍔 🍟 🥗 ☕ 🍺 🕐 📅 📌 💬 😷 🥶 🥵 ❄️ ☀️".split(" ");
+const REACTION_SET = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "👏"];
+function emojiPopover(anchor, list, onPick) {
+  document.querySelector(".emoji-pop")?.remove();
+  const pop = h("div", { class: "emoji-pop", role: "dialog", "aria-label": t("emojis") }, list.map((e) => h("button", { type: "button", class: "emoji-btn", onClick: () => { close(); onPick(e); } }, e)));
+  const close = () => { pop.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", esc, true); };
+  const outside = (ev) => { if (!pop.contains(ev.target) && ev.target !== anchor) close(); };
+  const esc = (ev) => { if (ev.key === "Escape") close(); };
+  (anchor.offsetParent ? anchor.parentElement : document.body).append(pop);
+  pop.parentElement.style.position ||= "relative";
+  document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", esc, true);
+}
+const insertAtCursor = (input, text) => {
+  const a = input.selectionStart ?? input.value.length, z = input.selectionEnd ?? a;
+  input.value = input.value.slice(0, a) + text + input.value.slice(z);
+  input.focus(); input.selectionStart = input.selectionEnd = a + text.length;
+};
+
 // ---------- Communities ----------
 // A message board per restaurant and group of departments; people are in the ones matching their roles.
 const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -1725,24 +1744,32 @@ async function renderCommunity() {
     try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value, media_ids: attached.map((m) => m.id) } }); body.value = ""; attached = []; drawPreviews(); await load(); } catch (err) { toast(errorText(err)); }
   } }, body, previews,
     h("div", { class: "comm-compose-actions" },
-      h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
+      h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
+        h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, EMOJIS, (em) => insertAtCursor(body, em)) }, "😊")),
       h("button", { class: "btn primary", type: "submit" }, t("publishPost"))));
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
   const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
+  const reactionBar = (x) => {
+    const toggle = async (emoji, on) => { try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
+    return h("div", { class: "reactions" },
+      ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggle(r.emoji, !r.mine) }, `${r.emoji} ${r.count}`)),
+      h("button", { type: "button", class: "react add", "aria-label": t("react"), title: t("react"), onClick: (e) => emojiPopover(e.currentTarget, REACTION_SET, (em) => toggle(em, true)) }, "😊＋"));
+  };
   const postCard = (x) => {
+    const replyInput = h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") });
     const replyBox = h("form", { class: "comm-reply", hidden: true, onSubmit: async (e) => {
       e.preventDefault();
       const input = e.target.querySelector("input"); if (!input.value.trim()) return;
       try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(); } catch (err) { toast(errorText(err)); }
-    } }, h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") }), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
+    } }, replyInput, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, EMOJIS, (em) => insertAtCursor(replyInput, em)) }, "😊"), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
     return h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
       x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
-      author(x), x.body ? h("p", { class: "post-body" }, x.body) : null, mediaGrid(x.media),
+      author(x), x.body ? h("p", { class: "post-body" }, x.body) : null, mediaGrid(x.media), reactionBar(x),
       h("div", { class: "post-actions" },
         h("button", { class: "btn sm", type: "button", onClick: () => { replyBox.hidden = !replyBox.hidden; if (!replyBox.hidden) replyBox.querySelector("input").focus(); } }, t("reply")),
         moderator ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } }, x.pinned ? t("unpin") : t("pin")) : null,
         del(x)),
-      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), r.body ? h("p", { class: "post-body" }, r.body) : null, mediaGrid(r.media), h("div", { class: "post-actions" }, del(r))))) : null,
+      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), r.body ? h("p", { class: "post-body" }, r.body) : null, mediaGrid(r.media), reactionBar(r), h("div", { class: "post-actions" }, del(r))))) : null,
       replyBox);
   };
   let posts = [];

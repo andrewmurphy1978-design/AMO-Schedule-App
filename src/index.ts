@@ -2306,7 +2306,8 @@ app.get("/api/communities/:id/posts", async (c) => {
   ).bind(...page.map((x) => x.id)).all<{ id: number; parent_id: number; staff_id: number }>()).results : [];
   const allIds = [...page.map((x) => x.id), ...replies.map((x) => x.id)];
   const media = allIds.length ? (await db.prepare(`SELECT id, post_id, kind, mime FROM community_media WHERE post_id IN (${allIds.map(() => "?").join(",")}) ORDER BY id`).bind(...allIds).all<{ id: number; post_id: number; kind: string; mime: string }>()).results : [];
-  const mark = (x: { id: number; staff_id: number }) => ({ ...x, media: media.filter((m) => m.post_id === x.id), mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
+  const reacts = allIds.length ? (await db.prepare(`SELECT post_id, emoji, count(*) AS n, max(staff_id = ?) AS mine FROM community_reactions WHERE post_id IN (${allIds.map(() => "?").join(",")}) GROUP BY post_id, emoji ORDER BY min(rowid)`).bind(me.id, ...allIds).all<{ post_id: number; emoji: string; n: number; mine: number }>()).results : [];
+  const mark = (x: { id: number; staff_id: number }) => ({ ...x, media: media.filter((m) => m.post_id === x.id), reactions: reacts.filter((r) => r.post_id === x.id).map((r) => ({ emoji: r.emoji, count: r.n, mine: r.mine === 1 })), mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
   if (!before) {
     const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM community_posts WHERE community_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
     await db.prepare("INSERT INTO community_reads (community_id, staff_id, last_post_id) VALUES (?, ?, ?) ON CONFLICT (community_id, staff_id) DO UPDATE SET last_post_id = excluded.last_post_id").bind(id, me.id, last).run();
@@ -2419,6 +2420,21 @@ app.delete("/api/community-posts/:id", async (c) => {
   if (!(await communityAccess(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
   if (post.staff_id !== me.id && !(await moderates(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
   await db.prepare("DELETE FROM community_posts WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "👏"];
+app.put("/api/community-posts/:id/reaction", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ emoji?: string; on?: boolean }>().catch(() => ({} as { emoji?: string; on?: boolean }));
+  if (!id || !REACTIONS.includes(b.emoji ?? "") || typeof b.on !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const post = await db.prepare("SELECT community_id FROM community_posts WHERE id = ?").bind(id).first<{ community_id: number }>();
+  if (!post) return c.json({ error: "not_found" }, 404);
+  if (!(await communityAccess(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
+  await (b.on
+    ? db.prepare("INSERT OR IGNORE INTO community_reactions (post_id, staff_id, emoji) VALUES (?, ?, ?)").bind(id, me.id, b.emoji)
+    : db.prepare("DELETE FROM community_reactions WHERE post_id = ? AND staff_id = ? AND emoji = ?").bind(id, me.id, b.emoji)).run();
   return c.json({ ok: true });
 });
 

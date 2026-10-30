@@ -48,6 +48,7 @@ import m0045 from "../migrations/0045_communities.sql";
 import m0046 from "../migrations/0046_push.sql";
 import m0047 from "../migrations/0047_shift_reminders.sql";
 import m0048 from "../migrations/0048_community_media.sql";
+import m0049 from "../migrations/0049_community_reactions.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -98,6 +99,7 @@ const MIGRATIONS: [string, string][] = [
   ["0046_push", m0046],
   ["0047_shift_reminders", m0047],
   ["0048_community_media", m0048],
+  ["0049_community_reactions", m0049],
 ];
 
 const statements = (sql: string) =>
