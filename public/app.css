@@ -915,3 +915,4 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 
 .cp-short{display:none}
 @media (max-width:899px){.cp-full{display:none}.cp-short{display:inline;font-size:1.05rem;letter-spacing:.05em}.comm-pills button{padding:.4rem .8rem}}
+.account.community{max-width:none;width:100%}.community .comm-compose textarea{min-height:72px}@media (min-width:900px){.post-media.n1 img,.post-media.n1 video{max-height:520px}}
