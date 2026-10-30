@@ -1689,15 +1689,36 @@ function mediaGrid(list = []) {
     : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" }))));
 }
 
-// ---- emojis: a picker for messages and quick reactions on posts ----
-const EMOJIS = "😀 😁 😂 🤣 😊 😍 😘 😎 🤔 😅 😉 🙂 😢 😭 😡 😴 🤯 🥳 😬 🙄 😇 🤗 😋 🤒 👍 👎 👏 🙌 🙏 💪 👌 ✌️ 🤝 👋 ❤️ 💔 🔥 ⭐ 🎉 🎂 ✅ ❌ ⚠️ 🚗 🍕 🍔 🍟 🥗 ☕ 🍺 🕐 📅 📌 💬 😷 🥶 🥵 ❄️ ☀️".split(" ");
-const REACTION_SET = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "👏"];
-function emojiPopover(anchor, list, onPick) {
+// ---- emojis: a picker with categories (like Messenger) for messages and reactions on posts ----
+const EMOJI_CATS = [
+  ["😀", "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 🥲 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 🥸 😎 🤓 🧐 😕 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾"],
+  ["👋", "👋 🤚 🖐️ ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦾 🦵 🦶 👂 👃 🧠 👀 👁️ 👅 👄 👶 🧒 👦 👧 🧑 👨 👩 🧓 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 💂 👷 🤴 👸 👳"],
+  ["❤️", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 💯 💢 💥 💫 💦 💨 💬 🗨️ 💭 💤 ✅ ❌ ❓ ❗ ⚠️ 🚫 ⭕ 🔥 ⭐ 🌟 ✨ ⚡ 🎉 🎊 🏆 🥇 🥈 🥉 ➕ ➖ ➡️ ⬅️ ⬆️ ⬇️ 🔔 🔕 📌 📍"],
+  ["🐶", "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦉 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐜 🐢 🐍 🐙 🦀 🐠 🐟 🐬 🐳 🦈 🐊 🐘 🦒 🌸 🌹 🌻 🌼 🌷 🌱 🌲 🌳 🍀 🍁 🍂 🌈 ☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ ❄️ ☃️ 🌊"],
+  ["🍕", "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🥑 🥦 🥕 🌽 🌶️ 🥔 🍞 🥐 🥖 🥨 🧀 🥚 🍳 🥞 🧇 🥓 🥩 🍗 🍖 🌭 🍔 🍟 🍕 🥪 🌮 🌯 🥗 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🍤 🍙 🍚 🍦 🍧 🍨 🍩 🍪 🎂 🍰 🧁 🥧 🍫 🍬 🍭 ☕ 🍵 🥤 🧃 🍺 🍻 🥂 🍷 🥃 🍸 🍹"],
+  ["⚽", "⚽ 🏀 🏈 ⚾ 🎾 🏐 🏉 🎱 🏓 🏒 🥊 🎯 🎳 🎮 🎲 🎵 🎶 🎤 🎧 🎸 🎹 🎬 🚗 🚕 🚙 🚌 🚎 🏎️ 🚓 🚑 🚒 🚚 🚜 🏍️ 🛵 🚲 ✈️ 🚀 🚁 ⛵ 🚢 🏠 🏡 🏢 🏪 🏫 ⛪ 🌍 🗺️ 🏖️ ⛰️ 🏕️"],
+  ["💡", "⌚ 📱 💻 ⌨️ 🖥️ 🖨️ 📷 📹 🎥 📞 ☎️ 📺 📻 ⏰ ⏱️ 🕐 🕑 🕒 🔋 🔌 💡 🔦 💰 💵 💳 🧾 📅 📆 🗓️ 📋 📝 ✏️ 📎 🖇️ 📏 ✂️ 🗂️ 📁 📦 🧰 🔧 🔨 🔑 🔒 🔓 🧹 🧺 🛒 🎁 🎈 🧯 🩹 💊 🩺"],
+].map(([icon, list]) => [icon, list.split(" ")]);
+const recentEmojis = () => { try { return JSON.parse(localStorage.getItem("emojiRecent") ?? "[]"); } catch { return []; } };
+const rememberEmoji = (e) => { try { localStorage.setItem("emojiRecent", JSON.stringify([e, ...recentEmojis().filter((x) => x !== e)].slice(0, 24))); } catch { /* ignore */ } };
+function emojiPopover(anchor, onPick) {
   document.querySelector(".emoji-pop")?.remove();
-  const pop = h("div", { class: "emoji-pop", role: "dialog", "aria-label": t("emojis") }, list.map((e) => h("button", { type: "button", class: "emoji-btn", onClick: () => { close(); onPick(e); } }, e)));
+  const recents = recentEmojis();
+  const cats = recents.length ? [["🕘", recents], ...EMOJI_CATS] : EMOJI_CATS;
+  let current = 0;
+  const grid = h("div", { class: "emoji-grid" });
+  const tabs = h("div", { class: "emoji-tabs", role: "tablist" });
+  const pick = (e) => { rememberEmoji(e); close(); onPick(e); };
+  const draw = () => {
+    tabs.replaceChildren(...cats.map(([icon], i) => h("button", { type: "button", role: "tab", "aria-selected": String(i === current), onClick: () => { current = i; draw(); } }, icon)));
+    grid.replaceChildren(...cats[current][1].map((e) => h("button", { type: "button", class: "emoji-btn", onClick: () => pick(e) }, e)));
+    grid.scrollTop = 0;
+  };
+  const pop = h("div", { class: "emoji-pop", role: "dialog", "aria-label": t("emojis") }, tabs, grid);
   const close = () => { pop.remove(); document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", esc, true); };
   const outside = (ev) => { if (!pop.contains(ev.target) && ev.target !== anchor) close(); };
   const esc = (ev) => { if (ev.key === "Escape") close(); };
+  draw();
   (anchor.offsetParent ? anchor.parentElement : document.body).append(pop);
   pop.parentElement.style.position ||= "relative";
   document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", esc, true);
@@ -1751,7 +1772,7 @@ async function renderCommunity() {
   } }, body, previews,
     h("div", { class: "comm-compose-actions" },
       h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
-        h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, EMOJIS, (em) => insertAtCursor(body, em)) }, "😊")),
+        h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(body, em)) }, "😊")),
       h("button", { class: "btn primary", type: "submit" }, t("publishPost"))));
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
   const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
@@ -1759,7 +1780,7 @@ async function renderCommunity() {
     const toggle = async (emoji, on) => { try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
     return h("div", { class: "reactions" },
       ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggle(r.emoji, !r.mine) }, `${r.emoji} ${r.count}`)),
-      h("button", { type: "button", class: "react add", "aria-label": t("react"), title: t("react"), onClick: (e) => emojiPopover(e.currentTarget, REACTION_SET, (em) => toggle(em, true)) }, "😊＋"));
+      h("button", { type: "button", class: "react add", "aria-label": t("react"), title: t("react"), onClick: (e) => emojiPopover(e.currentTarget, (em) => toggle(em, true)) }, "😊＋"));
   };
   const postCard = (x) => {
     const replyInput = h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") });
@@ -1767,7 +1788,7 @@ async function renderCommunity() {
       e.preventDefault();
       const input = e.target.querySelector("input"); if (!input.value.trim()) return;
       try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(); } catch (err) { toast(errorText(err)); }
-    } }, replyInput, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, EMOJIS, (em) => insertAtCursor(replyInput, em)) }, "😊"), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
+    } }, replyInput, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(replyInput, em)) }, "😊"), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
     return h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
       x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
       author(x), x.body ? h("p", { class: "post-body" }, x.body) : null, mediaGrid(x.media), reactionBar(x),

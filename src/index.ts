@@ -2424,12 +2424,13 @@ app.delete("/api/community-posts/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "👏"];
+// any single emoji (with its skin-tone / variation selectors and joiners), nothing else
+const isEmoji = (e: string) => e.length > 0 && e.length <= 24 && /^\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|\p{Emoji_Modifier})*$/u.test(e);
 app.put("/api/community-posts/:id/reaction", async (c) => {
   const me = c.get("me"), db = c.env.DB;
   const id = intParam(c.req.param("id"));
   const b = await c.req.json<{ emoji?: string; on?: boolean }>().catch(() => ({} as { emoji?: string; on?: boolean }));
-  if (!id || !REACTIONS.includes(b.emoji ?? "") || typeof b.on !== "boolean") return c.json({ error: "bad_request" }, 400);
+  if (!id || !isEmoji(b.emoji ?? "") || typeof b.on !== "boolean") return c.json({ error: "bad_request" }, 400);
   const post = await db.prepare("SELECT community_id FROM community_posts WHERE id = ?").bind(id).first<{ community_id: number }>();
   if (!post) return c.json({ error: "not_found" }, 404);
   if (!(await communityAccess(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);

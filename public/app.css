@@ -906,7 +906,7 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .post-media img,.post-media video{width:100%;max-height:420px;object-fit:cover;border-radius:10px;background:#000;display:block}.post-media.n1 img,.post-media.n1 video{object-fit:contain}
 
 .comm-tools{display:flex;gap:.4rem}
-.emoji-pop{position:absolute;z-index:40;left:0;top:calc(100% + 4px);display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:.4rem;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);width:min(340px,86vw);max-height:260px;overflow:auto}
+.emoji-pop{position:absolute;z-index:40;left:0;top:calc(100% + 4px);padding:.3rem;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);width:min(360px,92vw)}
 .emoji-btn{border:0;background:none;font-size:1.35rem;padding:.25rem;border-radius:8px;cursor:pointer;line-height:1.1}.emoji-btn:hover{background:var(--line)}
 .reactions{display:flex;flex-wrap:wrap;gap:.3rem;position:relative}
 .react{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:.15rem .6rem;font:inherit;font-size:.85rem;cursor:pointer;min-height:30px}
@@ -916,3 +916,8 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .cp-short{display:none}
 @media (max-width:899px){.cp-full{display:none}.cp-short{display:inline;font-size:1.05rem;letter-spacing:.05em}.comm-pills button{padding:.4rem .8rem}}
 .account.community{max-width:none;width:100%}.community .comm-compose textarea{min-height:72px}@media (min-width:900px){.post-media.n1 img,.post-media.n1 video{max-height:520px}}
+
+.emoji-tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding-bottom:.25rem;margin-bottom:.25rem;overflow-x:auto}
+.emoji-tabs button{border:0;background:none;font-size:1.25rem;padding:.2rem .45rem;border-radius:8px;cursor:pointer;border-bottom:3px solid transparent;flex:none}
+.emoji-tabs button[aria-selected=true]{border-bottom-color:var(--brand,#da291c);background:var(--line)}
+.emoji-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;max-height:240px;overflow-y:auto}
