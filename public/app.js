@@ -192,7 +192,7 @@ function renderClientBanner() {
 }
 
 // Icons of the main tabs (shown alone on a phone so that every tab fits).
-const TAB_ICONS = { schedule: "📋", mine: "🕐", checklist: "✅", community: "💬", account: "👤", admin: "⚙️" };
+const TAB_ICONS = { schedule: "📋", mine: "🕐", posts: "📍", checklist: "✅", community: "💬", account: "👤", admin: "⚙️" };
 function renderChrome() {
   renderClientBanner();
   fsLabel();
@@ -202,6 +202,8 @@ function renderChrome() {
   const tabs = mqDesktop.matches
     ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]]
     : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]];
+  // the kitchen managers (and administrators) get the screen where posts are put on the day's shifts
+  if (state.me?.me.is_admin || state.me?.managed.some((m) => m.department_id === "kitchen")) tabs.splice(tabs.findIndex(([id]) => id === "community"), 0, ["posts", t("postsTab")]);
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -232,6 +234,7 @@ async function render() {
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
     else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
+    else if (state.view === "posts") await renderPostBoard();
     else if (state.view === "checklist") await renderChecklist();
     else if (state.view === "community") await renderCommunity();
     else if (state.view === "account") await renderAccount();
@@ -627,7 +630,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), s.posts?.length ? h("span", { class: "post-tag", title: t("kitchenPosts") }, `📍 ${s.posts.map((p) => (getLang() === "en" ? p.name_en : p.name_fr)).join(", ")}`) : null, sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -1128,6 +1131,20 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
   const roleSel = h("select", { required: true });
   // "Also covers": other roles this person holds, checked when the same shift covers them too (e.g. cook + dishwasher).
   const alsoBox = h("div", { class: "also-roles" });
+  // kitchen shifts: the manager puts the posts worked on the shift (at the start, or while it runs); the employee's end-of-shift list follows
+  const postsBox = h("div", { class: "field posts-assign", hidden: true });
+  const drawPosts = (d) => {
+    postsBox.hidden = !d.posts.length;
+    postsBox.replaceChildren(h("span", {}, t("kitchenPosts")), h("div", { class: "cl-posts", role: "group", "aria-label": t("kitchenPosts") }, d.posts.map((p) => h("button", { type: "button", class: `chip-btn ${p.picked ? "on" : ""}`, "aria-pressed": String(p.picked), onClick: async () => {
+      try {
+        const list = d.lists.find((l) => l.kind === "post" && l.target_id === p.id);
+        if (p.picked) { if (list?.items.some((i) => i.done) && !(await ask(t("checklistRemovePostConfirm")))) return; await api(`/shifts/${shift.id}/checklist/posts/${p.id}`, { method: "DELETE" }); }
+        else await api(`/shifts/${shift.id}/checklist/posts`, { method: "POST", body: { post_id: p.id } });
+        drawPosts(await api(`/shifts/${shift.id}/checklist`)); render();
+      } catch (e) { toast(errorText(e)); }
+    } }, `${p.picked ? "✓ " : ""}${getLang() === "en" ? p.name_en : p.name_fr}`))), h("span", { class: "meta" }, t("kitchenPostsHelp")));
+  };
+  if (shift) api(`/shifts/${shift.id}/checklist`).then(drawPosts).catch(() => { /* not a shift with posts */ });
   let alsoChecked = new Set((shift?.extra_roles ?? []).map((r) => r.id));
   let noCount = new Set((shift?.extra_roles ?? []).filter((r) => r.no_count).map((r) => r.id));
   const drawAlso = () => {
@@ -1265,7 +1282,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
           if (person) staffCard(person, ov).click();
         } catch (err) { toast(errorText(err)); }
       } }, "👤")) : staffSel),
-    h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox, segBox,
+    h("label", { class: "field" }, h("span", {}, t("role")), roleSel), alsoBox, segBox, postsBox,
     h("label", { class: "field" }, h("span", {}, t("date")), date),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, t("start")), start), h("label", { class: "field" }, h("span", {}, t("end")), end, nextDay)),
     h("label", { class: "check" }, untilClose, t("untilClose")),
@@ -1735,6 +1752,56 @@ const insertAtCursor = (input, text) => {
   input.value = input.value.slice(0, a) + text + input.value.slice(z);
   input.focus(); input.selectionStart = input.selectionEnd = a + text.length;
 };
+
+// ---------- Postes du jour: put the kitchen posts on the day's shifts ----------
+state.postBoard = { restaurant: null, date: ymd(new Date()) };
+async function renderPostBoard() {
+  const pb = state.postBoard;
+  const restos = state.restaurants.filter((r) => state.me.me.is_admin || state.me.managed.some((m) => m.restaurant_id === r.id && m.department_id === "kitchen"));
+  if (!restos.some((r) => r.id === pb.restaurant)) pb.restaurant = (restos.find((r) => r.id === state.sel.restaurant) ?? restos[0])?.id ?? null;
+  if (!pb.restaurant) { $app.replaceChildren(h("div", { class: "empty" }, t("noSchedules"))); return; }
+  const data = await api(`/post-board?restaurant=${pb.restaurant}&date=${pb.date}`);
+  const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
+  const nowIso = `${ymd(new Date())}T${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`;
+  const live = (sh) => sh.start_at <= nowIso && sh.end_at >= nowIso;
+  const toggle = async (sh, post, cell) => {
+    const on = !sh.posts.includes(post.id);
+    cell.disabled = true;
+    try {
+      await api(`/shifts/${sh.id}/checklist/posts${on ? "" : `/${post.id}`}`, { method: on ? "POST" : "DELETE", body: on ? { post_id: post.id } : undefined });
+      sh.posts = on ? [...sh.posts, post.id] : sh.posts.filter((x) => x !== post.id);
+      paint();
+    } catch (e) { toast(errorText(e)); cell.disabled = false; }
+  };
+  const holder = h("div", {});
+  const paint = () => {
+    const count = (post) => data.shifts.filter((sh) => sh.posts.includes(post.id)).length;
+    const row = (sh) => h("tr", { class: live(sh) ? "live" : "" },
+      h("th", { class: "pb-who", scope: "row" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 30), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
+      data.posts.map((p) => {
+        const on = sh.posts.includes(p.id);
+        const cell = h("button", { type: "button", class: `pb-cell ${on ? "on" : ""}`, "aria-pressed": String(on), title: `${sh.staff_name} · ${nm(p)}`, onClick: () => toggle(sh, p, cell) }, on ? "✓" : sh.skills.includes(p.id) ? h("span", { class: "pb-skill", title: t("postsSkilled") }, "★") : "");
+        return h("td", {}, cell);
+      }));
+    const table = data.shifts.length ? h("div", { class: "pb-scroll" }, h("table", { class: "pb" },
+      h("thead", {}, h("tr", {}, h("th", {}), data.posts.map((p) => h("th", { class: count(p) ? "" : "empty" }, h("span", { class: "pb-post" }, nm(p)), h("small", {}, count(p) ? `${count(p)} ✓` : `⚠ 0`))))),
+      h("tbody", {}, data.shifts.map(row)))) : h("div", { class: "empty" }, t("postsNoShifts"));
+    // phone: one card per shift with the posts as chips
+    const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
+      h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
+      h("div", { class: "cl-posts" }, data.posts.map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}`); return b; })))));
+    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null);
+  };
+  const dayNav = h("div", { class: "weeknav" },
+    h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => { pb.date = addDays(pb.date, -1); render(); } }, "‹"),
+    h("div", { class: "label" }, fmt(pb.date, { weekday: "long", day: "numeric", month: "long" })),
+    h("button", { class: "icon-btn", type: "button", "aria-label": t("nextDay"), onClick: () => { pb.date = addDays(pb.date, 1); render(); } }, "›"),
+    h("button", { class: "btn", type: "button", onClick: () => { pb.date = ymd(new Date()); render(); } }, t("today")));
+  paint();
+  $app.replaceChildren(h("div", { class: "account postboard" }, h("h2", {}, t("postsTitle")), h("p", { class: "meta" }, t("postsIntro")),
+    restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: pb.restaurant, onChange: (id) => { pb.restaurant = id; render(); } })) : null,
+    dayNav, holder));
+}
 
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
@@ -3381,7 +3448,7 @@ async function boot() {
 function openFromLink() {
   const q = new URLSearchParams(location.search);
   const view = q.get("view");
-  if (view && ["mine", "schedule", "checklist", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
+  if (view && ["mine", "schedule", "posts", "checklist", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
     state.view = view;
     if (q.get("c")) state.communityId = Number(q.get("c"));
     if (q.get("tab")) state.accountTab = q.get("tab");
