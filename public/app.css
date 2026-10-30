@@ -882,3 +882,5 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
   #main-tabs .tab-ic{display:inline;margin:0;font-size:1.35rem;line-height:1;vertical-align:baseline}#main-tabs .tab-tx{display:none}
   #main-tabs .nav-badge{position:absolute;top:2px;right:2px;margin:0;min-width:16px;line-height:16px;font-size:.65rem}
 }
+.push-field .meta{margin:.2rem 0 .5rem}.push-actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:0}
+@media (min-width:900px){.acc-form .push-field{grid-column:1/-1}}

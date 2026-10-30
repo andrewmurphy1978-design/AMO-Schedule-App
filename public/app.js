@@ -1717,6 +1717,39 @@ async function renderCommunity() {
   await load();
 }
 
+// Notifications on this device (phone, Windows / macOS notification panel).
+function pushControls() {
+  const box = h("div", { class: "push-box" });
+  const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const iosBrowser = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(navigator.standalone || matchMedia("(display-mode: standalone)").matches);
+  const keyBytes = (b64) => Uint8Array.from(atob(b64.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
+  async function draw() {
+    if (!supported || iosBrowser) { box.replaceChildren(h("p", { class: "meta" }, iosBrowser ? t("pushIos") : t("pushUnsupported"))); return; }
+    let reg, sub = null;
+    try { reg = await navigator.serviceWorker.ready; sub = await reg.pushManager.getSubscription(); } catch { box.replaceChildren(h("p", { class: "meta" }, t("pushUnsupported"))); return; }
+    const on = !!sub && Notification.permission === "granted";
+    const status = await api(`/push/status?endpoint=${encodeURIComponent(sub?.endpoint ?? "")}`).catch(() => ({ devices: 0, this_device: false }));
+    box.replaceChildren(
+      h("p", { class: "meta" }, Notification.permission === "denied" ? t("pushDenied") : on && status.this_device ? t("pushOn") : t("pushOff")),
+      h("div", { class: "actions push-actions" },
+        on && status.this_device
+          ? [h("button", { class: "btn", type: "button", onClick: async () => { try { await api("/push/test", { method: "POST" }); toast(t("pushTestSent")); } catch (e) { toast(errorText(e)); } } }, t("pushTest")),
+             h("button", { class: "btn danger", type: "button", onClick: async () => { try { await api("/push/subscribe", { method: "DELETE", body: { endpoint: sub.endpoint } }); await sub.unsubscribe(); } catch (e) { toast(errorText(e)); } draw(); } }, t("pushDisable"))]
+          : Notification.permission === "denied" ? [] : [h("button", { class: "btn primary", type: "button", onClick: async () => {
+              try {
+                if ((await Notification.requestPermission()) !== "granted") { draw(); return; }
+                const { publicKey } = await api("/push/key");
+                const made = sub ?? await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(publicKey) });
+                await api("/push/subscribe", { method: "POST", body: made.toJSON() });
+                toast(t("saved"));
+              } catch (e) { toast(errorText(e)); }
+              draw();
+            } }, t("pushEnable"))]));
+  }
+  draw();
+  return box;
+}
+
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
@@ -1752,6 +1785,7 @@ async function renderAccount() {
     h("label", { class: "field acc-phone" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
     h("div", { class: "field" }, h("span", {}, t("language")), lang),
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("div", { class: "field push-field" }, h("span", {}, t("pushTitle")), pushControls()),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
   const tabs = [
@@ -3056,6 +3090,20 @@ async function boot() {
   }
   [state.restaurants, state.roles, state.posts] = await Promise.all([api("/restaurants"), api("/roles"), api("/posts").catch(() => [])]);
   state.posts = localizePosts(state.posts);
+  openFromLink();
   render();
 }
+// A notification opens the app on the right screen: /?view=community&c=3, /?view=account&tab=timeoff, /?view=admin&section=timeoff
+function openFromLink() {
+  const q = new URLSearchParams(location.search);
+  const view = q.get("view");
+  if (view && ["mine", "schedule", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
+    state.view = view;
+    if (q.get("c")) state.communityId = Number(q.get("c"));
+    if (q.get("tab")) state.accountTab = q.get("tab");
+    if (q.get("section")) state.adminSection = q.get("section");
+  }
+  if (view) history.replaceState(null, "", location.pathname);
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { /* notifications simply stay unavailable */ });
 boot();

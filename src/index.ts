@@ -14,6 +14,7 @@ import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
 import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
+import { getVapid, pushToStaff } from "./push.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
@@ -2195,6 +2196,32 @@ const sortByName = <T extends { name: string }>(rows: T[]): T[] => [...rows].sor
 
 // ---------- Roster & admin overview ----------
 // Staff who can be scheduled on a given restaurant+department (managers/admin only).
+// ---------- Web Push (this device) ----------
+app.get("/api/push/key", async (c) => c.json({ publicKey: (await getVapid(c.env.DB)).publicKey }));
+app.get("/api/push/status", async (c) => {
+  const endpoint = c.req.query("endpoint") ?? "";
+  const mine = (await c.env.DB.prepare("SELECT endpoint FROM push_subscriptions WHERE staff_id = ?").bind(c.get("me").id).all<{ endpoint: string }>()).results;
+  return c.json({ devices: mine.length, this_device: !!endpoint && mine.some((x) => x.endpoint === endpoint) });
+});
+app.post("/api/push/subscribe", async (c) => {
+  const b = await c.req.json<{ endpoint?: string; keys?: { p256dh?: string; auth?: string } }>().catch(() => ({} as { endpoint?: string; keys?: { p256dh?: string; auth?: string } }));
+  if (!b.endpoint || !/^https:\/\//.test(b.endpoint) || b.endpoint.length > 1000 || !b.keys?.p256dh || !b.keys?.auth || b.keys.p256dh.length > 200 || b.keys.auth.length > 100) return c.json({ error: "invalid_subscription" }, 400);
+  await c.env.DB.prepare("INSERT INTO push_subscriptions (staff_id, endpoint, p256dh, auth, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET staff_id = excluded.staff_id, p256dh = excluded.p256dh, auth = excluded.auth")
+    .bind(c.get("me").id, b.endpoint, b.keys.p256dh, b.keys.auth, (c.req.header("user-agent") ?? "").slice(0, 200), Date.now()).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/push/subscribe", async (c) => {
+  const b = await c.req.json<{ endpoint?: string }>().catch(() => ({} as { endpoint?: string }));
+  if (!b.endpoint) return c.json({ error: "bad_request" }, 400);
+  await c.env.DB.prepare("DELETE FROM push_subscriptions WHERE staff_id = ? AND endpoint = ?").bind(c.get("me").id, b.endpoint).run();
+  return c.json({ ok: true });
+});
+app.post("/api/push/test", async (c) => {
+  const me = c.get("me");
+  const sent = await pushToStaff(c.env.DB, me.id, { title: (await loadConnections(c.env, c.env.DB, me.client_id)).brand ?? "Mikes", body: "✓ Notifications activées / enabled", url: "/", tag: "test" }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+  return c.json({ sent });
+});
+
 // ---------- Communities ----------
 // A message board per restaurant and group of departments. People get in through their roles (or by managing a department of the group);
 // administrators see them all. Managers of a department of the group, and administrators, moderate (pin, delete).
@@ -2274,6 +2301,20 @@ app.post("/api/communities/:id/posts", async (c) => {
     if (!parent) return c.json({ error: "not_found" }, 404);
   }
   const r = await db.prepare("INSERT INTO community_posts (community_id, parent_id, staff_id, body) VALUES (?, ?, ?, ?)").bind(id, b.parent_id ?? null, me.id, body).run();
+  // everyone of the community who enabled notifications (the author excepted)
+  c.executionCtx.waitUntil((async () => {
+    try {
+      const community = (await communityAccess(db, me, id))!;
+      const people = (await db.prepare(
+        `SELECT DISTINCT s.id FROM staff s JOIN push_subscriptions ps ON ps.staff_id = s.id
+         WHERE s.active = 1 AND s.id != ?1 AND s.client_id = ?2 AND (s.is_admin = 1
+           OR s.id IN (SELECT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN community_departments cd ON cd.department_id = ro.department_id WHERE cd.community_id = ?3 AND sr.restaurant_id = ?4)
+           OR s.id IN (SELECT m.staff_id FROM managers m JOIN community_departments cd ON cd.department_id = m.department_id WHERE cd.community_id = ?3 AND m.restaurant_id = ?4))`,
+      ).bind(me.id, me.client_id, id, community.restaurant_id).all<{ id: number }>()).results;
+      const first = me.name.split(" ")[0];
+      for (const p of people) await pushToStaff(db, p.id, { title: `${first} · ${community.name}`, body: body.slice(0, 140), url: `/?view=community&c=${id}`, tag: `community-${id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+    } catch { /* notifications never block a post */ }
+  })());
   return c.json({ id: r.meta.last_row_id }, 201);
 });
 

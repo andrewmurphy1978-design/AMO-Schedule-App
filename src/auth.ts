@@ -66,4 +66,4 @@ export function bearerToken(header: string | null | undefined): string | null {
 }
 /** Paths a token may never use, whatever its scope: clients, token management, sign-in, and the personal data of the person who created it. */
 export const tokenForbidden = (path: string) =>
-  ["/api/clients", "/api/admin/tokens", "/api/auth/", "/api/account", "/api/payslips"].some((p) => path === p || path.startsWith(p.endsWith("/") ? p : `${p}/`));
+  ["/api/clients", "/api/admin/tokens", "/api/auth/", "/api/account", "/api/payslips", "/api/push"].some((p) => path === p || path.startsWith(p.endsWith("/") ? p : `${p}/`));

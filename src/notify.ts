@@ -4,6 +4,7 @@ import { sendTwilioSms } from "./twilio.ts";
 import { sendMailOverSocket } from "./smtp-socket.ts";
 import type { Lang, Msg } from "./templates.ts";
 import { clientSettingRows, getSetting } from "./tenant.ts";
+import { pushToStaff } from "./push.ts";
 
 export interface StaffContact { id: number; name: string; phone: string | null; email: string | null; lang: string; notify_channel: string }
 
@@ -16,7 +17,7 @@ export async function loadConnections(env: ConnEnv, db: D1Database, clientId = 1
   return { ...conn, brand: brand || "Mikes" };
 }
 
-async function log(db: D1Database, e: { staff_id: number | null; channel: Channel; to: string | null; subject: string | null; body: string; kind: string; status: "sent" | "failed" | "skipped"; error?: string }) {
+async function log(db: D1Database, e: { staff_id: number | null; channel: Channel | "push"; to: string | null; subject: string | null; body: string; kind: string; status: "sent" | "failed" | "skipped"; error?: string }) {
   await db.prepare("INSERT INTO notifications (created_at, staff_id, channel, to_addr, subject, body, kind, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(Date.now(), e.staff_id, e.channel, e.to, e.subject, e.body, e.kind, e.status, e.error ?? null).run();
 }
@@ -39,9 +40,30 @@ export async function deliver(db: D1Database, conn: Connections, channel: Channe
   return result;
 }
 
+/** Events that can also reach a phone or computer through Web Push; `urgent` ones are still sent by SMS / email as well. */
+const PUSH_KINDS: Record<string, { urgent: boolean; url: string }> = {
+  schedule_published: { urgent: false, url: "/?view=mine" },
+  time_off_decision: { urgent: false, url: "/?view=account&tab=timeoff" },
+  time_off_request: { urgent: false, url: "/?view=admin&section=timeoff" },
+  offer: { urgent: true, url: "/" },
+  filled: { urgent: false, url: "/?view=mine" },
+  closed: { urgent: false, url: "/" },
+};
+
 /** Messages one employee on their preferred working channel, in their language. */
 export async function notifyStaff(db: D1Database, conn: Connections, person: StaffContact, build: (lang: Lang, channel: Channel) => Msg, kind: string): Promise<"sent" | "failed" | "skipped" | "no_channel"> {
   const lang: Lang = person.lang === "en" ? "en" : "fr";
+  // Phones and computers that enabled notifications get them there; an urgent request (a replacement offer) also goes by SMS / email.
+  const pushKind = PUSH_KINDS[kind];
+  if (pushKind) {
+    const msg = build(lang, "email");
+    const link = /https?:\/\/\S+/.exec(msg.text)?.[0];
+    const sent = await pushToStaff(db, person.id, { title: conn.brand || "Mikes", body: (msg.subject || msg.text).slice(0, 180), url: link ?? pushKind.url, tag: kind }, { urgent: pushKind.urgent, appUrl: conn.appUrl }).catch(() => 0);
+    if (sent) {
+      await log(db, { staff_id: person.id, channel: "push", to: `${sent} device(s)`, subject: msg.subject, body: msg.text, kind, status: "sent" });
+      if (!pushKind.urgent) return "sent";
+    }
+  }
   const channel = pickChannel(person, { sms: !!conn.twilio, email: !!conn.smtp });
   if (!channel) {
     const msg = build(lang, "sms");
