@@ -2004,7 +2004,7 @@ async function renderRestock(box, restaurantIds) {
         list.map((e) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded(all.filter((i) => e.ids.includes(i.id)), false) }), h("span", {}, e.name), h("small", { class: "meta" }, ` · ${[...new Set(e.groups)].join(", ")}`)))))) : h("p", { class: "meta" }, t("restockNothing")));
     const groups = data.groups.length ? data.groups.map((g) => h("section", { class: "card restock-group" }, h("h3", {}, gn(g), g.items.some((i) => i.needed) ? h("small", { class: "meta" }, ` · ${g.items.filter((i) => i.needed).length}`) : null),
       h("div", { class: "cl-posts", role: "group", "aria-label": gn(g) }, g.items.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.name}`))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
-    holder.replaceChildren(toFetch, h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups));
+    holder.replaceChildren(h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups), toFetch);
   };
   box.append(h("p", { class: "meta" }, t("restockHelp")),
     restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null, holder);
@@ -3175,13 +3175,36 @@ function previewChecklist(title, items, role) {
 // Administration → Ingrédients: what each restaurant keeps, per group (post or area), and where it is stored.
 function ingredientsPanel() {
   const box = h("section", { class: "panel ing-panel" });
-  const st = { restaurant: state.restaurants[0]?.id ?? null, groups: [], posts: [] };
+  const st = { restaurant: state.restaurants[0]?.id ?? null, groups: [], posts: [], view: "post", extra: [] };
   const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
   async function load() {
     const d = await api(`/admin/ingredients?restaurant=${st.restaurant}`);
-    st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i })) })); st.posts = d.posts; draw();
+    st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i })) })); st.posts = d.posts; st.extra = []; draw();
   }
   const locSelect = (item) => h("select", { "aria-label": t("ingLocation") ?? "", onChange: (e) => { item.location = e.target.value; } }, Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: item.location === v }, `${ic} ${t(key)}`)));
+  // table view: one row per ingredient, one column per physical post (the breakfast posts are kept with Sous-marins and Pizza)
+  function matrixView() {
+    const same = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+    const cols = st.groups.filter((g) => g.name_fr.trim());
+    const rows = [];
+    for (const g of st.groups) for (const i of g.items) if (i.name.trim() && !rows.some((r) => same(r.name, i.name))) rows.push({ name: i.name.trim(), location: i.location });
+    for (const e of st.extra) if (!rows.some((r) => same(r.name, e.name))) rows.push(e);
+    const bfOf = (g) => { const code = st.posts.find((p) => p.id === g.post_id)?.code, bf = st.posts.find((p) => p.code === (code === "subs" ? "bf_eggs" : code === "pizza" ? "bf_back" : "")); return bf ? nm(bf) : ""; };
+    const add = h("input", { placeholder: t("ingNewName"), "aria-label": t("ingNewName"), maxLength: 80 });
+    const addRow = () => { const n = add.value.trim(); if (!n || rows.some((r) => same(r.name, n))) return; st.extra.push({ name: n, location: "fridge" }); draw(); };
+    return h("div", {}, h("p", { class: "meta" }, t("ingMatrixHelp")),
+      h("div", { class: "ing-add" }, add, h("button", { class: "btn", type: "button", onClick: addRow }, `+ ${t("ingAdd")}`)),
+      h("div", { class: "ing-matrix-wrap" }, h("table", { class: "ing-matrix" },
+        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map((g) => h("th", { class: "ing-col" }, h("b", {}, nm({ name_fr: g.name_fr, name_en: g.name_en })), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
+        h("tbody", {}, rows.map((r) => h("tr", {},
+          h("th", { scope: "row" }, r.name),
+          h("td", {}, h("select", { "aria-label": `${r.name} · ${t("ingLocation")}`, onChange: (e) => { for (const g of st.groups) for (const i of g.items) if (same(i.name, r.name)) i.location = e.target.value; for (const x of st.extra) if (same(x.name, r.name)) x.location = e.target.value; r.location = e.target.value; } },
+            Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: r.location === v }, `${ic} ${t(key)}`)))),
+          ...cols.map((g) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: g.items.some((i) => same(i.name, r.name)), "aria-label": `${r.name} · ${nm({ name_fr: g.name_fr, name_en: g.name_en })}`, onChange: (e) => {
+            if (e.target.checked) g.items.push({ name: r.name, location: r.location }); else g.items = g.items.filter((i) => !same(i.name, r.name));
+          } }))),
+          h("td", {}, h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: () => { for (const g of st.groups) g.items = g.items.filter((i) => !same(i.name, r.name)); st.extra = st.extra.filter((x) => !same(x.name, r.name)); draw(); } }, "✕"))))))));
+  }
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
     const copySel = h("select", { "aria-label": t("ingCopyFrom") }, others.map((r) => h("option", { value: r.id }, r.name)));
@@ -3193,7 +3216,9 @@ function ingredientsPanel() {
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
           st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location })) })); draw(); toast(t("ingCopied"));
         } }, t("editWord"))) ) : null),
-      ...st.groups.map((g, gi) => {
+      h("div", { class: "subtabs", role: "tablist" }, [["post", t("ingViewByPost")], ["table", t("ingViewTable")]].map(([id, label]) =>
+        h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
+      ...(st.view === "table" ? [matrixView()] : st.groups.map((g, gi) => {
         const list = h("div", { class: "ing-items" });
         const drawItems = () => list.replaceChildren(...g.items.map((i, ii) => h("div", { class: "ing-row" },
           h("input", { value: i.name, maxLength: 80, "aria-label": t("ingName"), onInput: (e) => { i.name = e.target.value; } }), locSelect(i),
@@ -3210,9 +3235,9 @@ function ingredientsPanel() {
           list,
           h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => { g.items.push({ name: "", location: "fridge" }); drawItems(); list.querySelector(".ing-row:last-child input")?.focus(); } }, `+ ${t("ingAdd")}`),
             bulk, h("button", { class: "btn", type: "button", onClick: addBulk }, "+")));
-      }),
+      })),
       h("div", { class: "actions" },
-        h("button", { class: "btn", type: "button", onClick: () => { st.groups.push({ name_fr: "", name_en: "", post_id: null, items: [] }); draw(); } }, `+ ${t("ingAddGroup")}`),
+        st.view === "table" ? null : h("button", { class: "btn", type: "button", onClick: () => { st.groups.push({ name_fr: "", name_en: "", post_id: null, items: [] }); draw(); } }, `+ ${t("ingAddGroup")}`),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try { await api("/admin/ingredients", { method: "PUT", body: { restaurant_id: st.restaurant, groups: st.groups } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
         } }, t("save"))));

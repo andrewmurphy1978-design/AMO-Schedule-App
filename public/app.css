@@ -987,3 +987,11 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 @media (max-width:700px){.ing-group-head{grid-template-columns:1fr}.ing-row{grid-template-columns:1fr 8.5rem auto}}
 .restock-group .cl-posts{align-content:flex-start}
 .restock-place .check{flex-wrap:wrap}.restock-place .check small{flex-basis:100%;margin-left:1.9rem}
+
+.ing-matrix-wrap{overflow:auto;max-height:70vh;margin-top:.6rem;border:1px solid var(--line);border-radius:10px}
+.ing-matrix{border-collapse:separate;border-spacing:0;width:100%;font-size:.9rem}
+.ing-matrix th,.ing-matrix td{padding:.3rem .5rem;border-bottom:1px solid var(--line);text-align:left;background:var(--card,#fff)}
+.ing-matrix thead th{position:sticky;top:0;z-index:2;white-space:nowrap}.ing-matrix thead th small{display:block;font-weight:500;color:var(--muted)}
+.ing-matrix tbody th{position:sticky;left:0;z-index:1;font-weight:600;min-width:11rem}
+.ing-matrix .ing-col,.ing-matrix .ing-check{text-align:center}.ing-matrix .ing-check input{width:1.2rem;height:1.2rem}
+.ing-matrix select{min-width:9.5rem}

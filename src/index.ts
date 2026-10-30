@@ -2417,7 +2417,7 @@ app.put("/api/restock", async (c) => {
 app.get("/api/admin/ingredients", requireAdmin, async (c) => {
   const db = c.env.DB, rid = intParam(c.req.query("restaurant"));
   if (!rid) return c.json({ error: "bad_request" }, 400);
-  const posts = (await db.prepare("SELECT id, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
+  const posts = (await db.prepare("SELECT id, code, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
   return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
 });
 app.put("/api/admin/ingredients", requireAdmin, async (c) => {
