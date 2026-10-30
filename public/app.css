@@ -875,10 +875,10 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .comm-resto{margin-top:1rem}.comm-admin-row{display:grid;gap:.4rem;padding:.6rem;border:1px solid var(--line);border-radius:10px;margin:.4rem 0}
 .comm-deps{display:flex;flex-wrap:wrap;gap:.3rem .9rem}.comm-admin-row .actions{display:flex;justify-content:flex-end;gap:.4rem;margin:0}
 
-.tab-ic{display:none}
+.tab-ic{display:inline-block;margin-right:.4rem;font-size:1.05rem;line-height:1;vertical-align:-1px}
 @media (max-width:899px){
   #main-tabs{flex-wrap:nowrap;overflow:visible;gap:0}
   #main-tabs button{flex:1 1 0;min-width:0;padding:0 .3rem;text-align:center;position:relative}
-  #main-tabs .tab-ic{display:inline;font-size:1.35rem;line-height:1}#main-tabs .tab-tx{display:none}
+  #main-tabs .tab-ic{display:inline;margin:0;font-size:1.35rem;line-height:1;vertical-align:baseline}#main-tabs .tab-tx{display:none}
   #main-tabs .nav-badge{position:absolute;top:2px;right:2px;margin:0;min-width:16px;line-height:16px;font-size:.65rem}
 }
