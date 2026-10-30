@@ -61,8 +61,8 @@ Authenticated routes (cookie or Access JWT). `A` = admin only, `M` = admin or ma
 | Visible schedules (admin) | `GET/PUT /staff/:id/view-access` `{custom, access:[{restaurant_id, department_id}]}`: which schedules an employee may look at (automatic = where they hold a role; custom = the ticked list). `GET /me` returns the effective `schedules` for non-administrators |
 | Roles / posts | `GET /roles`, `GET /departments`, `GET /posts`, `POST/DELETE /staff-roles`, `POST/DELETE /managers` |
 | Schedule | `POST /schedule/publish` `{restaurant_id, department_id, week, published, notify?}` (answers `{ok, published, notified}`) (admin / manager of that department; works with a write token), `GET /schedule?restaurant=&department=&week=YYYY-MM-DD(Monday)` (answer has `published` and `editable`), `GET /my-shifts?week=` (also `total_hours`, `gross_cents` = the caller's own gross pay for the week), `GET /roster`, `POST/PUT/DELETE /shifts` (M) |
-| Shift reminders (own settings, never for API tokens) | `GET/PUT /account/reminders` (`items`: up to 5 × `{ minutes_before 5-2880, channel push\|sms\|email }`) |
-| End-of-shift checklists | `GET /my-checklist` (own shifts to do now), `GET /shifts/:id/checklist`, `POST/DELETE /shifts/:id/checklist/posts`, `PUT /shifts/:id/checklist/items`; admin: `GET/PUT /admin/checklists`, `GET /admin/checklist-report?date=` |
+| Shift reminders (own settings, never for API tokens) | `GET/PUT /account/reminders` (`items`: up to 5 × `{ minutes_before 5-2880, channel push\|sms\|email, anchor start\|end }`) |
+| End-of-shift checklists | `GET /my-checklist` (own shifts to do now → `{ test, shifts }`), `PUT /admin/checklists/test-mode` (`on`), `GET /shifts/:id/checklist`, `POST/DELETE /shifts/:id/checklist/posts`, `PUT /shifts/:id/checklist/items`; admin: `GET/PUT /admin/checklists`, `GET /admin/checklist-report?date=` |
 | Web Push (a person's own devices, never for API tokens) | `GET /push/key`, `GET /push/status`, `POST/DELETE /push/subscribe`, `POST /push/test` |
 | Communities | `GET /communities` (the ones the caller belongs to: a role or a managed department of the group; admins see all), `GET/POST /communities/:id/posts` (`body`, optional `parent_id`, `media_ids`), `POST /communities/:id/media` (raw image/video body, 3 MB / 20 MB), `GET /community-media/:id` (Range supported), `DELETE /community-posts/:id` (author or moderator), `PUT /community-posts/:id/reaction` (`emoji` = any single emoji, `on`), `PUT /community-posts/:id/pin` (moderator), admin: `GET/POST /admin/communities`, `PUT/DELETE /admin/communities/:id` (`name`, `departments`) |
 | Targets | `GET/PUT /targets`, `PUT /targets/range`, `GET/POST/PUT/DELETE /target-sets` |
@@ -200,6 +200,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-10-30 | **End-of-shift reminder** (reminders can count from the end of the shift; sent only while the checklist is not done; migration 0051) and a checklist **test mode** (setting `checklist_test`: the tab shows at all times for the last/next 7 days' shifts). |
 | 2026-10-30 | **End-of-shift checklists** per kitchen post and per role (waiter, dishwasher, delivery driver), editable in Administration; a header tab shows while the person is on shift (and up to an hour after) until the list is done; "last one out" items for the last driver; migration 0050. |
 | 2026-10-30 | **Emoji picker and reactions** in communities (migration 0049). |
 | 2026-10-30 | **Photos and videos in community posts** (stored in D1 in chunks; up to 4 per post; migration 0048). |

@@ -106,6 +106,14 @@ export const T = {
       : { subject: `⏰ Your shift starts in ${dur}`, short: `${c.restaurant} · ${span} · ${c.role}`, text: `Mikes: your shift starts in ${dur} — ${c.role}, ${c.restaurant}, ${span}.${c.sms || !c.url ? "" : `\n${c.url}`}` };
   },
 
+  /** "Your shift ends soon": a nudge to do the end-of-shift checklist. */
+  shiftEndReminder: (l: Lang, c: { minutes: number; restaurant: string; url: string; sms: boolean }): Msg & { short: string } => {
+    const dur = durationText(c.minutes, l);
+    return l === "fr"
+      ? { subject: `✅ Ton quart se termine dans ${dur}`, short: `Pense à ta liste de fin de quart · ${c.restaurant}`, text: `Mikes: ton quart se termine dans ${dur}. Pense à ta liste de fin de quart (${c.restaurant}).${c.sms || !c.url ? "" : `\n${c.url}`}` }
+      : { subject: `✅ Your shift ends in ${dur}`, short: `Remember your end-of-shift checklist · ${c.restaurant}`, text: `Mikes: your shift ends in ${dur}. Remember your end-of-shift checklist (${c.restaurant}).${c.sms || !c.url ? "" : `\n${c.url}`}` };
+  },
+
   test: (l: Lang): Msg =>
     l === "fr" ? { subject: "Message test", text: "Mikes: ceci est un message test. La messagerie fonctionne!" } : { subject: "Test message", text: "Mikes: this is a test message. Messaging works!" },
 };

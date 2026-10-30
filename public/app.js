@@ -220,9 +220,12 @@ async function render() {
     // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
     if (state.view !== "admin") {
       let comm;
-      [state.me, state.restaurants, comm, state.checklistShifts] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => [])]);
-      if (state.view === "checklist" && !state.checklistShifts.length && !state.checklistJustDone) state.view = "mine";
-      state.checklistJustDone = false;
+      let cl;
+      [state.me, state.restaurants, comm, cl] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => ({ test: false, shifts: [] }))]);
+      state.checklistShifts = cl.shifts; state.checklistTest = cl.test;
+      // the tab is hidden outside a shift, except in test mode (administrators always see it then)
+      if (cl.test && state.me.me.is_admin && !cl.shifts.length) state.checklistShifts = [{ id: 0, total: 0, done: 0, preview: true }];
+      if (state.view === "checklist" && !state.checklistShifts.length) state.view = "mine";
       state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
       renderChrome();
     }
@@ -1736,13 +1739,14 @@ const insertAtCursor = (input, text) => {
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
 async function renderChecklist() {
-  const shifts = await api("/my-checklist");
+  const { test, shifts } = await api("/my-checklist");
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("checklistTab")));
   $app.replaceChildren(box);
-  if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`)); return; }
-  for (const sh of shifts) box.append(await checklistCard(sh.id, sh));
+  if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
+  if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`), test ? h("p", { class: "meta" }, t("checklistTestNoShift")) : null); return; }
+  for (const sh of shifts) box.append(await checklistCard(sh.id, sh, test));
 }
-async function checklistCard(shiftId, info) {
+async function checklistCard(shiftId, info, test = false) {
   const card = h("section", { class: "card checklist-card" });
   const lang = getLang();
   const txt = (o) => (lang === "en" ? o.text_en || o.text_fr : o.text_fr);
@@ -1752,7 +1756,7 @@ async function checklistCard(shiftId, info) {
     const total = d.lists.reduce((n, l) => n + l.items.length, 0), done = d.lists.reduce((n, l) => n + l.items.filter((i) => i.done).length, 0);
     const bar = h("div", { class: "cl-progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": done }, h("span", { style: `width:${total ? (done / total) * 100 : 0}%` }));
     card.replaceChildren(
-      h("div", { class: "cl-head" }, h("b", {}, `${info?.restaurant ?? ""} · ${hhmm(d.shift.start_at)}–${hhmm(d.shift.end_at)}`), h("span", { class: "meta" }, total ? `${done}/${total}` : "")),
+      h("div", { class: "cl-head" }, h("b", {}, `${info?.restaurant ?? ""} · ${dayOf(d.shift.start_at) === ymd(new Date()) ? "" : `${fmt(dayOf(d.shift.start_at), { weekday: "short", day: "numeric", month: "short" })} `}${hhmm(d.shift.start_at)}–${hhmm(d.shift.end_at)}`), h("span", { class: "meta" }, total ? `${done}/${total}` : "")),
       total ? bar : null,
       // kitchen: pick the post(s) worked this shift
       d.posts_available.length || d.lists.some((l) => l.kind === "post") ? h("div", { class: "cl-posts" },
@@ -1773,7 +1777,7 @@ async function checklistCard(shiftId, info) {
   // after each change: when everything is done the tab disappears, so go back to the shifts
   async function refresh() {
     const r = await draw();
-    if (r.total && r.done === r.total) setTimeout(() => { state.view = "mine"; state.checklistJustDone = false; render(); }, 2200);
+    if (!test && r.total && r.done === r.total) setTimeout(() => { state.view = "mine"; render(); }, 2200);
   }
   await draw();
   return card;
@@ -1911,12 +1915,14 @@ function reminderControls() {
     const rows = items.map((it, i) => {
       const opts = REMINDER_PRESETS.includes(it.minutes_before) ? REMINDER_PRESETS : [...REMINDER_PRESETS, it.minutes_before].sort((a, b) => a - b);
       const when = h("select", { "aria-label": t("reminderBefore"), onChange: (e) => { it.minutes_before = Number(e.target.value); } }, opts.map((m) => h("option", { value: m, selected: m === it.minutes_before }, `${durationLabel(m)} ${t("reminderBeforeWord")}`)));
+      const anchor = h("select", { "aria-label": t("reminderFrom"), onChange: (e) => { it.anchor = e.target.value; } }, [["start", t("reminderStart")], ["end", t("reminderEnd")]].map(([v, l]) => h("option", { value: v, selected: (it.anchor ?? "start") === v }, l)));
       const how = h("select", { "aria-label": t("reminderHow"), onChange: (e) => { it.channel = e.target.value; } }, [["push", t("reminderPush")], ["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: v === it.channel }, l)));
-      return h("div", { class: "reminder-row" }, h("div", { class: "reminder-sels" }, when, how), h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), title: t("delete"), onClick: () => { items.splice(i, 1); draw(); } }, "🗑️"));
+      return h("div", { class: "reminder-row" }, h("div", { class: "reminder-sels" }, when, anchor, how), h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), title: t("delete"), onClick: () => { items.splice(i, 1); draw(); } }, "🗑️"));
     });
     box.replaceChildren(h("p", { class: "meta" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
       h("div", { class: "actions push-actions" },
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push" }); draw(); } }, `+ ${t("addReminder")}`) : null));
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push", anchor: "start" }); draw(); } }, `+ ${t("addReminder")}`) : null,
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: 30, channel: "push", anchor: "end" }); draw(); } }, `+ ${t("addEndReminder")}`) : null));
   };
   // saved together with the rest of the form (the main Enregistrer button)
   box.save = async () => { if (loaded) await api("/account/reminders", { method: "PUT", body: { items } }); };
@@ -2859,6 +2865,18 @@ function communitiesPanel(ov) {
 }
 const COMM_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 
+// Admin preview of a list, as the employee sees it (the boxes are not saved).
+function previewChecklist(title, items, role) {
+  let dlg = document.getElementById("preview-modal");
+  if (!dlg) { dlg = h("dialog", { id: "preview-modal" }); document.body.append(dlg); }
+  const lang = getLang();
+  dlg.replaceChildren(h("div", { class: "modal-body" }, h("h2", {}, title),
+    h("p", { class: "meta" }, role ? t("checklistPreviewRole") : t("checklistPreviewPost")),
+    ...items.map((it) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox" }), h("span", {}, (lang === "en" ? it.text_en || it.text_fr : it.text_fr) + (it.last_out ? ` · ${t("checklistLastOutTag")}` : "")))),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => dlg.close() }, t("close")))));
+  dlg.showModal();
+}
+
 // Administration: the end-of-shift lists (per kitchen post and per role) and who did theirs.
 function checklistsPanel() {
   const box = h("section", { class: "panel" });
@@ -2885,9 +2903,12 @@ function checklistsPanel() {
     const sel = h("select", { "aria-label": t("checklistWhich"), onChange: (e) => { st.key = e.target.value; load(); } }, targets.map((x) => h("option", { value: `${x.kind}:${x.id}`, selected: `${x.kind}:${x.id}` === st.key }, x.label)));
     const day = h("input", { type: "date", value: st.date, onChange: (e) => { st.date = e.target.value || st.date; load(); } });
     box.replaceChildren(h("h2", {}, t("checklistsTitle")), h("p", { class: "meta" }, t("checklistsHelp")),
+      h("label", { class: "check cl-test" }, h("input", { type: "checkbox", checked: data.test_mode, onChange: async (e) => { try { await api("/admin/checklists/test-mode", { method: "PUT", body: { on: e.target.checked } }); toast(t("saved")); render(); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); } } }), h("span", {}, `🧪 ${t("checklistTestMode")}`)),
+      h("p", { class: "meta" }, t("checklistTestHelp")),
       h("div", { class: "field" }, h("span", {}, t("checklistWhich")), sel),
       rowsBox,
       h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: () => previewChecklist(cur.label, items.filter((x) => x.text_fr.trim()), cur.kind === "role") }, `👁 ${t("checklistPreview")}`),
         h("button", { class: "btn", type: "button", onClick: () => { items.push({ text_fr: "", text_en: "", last_out: false }); drawRows(); rowsBox.querySelector(".cl-edit-row:last-child input")?.focus(); } }, `+ ${t("checklistAddItem")}`),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try { await api("/admin/checklists", { method: "PUT", body: { kind: cur.kind, target_id: cur.id, items } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }

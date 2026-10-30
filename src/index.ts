@@ -1193,22 +1193,23 @@ app.put("/api/account", async (c) => {
 // Creates the personal calendar link, or replaces it (the old link then stops working).
 // Reminders before a shift (the person's own settings).
 app.get("/api/account/reminders", async (c) =>
-  c.json((await c.env.DB.prepare("SELECT minutes_before, channel FROM shift_reminders WHERE staff_id = ? ORDER BY minutes_before DESC").bind(c.get("me").id).all()).results));
+  c.json((await c.env.DB.prepare("SELECT minutes_before, channel, anchor FROM shift_reminders WHERE staff_id = ? ORDER BY anchor, minutes_before DESC").bind(c.get("me").id).all()).results));
 app.put("/api/account/reminders", async (c) => {
-  const b = await c.req.json<{ items?: { minutes_before?: number; channel?: string }[] }>().catch(() => ({} as { items?: { minutes_before?: number; channel?: string }[] }));
+  const b = await c.req.json<{ items?: { minutes_before?: number; channel?: string; anchor?: string }[] }>().catch(() => ({} as { items?: { minutes_before?: number; channel?: string; anchor?: string }[] }));
   const items = b.items ?? [];
   if (!Array.isArray(items) || items.length > MAX_REMINDERS) return c.json({ error: "too_many" }, 400);
   const seen = new Set<string>();
   for (const x of items) {
     if (!Number.isInteger(x.minutes_before) || x.minutes_before! < 5 || x.minutes_before! > 2880 || !(REMINDER_CHANNELS as readonly string[]).includes(x.channel ?? "")) return c.json({ error: "invalid_reminder" }, 400);
-    const key = `${x.minutes_before}|${x.channel}`;
+    if (x.anchor !== undefined && x.anchor !== "start" && x.anchor !== "end") return c.json({ error: "invalid_reminder" }, 400);
+    const key = `${x.minutes_before}|${x.channel}|${x.anchor ?? "start"}`;
     if (seen.has(key)) return c.json({ error: "duplicate" }, 400);
     seen.add(key);
   }
   const id = c.get("me").id;
   await c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM shift_reminders WHERE staff_id = ?").bind(id),
-    ...items.map((x) => c.env.DB.prepare("INSERT INTO shift_reminders (staff_id, minutes_before, channel) VALUES (?, ?, ?)").bind(id, x.minutes_before, x.channel)),
+    ...items.map((x) => c.env.DB.prepare("INSERT INTO shift_reminders (staff_id, minutes_before, channel, anchor) VALUES (?, ?, ?, ?)").bind(id, x.minutes_before, x.channel, x.anchor ?? "start")),
   ]);
   return c.json({ ok: true });
 });
@@ -2281,21 +2282,24 @@ const CHECKLIST_GRACE_MIN = 60;
 app.get("/api/my-checklist", async (c) => {
   const me = c.get("me"), db = c.env.DB;
   const now = localNow(c.env.TIMEZONE);
-  const since = new Date(Date.parse(`${now}:00Z`) - CHECKLIST_GRACE_MIN * 60_000).toISOString().slice(0, 16);
+  const test = (await getSetting(db, me.client_id, "checklist_test")) === "1";
+  // test mode: the tab is always there, for the shifts of the last and next 7 days (finished lists stay too)
+  const since = new Date(Date.parse(`${now}:00Z`) - (test ? 7 * 86_400_000 : CHECKLIST_GRACE_MIN * 60_000)).toISOString().slice(0, 16);
+  const until = test ? new Date(Date.parse(`${now}:00Z`) + 7 * 86_400_000).toISOString().slice(0, 16) : now;
   const shifts = (await db.prepare(
     `SELECT sh.id, sh.staff_id, sh.restaurant_id, sh.role_id, sh.start_at, sh.end_at, rs.name AS restaurant, ro.name_fr, ro.name_en, ro.department_id
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
-     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at <= ? AND sh.end_at >= ? AND ${shiftVisible(me)} ORDER BY sh.start_at`,
-  ).bind(me.id, now, since).all<ShiftRefFull>()).results;
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at <= ? AND sh.end_at >= ? AND ${shiftVisible(me)} ORDER BY sh.start_at LIMIT 12`,
+  ).bind(me.id, until, since).all<ShiftRefFull>()).results;
   const out = [];
   for (const sh of shifts) {
     const p = await checklistProgress(db, sh, me.client_id);
     const kitchen = sh.department_id === "kitchen";
     if (!p.total && !kitchen) continue; // nothing to do for this role
-    if (p.total && p.done === p.total) continue; // finished: the tab goes away
+    if (!test && p.total && p.done === p.total) continue; // finished: the tab goes away
     out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post") });
   }
-  return c.json(out);
+  return c.json({ test, shifts: out });
 });
 
 // Administration: edit the lists. Items keep their id when edited, so the history of past shifts stays right.
@@ -2305,7 +2309,7 @@ app.get("/api/admin/checklists", requireAdmin, async (c) => {
   const items = lists.length ? (await db.prepare(`SELECT id, checklist_id, text_fr, text_en, last_out FROM checklist_items WHERE checklist_id IN (${lists.map(() => "?").join(",")}) ORDER BY position, id`).bind(...lists.map((l) => l.id)).all<{ checklist_id: number }>()).results : [];
   const posts = (await db.prepare("SELECT id, name_fr, name_en, department_id FROM posts WHERE all_posts = 0 ORDER BY sort").all()).results;
   const roles = (await db.prepare("SELECT id, name_fr, name_en, department_id FROM roles ORDER BY id").all()).results;
-  return c.json({ lists: lists.map((l) => ({ ...l, items: items.filter((i) => i.checklist_id === l.id) })), posts, roles });
+  return c.json({ lists: lists.map((l) => ({ ...l, items: items.filter((i) => i.checklist_id === l.id) })), posts, roles, test_mode: (await getSetting(db, cid, "checklist_test")) === "1" });
 });
 app.put("/api/admin/checklists", requireAdmin, async (c) => {
   const cid = c.get("me").client_id, db = c.env.DB;
@@ -2326,6 +2330,13 @@ app.put("/api/admin/checklists", requireAdmin, async (c) => {
       : db.prepare("INSERT INTO checklist_items (checklist_id, position, text_fr, text_en, last_out) VALUES (?, ?, ?, ?, ?)").bind(list.id, pos + 1, x.fr, x.en || null, x.last)),
   ]);
   return c.json({ ok: true, id: list.id });
+});
+app.put("/api/admin/checklists/test-mode", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id;
+  const { on } = await c.req.json<{ on?: boolean }>().catch(() => ({} as { on?: boolean }));
+  if (typeof on !== "boolean") return c.json({ error: "bad_request" }, 400);
+  await (on ? putSettingStmt(c.env.DB, cid, "checklist_test", "1") : delSettingStmt(c.env.DB, cid, "checklist_test")).run();
+  return c.json({ ok: true, on });
 });
 // Who did their end-of-shift list on a day (all restaurants of the client).
 app.get("/api/admin/checklist-report", requireAdmin, async (c) => {
