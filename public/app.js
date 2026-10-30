@@ -1717,6 +1717,36 @@ async function renderCommunity() {
   await load();
 }
 
+// "Install the app": Chrome, Edge and Android offer a prompt we can trigger; iPhone and Safari need the Share menu, so we explain it.
+let installEvent = null;
+const installListeners = new Set();
+window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvent = e; installListeners.forEach((f) => f()); });
+window.addEventListener("appinstalled", () => { installEvent = null; installListeners.forEach((f) => f()); });
+function installControls() {
+  const box = h("div", { class: "install-box" });
+  const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  const draw = () => {
+    if (!box.isConnected && box.dataset.drawn) { installListeners.delete(draw); return; }
+    box.dataset.drawn = "1";
+    if (standalone()) { box.replaceChildren(h("p", { class: "meta" }, `✓ ${t("installDone")}`)); return; }
+    if (installEvent) {
+      box.replaceChildren(h("p", { class: "meta" }, t("installHelp")),
+        h("div", { class: "actions push-actions" }, h("button", { class: "btn primary", type: "button", onClick: async () => {
+          installEvent.prompt();
+          try { await installEvent.userChoice; } catch { /* closed */ }
+          installEvent = null; draw();
+        } }, `⬇ ${t("installApp")}`)));
+      return;
+    }
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const safariMac = /Macintosh/.test(navigator.userAgent) && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+    box.replaceChildren(h("p", { class: "meta" }, ios ? t("installIos") : safariMac ? t("installSafari") : t("installOther")));
+  };
+  installListeners.add(draw);
+  draw();
+  return box;
+}
+
 // Notifications on this device (phone, Windows / macOS notification panel).
 function pushControls() {
   const box = h("div", { class: "push-box" });
@@ -1785,6 +1815,7 @@ async function renderAccount() {
     h("label", { class: "field acc-phone" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
     h("div", { class: "field" }, h("span", {}, t("language")), lang),
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
+    h("div", { class: "field push-field" }, h("span", {}, t("installTitle")), installControls()),
     h("div", { class: "field push-field" }, h("span", {}, t("pushTitle")), pushControls()),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
