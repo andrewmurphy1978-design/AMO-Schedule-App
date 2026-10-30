@@ -161,7 +161,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
@@ -172,6 +172,8 @@ const OWNER_SQL: Record<Owned, string> = {
   coverage: "SELECT 1 FROM coverage_requests t JOIN restaurants r ON r.id = t.restaurant_id WHERE t.id = ?1 AND r.client_id = ?2",
   payslip: "SELECT 1 FROM payslips WHERE id = ?1 AND client_id = ?2",
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
+  community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
+  community_post: "SELECT 1 FROM community_posts p JOIN communities c ON c.id = p.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE p.id = ?1 AND r.client_id = ?2",
 };
 const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/staff\/(\d+)(\/|$)/, "staff"], [/^\/api\/time-off\/staff\/(\d+)$/, "staff"], [/^\/api\/admin\/staff\/(\d+)\//, "staff"],
@@ -179,6 +181,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
+  [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -673,7 +676,10 @@ app.post("/api/restaurants", requireAdmin, async (c) => {
   if (!name?.trim()) return c.json({ error: "name_required" }, 400);
   try {
     const r = await c.env.DB.prepare("INSERT INTO restaurants (name, client_id) VALUES (?, ?)").bind(name.trim(), c.get("me").client_id).run();
-    return c.json({ id: r.meta.last_row_id, name: name.trim() }, 201);
+    const rid = r.meta.last_row_id as number;
+    const cm = await c.env.DB.prepare("INSERT INTO communities (restaurant_id, name, position) VALUES (?, 'Équipe', 1)").bind(rid).run();
+    await c.env.DB.batch(COMMUNITY_DEPTS.map((d) => c.env.DB.prepare("INSERT INTO community_departments (community_id, department_id) VALUES (?, ?)").bind(cm.meta.last_row_id, d)));
+    return c.json({ id: rid, name: name.trim() }, 201);
   } catch {
     return c.json({ error: "name_taken" }, 409);
   }
@@ -2189,6 +2195,153 @@ const sortByName = <T extends { name: string }>(rows: T[]): T[] => [...rows].sor
 
 // ---------- Roster & admin overview ----------
 // Staff who can be scheduled on a given restaurant+department (managers/admin only).
+// ---------- Communities ----------
+// A message board per restaurant and group of departments. People get in through their roles (or by managing a department of the group);
+// administrators see them all. Managers of a department of the group, and administrators, moderate (pin, delete).
+const COMMUNITY_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
+type CommunityRow = { id: number; name: string; restaurant_id: number; restaurant: string; position: number };
+async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null })[]> {
+  const base = "SELECT DISTINCT c.id, c.name, c.restaurant_id, r.name AS restaurant, c.position FROM communities c JOIN restaurants r ON r.id = c.restaurant_id";
+  const rows = me.is_admin
+    ? (await db.prepare(`${base} WHERE r.client_id = ? ORDER BY r.name, c.position, c.id`).bind(me.client_id).all<CommunityRow>()).results
+    : (await db.prepare(
+        `SELECT * FROM (
+           ${base} JOIN community_departments cd ON cd.community_id = c.id JOIN roles ro ON ro.department_id = cd.department_id
+             JOIN staff_roles sr ON sr.role_id = ro.id AND sr.restaurant_id = c.restaurant_id WHERE sr.staff_id = ?1 AND r.client_id = ?2
+           UNION
+           ${base} JOIN community_departments cd ON cd.community_id = c.id JOIN managers m ON m.department_id = cd.department_id AND m.restaurant_id = c.restaurant_id WHERE m.staff_id = ?1 AND r.client_id = ?2
+         ) ORDER BY restaurant, position, id`,
+      ).bind(me.id, me.client_id).all<CommunityRow>()).results;
+  if (!rows.length) return [];
+  const marks = rows.map(() => "?").join(",");
+  const stats = (await db.prepare(
+    `SELECT c.id, (SELECT max(created_at) FROM community_posts WHERE community_id = c.id) AS last_post_at,
+            (SELECT count(*) FROM community_posts p WHERE p.community_id = c.id AND p.staff_id != ? AND p.id > coalesce((SELECT last_post_id FROM community_reads WHERE community_id = c.id AND staff_id = ?), 0)) AS unread
+     FROM communities c WHERE c.id IN (${marks})`,
+  ).bind(me.id, me.id, ...rows.map((r) => r.id)).all<{ id: number; last_post_at: string | null; unread: number }>()).results;
+  return rows.map((r) => ({ ...r, ...(stats.find((x) => x.id === r.id) ?? { unread: 0, last_post_at: null }) }));
+}
+async function communityAccess(db: D1Database, me: Me, id: number) {
+  return (await myCommunities(db, me)).find((x) => x.id === id) ?? null;
+}
+async function moderates(db: D1Database, me: Me, communityId: number) {
+  if (me.is_admin) return true;
+  return !!(await db.prepare(
+    "SELECT 1 FROM managers m JOIN communities c ON c.restaurant_id = m.restaurant_id JOIN community_departments cd ON cd.community_id = c.id AND cd.department_id = m.department_id WHERE m.staff_id = ? AND c.id = ?",
+  ).bind(me.id, communityId).first());
+}
+
+app.get("/api/communities", async (c) => c.json(await myCommunities(c.env.DB, c.get("me"))));
+
+app.get("/api/communities/:id/posts", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const community = await communityAccess(db, me, id);
+  if (!community) return c.json({ error: "forbidden" }, 403);
+  const before = intParam(c.req.query("before")) ?? 0;
+  const mod = await moderates(db, me, id);
+  const tops = (await db.prepare(
+    `SELECT p.id, p.body, p.pinned, p.created_at, p.staff_id, s.name AS author, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v
+     FROM community_posts p JOIN staff s ON s.id = p.staff_id
+     WHERE p.community_id = ? AND p.parent_id IS NULL AND (? = 0 OR p.id < ?)
+     ORDER BY ${before ? "p.id DESC" : "p.pinned DESC, p.id DESC"} LIMIT 31`,
+  ).bind(id, before, before).all<{ id: number; body: string; pinned: number; created_at: string; staff_id: number }>()).results;
+  const more = tops.length > 30;
+  const page = tops.slice(0, 30);
+  const replies = page.length ? (await db.prepare(
+    `SELECT p.id, p.parent_id, p.body, p.created_at, p.staff_id, s.name AS author, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v
+     FROM community_posts p JOIN staff s ON s.id = p.staff_id WHERE p.parent_id IN (${page.map(() => "?").join(",")}) ORDER BY p.id`,
+  ).bind(...page.map((x) => x.id)).all<{ id: number; parent_id: number; staff_id: number }>()).results : [];
+  const mark = (x: { staff_id: number }) => ({ ...x, mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
+  if (!before) {
+    const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM community_posts WHERE community_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
+    await db.prepare("INSERT INTO community_reads (community_id, staff_id, last_post_id) VALUES (?, ?, ?) ON CONFLICT (community_id, staff_id) DO UPDATE SET last_post_id = excluded.last_post_id").bind(id, me.id, last).run();
+  }
+  return c.json({ community, moderator: mod, more, posts: page.map((x) => ({ ...mark(x), pinned: x.pinned === 1, replies: replies.filter((r) => r.parent_id === x.id).map(mark) })) });
+});
+
+app.post("/api/communities/:id/posts", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ body?: string; parent_id?: number }>().catch(() => ({} as { body?: string; parent_id?: number }));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await communityAccess(db, me, id))) return c.json({ error: "forbidden" }, 403);
+  const body = (b.body ?? "").trim();
+  if (!body || body.length > 2000) return c.json({ error: "invalid_body" }, 400);
+  if (b.parent_id) {
+    const parent = await db.prepare("SELECT 1 FROM community_posts WHERE id = ? AND community_id = ? AND parent_id IS NULL").bind(b.parent_id, id).first();
+    if (!parent) return c.json({ error: "not_found" }, 404);
+  }
+  const r = await db.prepare("INSERT INTO community_posts (community_id, parent_id, staff_id, body) VALUES (?, ?, ?, ?)").bind(id, b.parent_id ?? null, me.id, body).run();
+  return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+app.delete("/api/community-posts/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const post = await db.prepare("SELECT community_id, staff_id FROM community_posts WHERE id = ?").bind(id).first<{ community_id: number; staff_id: number }>();
+  if (!post) return c.json({ error: "not_found" }, 404);
+  if (!(await communityAccess(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
+  if (post.staff_id !== me.id && !(await moderates(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
+  await db.prepare("DELETE FROM community_posts WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+app.put("/api/community-posts/:id/pin", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  const { pinned } = await c.req.json<{ pinned?: boolean }>().catch(() => ({} as { pinned?: boolean }));
+  if (!id || typeof pinned !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const post = await db.prepare("SELECT community_id FROM community_posts WHERE id = ? AND parent_id IS NULL").bind(id).first<{ community_id: number }>();
+  if (!post) return c.json({ error: "not_found" }, 404);
+  if (!(await moderates(db, me, post.community_id))) return c.json({ error: "forbidden" }, 403);
+  await db.prepare("UPDATE community_posts SET pinned = ? WHERE id = ?").bind(pinned ? 1 : 0, id).run();
+  return c.json({ ok: true });
+});
+
+// Administration: which communities each restaurant has and which departments they gather.
+app.get("/api/admin/communities", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id;
+  const rows = (await c.env.DB.prepare("SELECT c.id, c.name, c.restaurant_id, c.position FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE r.client_id = ? ORDER BY c.restaurant_id, c.position, c.id").bind(cid).all<{ id: number; name: string; restaurant_id: number }>()).results;
+  const deps = (await c.env.DB.prepare("SELECT cd.community_id, cd.department_id FROM community_departments cd JOIN communities c ON c.id = cd.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE r.client_id = ?").bind(cid).all<{ community_id: number; department_id: string }>()).results;
+  return c.json(rows.map((x) => ({ ...x, departments: deps.filter((d) => d.community_id === x.id).map((d) => d.department_id) })));
+});
+const validCommunity = (b: { name?: string; departments?: string[] }) => {
+  const name = (b.name ?? "").trim();
+  const deps = [...new Set((b.departments ?? []).filter((d) => COMMUNITY_DEPTS.includes(d)))];
+  return name && name.length <= 60 && deps.length ? { name, deps } : null;
+};
+app.post("/api/admin/communities", requireAdmin, async (c) => {
+  const b = await c.req.json<{ restaurant_id?: number; name?: string; departments?: string[] }>().catch(() => ({} as { restaurant_id?: number; name?: string; departments?: string[] }));
+  const v = validCommunity(b);
+  if (!b.restaurant_id || !v) return c.json({ error: "invalid_community" }, 400);
+  const pos = ((await c.env.DB.prepare("SELECT max(position) AS m FROM communities WHERE restaurant_id = ?").bind(b.restaurant_id).first<{ m: number | null }>())?.m ?? 0) + 1;
+  const r = await c.env.DB.prepare("INSERT INTO communities (restaurant_id, name, position) VALUES (?, ?, ?)").bind(b.restaurant_id, v.name, pos).run();
+  const id = r.meta.last_row_id as number;
+  await c.env.DB.batch(v.deps.map((d) => c.env.DB.prepare("INSERT INTO community_departments (community_id, department_id) VALUES (?, ?)").bind(id, d)));
+  return c.json({ id }, 201);
+});
+app.put("/api/admin/communities/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ name?: string; departments?: string[] }>().catch(() => ({} as { name?: string; departments?: string[] }));
+  const v = validCommunity(b);
+  if (!id || !v) return c.json({ error: "invalid_community" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE communities SET name = ? WHERE id = ?").bind(v.name, id),
+    c.env.DB.prepare("DELETE FROM community_departments WHERE community_id = ?").bind(id),
+    ...v.deps.map((d) => c.env.DB.prepare("INSERT INTO community_departments (community_id, department_id) VALUES (?, ?)").bind(id, d)),
+  ]);
+  return c.json({ ok: true });
+});
+app.delete("/api/admin/communities/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  await c.env.DB.prepare("DELETE FROM communities WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
 app.get("/api/roster", async (c) => {
   const restaurantId = intParam(c.req.query("restaurant"));
   const department = c.req.query("department");

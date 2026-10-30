@@ -191,6 +191,8 @@ function renderClientBanner() {
   el.replaceChildren(h("span", {}, `${t("clientEditing")} `), h("b", {}, state.me.client.name), h("button", { class: "btn", type: "button", onClick: () => { try { localStorage.removeItem("workClient"); } catch {} location.reload(); } }, t("clientBack")));
 }
 
+// Icons of the main tabs (shown alone on a phone so that every tab fits).
+const TAB_ICONS = { schedule: "📋", mine: "🕐", community: "💬", account: "👤", admin: "⚙️" };
 function renderChrome() {
   renderClientBanner();
   fsLabel();
@@ -198,13 +200,15 @@ function renderChrome() {
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
-    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["account", t("account")]]
-    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["account", t("account")]];
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["community", t("community")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["community", t("community")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
     ...tabs.map(([id, label]) =>
-      h("button", { type: "button", "aria-current": state.view === id ? "page" : false, onClick: () => { state.view = id; render(); } }, label)),
+      h("button", { type: "button", "aria-label": label, title: label, "aria-current": state.view === id ? "page" : false, onClick: () => { state.view = id; render(); } },
+        h("span", { class: "tab-ic", "aria-hidden": "true" }, TAB_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, label),
+        id === "community" && (state.communityUnread ?? 0) > 0 ? h("span", { class: "nav-badge", "aria-label": `${state.communityUnread} ${t("newPosts")}` }, String(state.communityUnread)) : null)),
   );
 }
 
@@ -214,12 +218,15 @@ async function render() {
     setStaffOrder(await api("/staff-order").catch(() => []));
     // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
     if (state.view !== "admin") {
-      [state.me, state.restaurants] = await Promise.all([api("/me"), api("/restaurants")]);
+      let comm;
+      [state.me, state.restaurants, comm] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => [])]);
+      state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
       renderChrome();
     }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
     else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
+    else if (state.view === "community") await renderCommunity();
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
   } catch (e) {
@@ -1653,6 +1660,63 @@ async function timeOffNodes(part = "mine") {
   return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);
 }
 
+// ---------- Communities ----------
+// A message board per restaurant and group of departments; people are in the ones matching their roles.
+const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+async function renderCommunity() {
+  const list = await api("/communities");
+  if (!list.length) { $app.replaceChildren(h("div", { class: "account" }, h("h2", {}, t("community")), h("div", { class: "empty" }, t("noCommunity")))); return; }
+  if (!list.some((x) => x.id === state.communityId)) state.communityId = (list.find((x) => x.unread) ?? list[0]).id;
+  const manyRestos = new Set(list.map((x) => x.restaurant_id)).size > 1;
+  const short = (n) => n.split(/-des-|\sdes\s/)[0];
+  const feed = h("div", { class: "comm-feed" });
+  const pills = h("div", { class: "comm-pills", role: "tablist" }, list.map((x) =>
+    h("button", { type: "button", role: "tab", "aria-selected": String(x.id === state.communityId), onClick: () => { state.communityId = x.id; renderCommunity(); } },
+      manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name, x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)));
+  const id = state.communityId;
+  let moderator = false;
+  const body = h("textarea", { maxLength: 2000, rows: 2, placeholder: t("writePost"), "aria-label": t("writePost") });
+  const compose = h("form", { class: "comm-compose", onSubmit: async (e) => {
+    e.preventDefault();
+    if (!body.value.trim()) return;
+    try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value } }); body.value = ""; await load(); } catch (err) { toast(errorText(err)); }
+  } }, body, h("button", { class: "btn primary", type: "submit" }, t("publishPost")));
+  const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
+  const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
+  const postCard = (x) => {
+    const replyBox = h("form", { class: "comm-reply", hidden: true, onSubmit: async (e) => {
+      e.preventDefault();
+      const input = e.target.querySelector("input"); if (!input.value.trim()) return;
+      try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(); } catch (err) { toast(errorText(err)); }
+    } }, h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") }), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
+    return h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
+      x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
+      author(x), h("p", { class: "post-body" }, x.body),
+      h("div", { class: "post-actions" },
+        h("button", { class: "btn sm", type: "button", onClick: () => { replyBox.hidden = !replyBox.hidden; if (!replyBox.hidden) replyBox.querySelector("input").focus(); } }, t("reply")),
+        moderator ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } }, x.pinned ? t("unpin") : t("pin")) : null,
+        del(x)),
+      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), h("p", { class: "post-body" }, r.body), h("div", { class: "post-actions" }, del(r))))) : null,
+      replyBox);
+  };
+  let posts = [];
+  async function load() {
+    const d = await api(`/communities/${id}/posts`);
+    moderator = d.moderator; posts = d.posts;
+    paint(d.more);
+    state.communityUnread = Math.max(0, (state.communityUnread ?? 0) - (list.find((x) => x.id === id)?.unread ?? 0)); list.find((x) => x.id === id).unread = 0; renderChrome();
+  }
+  function paint(more) {
+    feed.replaceChildren(...(posts.length ? posts.map(postCard) : [h("div", { class: "empty" }, t("noPosts"))]),
+      ...(more ? [h("button", { class: "btn", type: "button", onClick: async () => {
+        const older = await api(`/communities/${id}/posts?before=${posts[posts.length - 1].id}`);
+        posts = [...posts, ...older.posts]; paint(older.more);
+      } }, t("olderPosts"))] : []));
+  }
+  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), pills, compose, feed));
+  await load();
+}
+
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
@@ -2100,7 +2164,7 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -2151,6 +2215,7 @@ async function renderAdmin() {
     clients: () => [clientsPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
+    communities: () => [communitiesPanel(ov)],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
@@ -2515,6 +2580,36 @@ function specialHoursPanel(ov) {
   draw();
   return box;
 }
+
+// Administration: communities of each restaurant and the departments they gather.
+function communitiesPanel(ov) {
+  const box = h("section", { class: "panel" });
+  async function load() {
+    const rows = await api("/admin/communities");
+    const depBoxes = (selected) => COMM_DEPTS.map((d) => { const input = h("input", { type: "checkbox", checked: selected.includes(d) }); return { d, input, node: h("label", { class: "check" }, input, h("span", {}, t(`dept.${d}`))) }; });
+    const rowFor = (c) => {
+      const name = h("input", { value: c.name, maxLength: 60, "aria-label": t("communityName") }), deps = depBoxes(c.departments);
+      return h("div", { class: "comm-admin-row" }, name, h("div", { class: "comm-deps" }, deps.map((x) => x.node)),
+        h("div", { class: "actions" },
+          h("button", { class: "btn danger sm", type: "button", onClick: async () => { if (await ask(t("confirmDeleteCommunity"))) { try { await api(`/admin/communities/${c.id}`, { method: "DELETE" }); load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")),
+          h("button", { class: "btn primary sm", type: "button", onClick: async () => {
+            try { await api(`/admin/communities/${c.id}`, { method: "PUT", body: { name: name.value, departments: deps.filter((x) => x.input.checked).map((x) => x.d) } }); toast(t("saved")); } catch (e) { toast(e.body?.error === "invalid_community" ? t("communityInvalid") : errorText(e)); }
+          } }, t("save"))));
+    };
+    const addFor = (r) => {
+      const name = h("input", { maxLength: 60, placeholder: t("communityName"), "aria-label": t("communityName") }), deps = depBoxes([]);
+      return h("div", { class: "comm-admin-row add" }, name, h("div", { class: "comm-deps" }, deps.map((x) => x.node)),
+        h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", onClick: async () => {
+          try { await api("/admin/communities", { method: "POST", body: { restaurant_id: r.id, name: name.value, departments: deps.filter((x) => x.input.checked).map((x) => x.d) } }); load(); } catch (e) { toast(e.body?.error === "invalid_community" ? t("communityInvalid") : errorText(e)); }
+        } }, `+ ${t("add")}`)));
+    };
+    box.replaceChildren(h("h2", {}, t("adminCommunities")), h("p", { class: "meta" }, t("communitiesHelp")),
+      ...ov.restaurants.map((r) => h("div", { class: "comm-resto" }, h("h3", {}, r.name), ...rows.filter((c) => c.restaurant_id === r.id).map(rowFor), addFor(r))));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+const COMM_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 
 // Default hourly rates used when an employee has no rate of their own (Québec minimum wages).
 function defaultRatesPanel(ov) {

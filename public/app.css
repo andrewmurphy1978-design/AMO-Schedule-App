@@ -860,3 +860,25 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
   .sh-inline{width:100%}.sh-inline .field{flex:1 1 0;min-width:0}.sh-inline .time24{max-width:none;width:100%}
 }
 @media (max-width:899px){.sh-line .sh-inline label.field{flex:1 1 0;min-width:0}.sh-line .sh-inline{flex:1 1 100%}.sh-line .sh-inline .time24 select{flex:1;min-width:0}}
+
+/* communities */
+.nav-badge{display:inline-block;min-width:18px;padding:0 5px;margin-left:.35rem;border-radius:999px;background:var(--brand,#da291c);color:#fff;font-size:.72rem;font-weight:700;line-height:18px;text-align:center}
+.community{max-width:760px}.comm-pills{display:flex;flex-wrap:wrap;gap:.4rem;margin:.4rem 0 .8rem}
+.comm-pills button{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:.45rem .9rem;font:inherit;font-weight:600;cursor:pointer}
+.comm-pills button[aria-selected=true]{background:var(--brand);border-color:var(--brand);color:#fff}.comm-pills .nav-badge{background:#fff;color:var(--brand)}
+.comm-compose{display:grid;gap:.5rem;margin-bottom:1rem}.comm-compose textarea{width:100%;resize:vertical;min-height:64px}.comm-compose .btn{justify-self:end}
+.comm-feed{display:grid;gap:.7rem}
+.post{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.8rem 1rem;display:grid;gap:.4rem}.post.pinned{border-color:var(--brand)}
+.post-pin{font-size:.8rem;font-weight:700;color:var(--brand)}.post-who{display:flex;align-items:center;gap:.6rem}.post-body{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.post-actions{display:flex;gap:.4rem;flex-wrap:wrap}.post-replies{display:grid;gap:.5rem;margin-left:1rem;padding-left:.8rem;border-left:3px solid var(--line)}
+.reply{display:grid;gap:.25rem}.comm-reply{display:flex;gap:.4rem;margin-left:1rem}.comm-reply[hidden]{display:none}.comm-reply input{flex:1;min-width:0}
+.comm-resto{margin-top:1rem}.comm-admin-row{display:grid;gap:.4rem;padding:.6rem;border:1px solid var(--line);border-radius:10px;margin:.4rem 0}
+.comm-deps{display:flex;flex-wrap:wrap;gap:.3rem .9rem}.comm-admin-row .actions{display:flex;justify-content:flex-end;gap:.4rem;margin:0}
+
+.tab-ic{display:none}
+@media (max-width:899px){
+  #main-tabs{flex-wrap:nowrap;overflow:visible;gap:0}
+  #main-tabs button{flex:1 1 0;min-width:0;padding:0 .3rem;text-align:center;position:relative}
+  #main-tabs .tab-ic{display:inline;font-size:1.35rem;line-height:1}#main-tabs .tab-tx{display:none}
+  #main-tabs .nav-badge{position:absolute;top:2px;right:2px;margin:0;min-width:16px;line-height:16px;font-size:.65rem}
+}
