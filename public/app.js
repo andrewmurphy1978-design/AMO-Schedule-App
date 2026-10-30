@@ -630,7 +630,7 @@ async function renderSchedule() {
           (data.days_off?.[id] ?? []).includes((parseYmd(d).getDay() + 6) % 7) ? h("div", { class: "off-chip fixed", title: t("fixedDayOff") }, t("fixedOffShort")) : null,
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
-            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), s.posts?.length ? h("span", { class: "post-tag", title: t("kitchenPosts") }, `📍 ${s.posts.map((p) => (getLang() === "en" ? p.name_en : p.name_fr)).join(", ")}`) : null, sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
+            const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), s.posts?.length ? h("span", { class: "post-tag", title: t("kitchenPosts") }, `📍 ${s.posts.map((p) => (getLang() === "en" ? p.name_en : p.name_fr) + (p.start_at ? ` ${hhmm(p.start_at)}–${hhmm(p.end_at)}` : "")).join(", ")}`) : null, sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
               s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
@@ -1753,6 +1753,28 @@ const insertAtCursor = (input, text) => {
   input.focus(); input.selectionStart = input.selectionEnd = a + text.length;
 };
 
+// Put a post on someone for part of the shift only (or take it off). Resolves to { start_at, end_at } (whole shift = both null), { remove: true } or null.
+function postRangeDialog(shift, post, current) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("post-range-modal");
+    if (!dlg) { dlg = h("dialog", { id: "post-range-modal" }); document.body.append(dlg); }
+    let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
+    const day = dayOf(shift.start_at);
+    const iso = (hm) => `${hm >= hhmm(shift.start_at) ? day : addDays(day, 1)}T${hm}`;
+    const from = timeField(hhmm(current?.start_at ?? shift.start_at)), to = timeField(hhmm(current?.end_at ?? shift.end_at));
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); const a = iso(from.value), z = iso(to.value); if (a >= z || a < shift.start_at || z > shift.end_at) { toast(t("postsRangeInvalid")); return; } finish({ start_at: a, end_at: z }); } },
+      h("h2", {}, post), h("p", { class: "meta" }, `${shift.first_name || shift.staff_name} · ${hhmm(shift.start_at)}–${hhmm(shift.end_at)}`),
+      h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("from")), from), h("label", { class: "field" }, h("span", {}, t("to")), to)),
+      h("button", { class: "btn", type: "button", onClick: () => finish({ start_at: shift.start_at, end_at: shift.end_at }) }, t("postsWholeShift")),
+      h("div", { class: "actions" },
+        h("button", { class: "btn danger", type: "button", onClick: () => finish({ remove: true }) }, t("postsRemove")),
+        h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")),
+        h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
+    dlg.showModal();
+  });
+}
+
 // ---------- Postes du jour: put the kitchen posts on the day's shifts ----------
 state.postBoard = { restaurant: null, date: ymd(new Date()) };
 async function renderPostBoard() {
@@ -1765,11 +1787,22 @@ async function renderPostBoard() {
   const nowIso = `${ymd(new Date())}T${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`;
   const live = (sh) => sh.start_at <= nowIso && sh.end_at >= nowIso;
   const toggle = async (sh, post, cell) => {
-    const on = !sh.posts.includes(post.id);
     cell.disabled = true;
     try {
-      await api(`/shifts/${sh.id}/checklist/posts${on ? "" : `/${post.id}`}`, { method: on ? "POST" : "DELETE", body: on ? { post_id: post.id } : undefined });
-      sh.posts = on ? [...sh.posts, post.id] : sh.posts.filter((x) => x !== post.id);
+      if (!sh.posts.includes(post.id)) {
+        await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id } });
+        sh.posts = [...sh.posts, post.id];
+      } else {
+        // already on it: set the hours of the post within the shift, or take the post off
+        const r = await postRangeDialog(sh, nm(post), sh.ranges?.[post.id]);
+        if (!r) { cell.disabled = false; return; }
+        if (r.remove) { await api(`/shifts/${sh.id}/checklist/posts/${post.id}`, { method: "DELETE" }); sh.posts = sh.posts.filter((x) => x !== post.id); delete sh.ranges?.[post.id]; }
+        else {
+          await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id, start_at: r.start_at, end_at: r.end_at } });
+          sh.ranges = { ...(sh.ranges ?? {}) };
+          if (r.start_at === sh.start_at && r.end_at === sh.end_at) delete sh.ranges[post.id]; else sh.ranges[post.id] = r;
+        }
+      }
       paint();
     } catch (e) { toast(errorText(e)); cell.disabled = false; }
   };
@@ -1784,7 +1817,7 @@ async function renderPostBoard() {
     const open = toM(`${pb.date}T${hrs.open}`, pb.date), close = toM(`${pb.date}T${hrs.close}`, pb.date);
     const hoursAxis = h("div", { class: "pt-axis" }, Array.from({ length: (to - from) / 60 + 1 }, (_, i) => h("span", { style: `left:${pct(from + i * 60)}%` }, `${((from + i * 60) / 60) % 24}h`)));
     const rows = data.posts.map((p) => {
-      const mine = data.shifts.filter((x) => x.posts.includes(p.id)).map((x) => ({ x, a: toM(x.start_at, pb.date), b: toM(x.end_at, pb.date) })).sort((u, v) => u.a - v.a);
+      const mine = data.shifts.filter((x) => x.posts.includes(p.id)).map((x) => { const r = x.ranges?.[p.id]; return { x, a: toM(r?.start_at ?? x.start_at, pb.date), b: toM(r?.end_at ?? x.end_at, pb.date), r }; }).sort((u, v) => u.a - v.a);
       // lanes for people on the same post at the same time
       const laneEnd = [];
       for (const it of mine) { let l = laneEnd.findIndex((e) => e <= it.a); if (l < 0) l = laneEnd.length; laneEnd[l] = it.b; it.lane = l; }
@@ -1794,7 +1827,7 @@ async function renderPostBoard() {
       return h("div", { class: "pt-row" }, h("div", { class: "pt-label" }, nm(p)),
         h("div", { class: "pt-track", style: `height:${lanes * 30 + 6}px` },
           ...gaps.filter(([a, b]) => b > a).map(([a, b]) => h("div", { class: "pt-gap", title: `${t("postsNobody")} ${fromMin(((a % 1440) + 1440) % 1440)}–${fromMin(((b % 1440) + 1440) % 1440)}`, style: `left:${pct(a)}%;width:${pct(b) - pct(a)}%` })),
-          ...mine.map((it) => { const c = staffColor(it.x.staff_id, it.x.staff_color); return h("div", { class: "pt-bar", title: `${it.x.staff_name} · ${hhmm(it.x.start_at)}–${hhmm(it.x.end_at)}`, style: `left:${pct(it.a)}%;width:${pct(it.b) - pct(it.a)}%;top:${it.lane * 30 + 3}px;background:${c};color:${textOn(c)}` }, `${it.x.first_name || it.x.staff_name} ${hhmm(it.x.start_at)}–${hhmm(it.x.end_at)}`); })));
+          ...mine.map((it) => { const c = staffColor(it.x.staff_id, it.x.staff_color); return h("div", { class: "pt-bar", title: `${it.x.staff_name} · ${hhmm(it.r?.start_at ?? it.x.start_at)}–${hhmm(it.r?.end_at ?? it.x.end_at)}`, style: `left:${pct(it.a)}%;width:${pct(it.b) - pct(it.a)}%;top:${it.lane * 30 + 3}px;background:${c};color:${textOn(c)}` }, `${it.x.first_name || it.x.staff_name} ${hhmm(it.r?.start_at ?? it.x.start_at)}–${hhmm(it.r?.end_at ?? it.x.end_at)}`); })));
     });
     return h("section", { class: "pt" }, h("h3", {}, t("postsTimeline")), h("div", { class: "pt-scroll" }, h("div", { class: "pt-grid" }, h("div", { class: "pt-row pt-head" }, h("div", { class: "pt-label" }), hoursAxis), ...rows)), h("p", { class: "meta" }, `▨ ${t("postsNobody")}`));
   };
@@ -1806,7 +1839,7 @@ async function renderPostBoard() {
       data.posts.map((p) => {
         const on = sh.posts.includes(p.id);
         if (p.kind === "breakfast" && !sh.breakfast && !on) return h("td", {}, h("span", { class: "pb-na", title: t("postsBreakfastClosed") }, "–"));
-        const cell = h("button", { type: "button", class: `pb-cell ${on ? "on" : ""}`, "aria-pressed": String(on), title: `${sh.staff_name} · ${nm(p)}`, onClick: () => toggle(sh, p, cell) }, on ? "✓" : sh.skills.includes(p.id) ? h("span", { class: "pb-skill", title: t("postsSkilled") }, "★") : "");
+        const cell = h("button", { type: "button", class: `pb-cell ${on ? "on" : ""}`, "aria-pressed": String(on), title: `${sh.staff_name} · ${nm(p)}`, onClick: () => toggle(sh, p, cell) }, on ? (sh.ranges?.[p.id] ? h("span", { class: "pb-part" }, `${hhmm(sh.ranges[p.id].start_at).replace(/^0/, "").replace(":00", "h")}–${hhmm(sh.ranges[p.id].end_at).replace(/^0/, "").replace(":00", "h")}`) : "✓") : sh.skills.includes(p.id) ? h("span", { class: "pb-skill", title: t("postsSkilled") }, "★") : "");
         return h("td", {}, cell);
       }));
     const table = data.shifts.length ? h("div", { class: "pb-scroll" }, h("table", { class: "pb" },
@@ -1815,7 +1848,7 @@ async function renderPostBoard() {
     // phone: one card per shift with the posts as chips
     const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
       h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
-      h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}`); return b; })))));
+      h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}${on && sh.ranges?.[p.id] ? ` ${hhmm(sh.ranges[p.id].start_at)}–${hhmm(sh.ranges[p.id].end_at)}` : ""}`); return b; })))));
     holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? postTimeline() : null);
   };
   const dayNav = h("div", { class: "weeknav" },
@@ -1888,7 +1921,7 @@ async function checklistCard(shiftId, info, test = false) {
           } else await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } });
           await refresh();
         } }, `${p.picked ? "✓ " : ""}${nm(p)}`)))) : null,
-      ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l)),
+      ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l), l.start_at ? h("small", { class: "meta" }, ` · ${hhmm(l.start_at)}–${hhmm(l.end_at)}`) : null),
         ...l.items.map((it) => h("div", { class: `cl-item-wrap ${it.issue ? "issue" : ""}` },
           h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
             h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {

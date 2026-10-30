@@ -2056,9 +2056,9 @@ app.get("/api/schedule", async (c) => {
     for (const r of (await c.env.DB.prepare(`SELECT x.shift_id, ro.id, ro.name_fr, ro.name_en, ro.department_id, x.no_count FROM shift_roles x JOIN roles ro ON ro.id = x.role_id WHERE x.shift_id IN (${sids.map(() => "?").join(",")})`).bind(...sids).all<any>()).results) extraRoles.set(r.shift_id, [...(extraRoles.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en, department_id: r.department_id, no_count: r.no_count === 1 }]);
     for (const sh of shifts.results as any[]) sh.extra_roles = extraRoles.get(sh.id) ?? [];
     // kitchen posts put on the shifts (by a manager, or chosen by the employee)
-    const postsOf = new Map<number, { id: number; name_fr: string; name_en: string }[]>();
-    for (const r of (await c.env.DB.prepare(`SELECT sc.shift_id, p.id, p.name_fr, p.name_en FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' JOIN posts p ON p.id = k.target_id WHERE sc.shift_id IN (${sids.map(() => "?").join(",")}) ORDER BY p.sort`).bind(...sids).all<{ shift_id: number; id: number; name_fr: string; name_en: string }>()).results)
-      postsOf.set(r.shift_id, [...(postsOf.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en }]);
+    const postsOf = new Map<number, { id: number; name_fr: string; name_en: string; start_at?: string | null; end_at?: string | null }[]>();
+    for (const r of (await c.env.DB.prepare(`SELECT sc.shift_id, p.id, p.name_fr, p.name_en, sc.start_at, sc.end_at FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' JOIN posts p ON p.id = k.target_id WHERE sc.shift_id IN (${sids.map(() => "?").join(",")}) ORDER BY p.sort`).bind(...sids).all<{ shift_id: number; id: number; name_fr: string; name_en: string; start_at: string | null; end_at: string | null }>()).results)
+      postsOf.set(r.shift_id, [...(postsOf.get(r.shift_id) ?? []), { id: r.id, name_fr: r.name_fr, name_en: r.name_en, start_at: r.start_at, end_at: r.end_at } as any]);
     for (const sh of shifts.results as any[]) sh.posts = postsOf.get(sh.id) ?? [];
     // Different roles by hour: [{ start_at, end_at, roles: [...] }]
     const segs = new Map<number, Map<string, { start_at: string; end_at: string; roles: any[] }>>();
@@ -2258,14 +2258,21 @@ app.get("/api/shifts/:id/checklist", async (c) => {
 });
 app.post("/api/shifts/:id/checklist/posts", async (c) => {
   const id = intParam(c.req.param("id"));
-  const b = await c.req.json<{ post_id?: number }>().catch(() => ({} as { post_id?: number }));
+  const b = await c.req.json<{ post_id?: number; start_at?: string | null; end_at?: string | null }>().catch(() => ({} as { post_id?: number; start_at?: string | null; end_at?: string | null }));
   const ctx = id ? await checklistShift(c, id) : null;
   if (!ctx || !b.post_id) return c.json({ error: "not_found" }, 404);
   const list = await ctx.db.prepare("SELECT id FROM checklists WHERE client_id = ? AND kind = 'post' AND target_id = ?").bind(ctx.me.client_id, b.post_id).first<{ id: number }>();
   if (!list) return c.json({ error: "not_found" }, 404);
   const kindOf = (await ctx.db.prepare("SELECT kind FROM posts WHERE id = ?").bind(b.post_id).first<{ kind: string }>())?.kind;
   if (kindOf === "breakfast" && !(await breakfastRelevant(ctx.db, ctx.sh.restaurant_id, ctx.sh.start_at, ctx.sh.end_at))) return c.json({ error: "breakfast_closed" }, 422);
-  await ctx.db.prepare("INSERT OR IGNORE INTO shift_checklists (shift_id, checklist_id, assigned_by) VALUES (?, ?, ?)").bind(ctx.sh.id, list.id, ctx.me.id).run();
+  // optional part of the shift (both or none); inside the shift and in order
+  const b2 = b as { start_at?: string | null; end_at?: string | null };
+  const range = b2.start_at && b2.end_at ? { a: b2.start_at, z: b2.end_at } : null;
+  if ((b2.start_at || b2.end_at) && !range) return c.json({ error: "invalid_times" }, 400);
+  if (range && (!SHIFT_TIME_RE.test(range.a) || !SHIFT_TIME_RE.test(range.z) || range.a >= range.z || range.a < ctx.sh.start_at || range.z > ctx.sh.end_at)) return c.json({ error: "invalid_times" }, 400);
+  const whole = range && range.a === ctx.sh.start_at && range.z === ctx.sh.end_at;
+  await ctx.db.prepare("INSERT INTO shift_checklists (shift_id, checklist_id, assigned_by, start_at, end_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (shift_id, checklist_id) DO UPDATE SET start_at = excluded.start_at, end_at = excluded.end_at, assigned_by = excluded.assigned_by")
+    .bind(ctx.sh.id, list.id, ctx.me.id, whole ? null : range?.a ?? null, whole ? null : range?.z ?? null).run();
   return c.json({ ok: true });
 });
 app.delete("/api/shifts/:id/checklist/posts/:postId", async (c) => {
@@ -2344,13 +2351,13 @@ app.get("/api/post-board", async (c) => {
      ORDER BY sh.start_at, sh.end_at, s.name`,
   ).bind(restaurantId, date).all<{ id: number; staff_id: number }>()).results;
   const posts = (await db.prepare("SELECT p.id, p.code, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists k ON k.target_id = p.id AND k.kind = 'post' AND k.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(me.client_id).all<{ id: number }>()).results;
-  const assigned = shifts.length ? (await db.prepare(`SELECT sc.shift_id, k.target_id AS post_id FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' WHERE sc.shift_id IN (${shifts.map(() => "?").join(",")})`).bind(...shifts.map((x) => x.id)).all<{ shift_id: number; post_id: number }>()).results : [];
+  const assigned = shifts.length ? (await db.prepare(`SELECT sc.shift_id, k.target_id AS post_id, sc.start_at, sc.end_at FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' WHERE sc.shift_id IN (${shifts.map(() => "?").join(",")})`).bind(...shifts.map((x) => x.id)).all<{ shift_id: number; post_id: number; start_at: string | null; end_at: string | null }>()).results : [];
   const skills = shifts.length ? (await db.prepare(`SELECT staff_id, post_id FROM staff_post_skills WHERE staff_id IN (${[...new Set(shifts.map((x) => x.staff_id))].map(() => "?").join(",")})`).bind(...new Set(shifts.map((x) => x.staff_id))).all<{ staff_id: number; post_id: number }>()).results : [];
   const withBf = [];
   for (const x of shifts as { id: number; staff_id: number; start_at: string; end_at: string }[]) withBf.push({ ...x, breakfast: await breakfastRelevant(db, restaurantId, x.start_at, x.end_at) });
   // breakfast columns only exist on days when someone's shift overlaps breakfast
   const anyBf = withBf.some((x) => x.breakfast);
-  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
+  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
 });
 
 // Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.

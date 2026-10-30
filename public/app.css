@@ -965,3 +965,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .pt-axis{position:relative;height:18px;font-size:.72rem;color:var(--muted)}.pt-axis span{position:absolute;transform:translateX(-50%)}.pt-head{margin-bottom:0}
 @media (max-width:899px){.pt-row{grid-template-columns:96px 1fr}.pt-label{font-size:.78rem}.pt-grid{min-width:560px}}
 .pt-grid{padding-right:14px}
+.pb-part{font-size:.68rem;font-weight:700;white-space:nowrap}.pb-cell.on{width:auto;min-width:46px;padding:0 .3rem}

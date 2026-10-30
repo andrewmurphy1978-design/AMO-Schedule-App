@@ -5,7 +5,7 @@
 export interface ShiftRef { id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string }
 export interface Issue { reason: string; note: string }
 export interface Item { id: number; text_fr: string; text_en: string | null; last_out: number; done: boolean; issue: Issue | null }
-export interface ShiftList { checklist_id: number; kind: "post" | "role"; target_id: number; name_fr: string; name_en: string; removable: boolean; items: Item[] }
+export interface ShiftList { checklist_id: number; kind: "post" | "role"; target_id: number; name_fr: string; name_en: string; removable: boolean; start_at: string | null; end_at: string | null; items: Item[] }
 
 export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: number): Promise<ShiftList[]> {
   const roleIds = [...new Set([
@@ -17,11 +17,11 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
      WHERE c.client_id = ? AND c.kind = 'role' AND c.target_id IN (${roleIds.map(() => "?").join(",")}) ORDER BY ro.id`,
   ).bind(clientId, ...roleIds).all<{ id: number; target_id: number; name_fr: string; name_en: string; department_id: string }>()).results;
   const byPost = (await db.prepare(
-    `SELECT c.id, c.target_id, p.name_fr, p.name_en FROM shift_checklists sc JOIN checklists c ON c.id = sc.checklist_id JOIN posts p ON p.id = c.target_id
+    `SELECT c.id, c.target_id, p.name_fr, p.name_en, sc.start_at, sc.end_at FROM shift_checklists sc JOIN checklists c ON c.id = sc.checklist_id JOIN posts p ON p.id = c.target_id
      WHERE sc.shift_id = ? AND c.kind = 'post' AND c.client_id = ? ORDER BY p.sort`,
-  ).bind(shift.id, clientId).all<{ id: number; target_id: number; name_fr: string; name_en: string }>()).results;
+  ).bind(shift.id, clientId).all<{ id: number; target_id: number; name_fr: string; name_en: string; start_at: string | null; end_at: string | null }>()).results;
   const all = [
-    ...byRole.map((r) => ({ ...r, kind: "role" as const, removable: false })),
+    ...byRole.map((r) => ({ ...r, kind: "role" as const, removable: false, start_at: null as string | null, end_at: null as string | null })),
     ...byPost.map((r) => ({ ...r, kind: "post" as const, removable: true, department_id: "" })),
   ];
   if (!all.length) return [];
@@ -48,7 +48,7 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
       if (it.last_out && !(l.department_id && (await isLast(l.department_id)))) continue;
       mine.push({ ...it, done: done.has(it.id), issue: issues.get(it.id) ?? null });
     }
-    out.push({ checklist_id: l.id, kind: l.kind, target_id: l.target_id, name_fr: l.name_fr, name_en: l.name_en, removable: l.removable, items: mine });
+    out.push({ checklist_id: l.id, kind: l.kind, target_id: l.target_id, name_fr: l.name_fr, name_en: l.name_en, removable: l.removable, start_at: l.start_at, end_at: l.end_at, items: mine });
   }
   return out;
 }

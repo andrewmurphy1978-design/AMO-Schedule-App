@@ -53,6 +53,7 @@ import m0050 from "../migrations/0050_end_of_shift_checklists.sql";
 import m0051 from "../migrations/0051_reminder_anchor.sql";
 import m0052 from "../migrations/0052_shift_posts_assigned.sql";
 import m0053 from "../migrations/0053_checklist_issues.sql";
+import m0054 from "../migrations/0054_post_ranges.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -108,6 +109,7 @@ const MIGRATIONS: [string, string][] = [
   ["0051_reminder_anchor", m0051],
   ["0052_shift_posts_assigned", m0052],
   ["0053_checklist_issues", m0053],
+  ["0054_post_ranges", m0054],
 ];
 
 const statements = (sql: string) =>
