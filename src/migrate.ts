@@ -55,6 +55,7 @@ import m0052 from "../migrations/0052_shift_posts_assigned.sql";
 import m0053 from "../migrations/0053_checklist_issues.sql";
 import m0054 from "../migrations/0054_post_ranges.sql";
 import m0055 from "../migrations/0055_prep_tasks_handover.sql";
+import m0056 from "../migrations/0056_ingredients_restock.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -112,6 +113,7 @@ const MIGRATIONS: [string, string][] = [
   ["0053_checklist_issues", m0053],
   ["0054_post_ranges", m0054],
   ["0055_prep_tasks_handover", m0055],
+  ["0056_ingredients_restock", m0056],
 ];
 
 const statements = (sql: string) =>

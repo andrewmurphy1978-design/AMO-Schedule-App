@@ -200,8 +200,8 @@ function renderChrome() {
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
-    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]]
-    : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]];
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("community")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("community")], ["account", t("account")]];
   // the kitchen managers (and administrators) get the screen where posts are put on the day's shifts
   if (state.me?.me.is_admin || state.me?.managed.some((m) => m.department_id === "kitchen")) tabs.splice(tabs.findIndex(([id]) => id === "community"), 0, ["posts", t("postsTab")]);
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
@@ -211,7 +211,7 @@ function renderChrome() {
       h("button", { type: "button", "aria-label": label, title: label, "aria-current": state.view === id ? "page" : false, onClick: () => { state.view = id; render(); } },
         h("span", { class: "tab-ic", "aria-hidden": "true" }, TAB_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, label),
         id === "community" && (state.communityUnread ?? 0) > 0 ? h("span", { class: "nav-badge", "aria-label": `${state.communityUnread} ${t("newPosts")}` }, String(state.communityUnread)) : null,
-        id === "checklist" ? h("span", { class: "nav-badge" }, String(state.checklistShifts.reduce((n, x) => n + (x.needs_post ? 1 : x.total - x.done), 0) || "!")) : null)),
+        id === "checklist" && state.checklistShifts.length ? h("span", { class: "nav-badge" }, String(state.checklistShifts.reduce((n, x) => n + (x.needs_post ? 1 : x.total - x.done), 0) || (state.checklistShifts.length ? "!" : ""))) : null)),
   );
 }
 
@@ -224,10 +224,10 @@ async function render() {
       let comm;
       let cl;
       [state.me, state.restaurants, comm, cl] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => ({ test: false, shifts: [] }))]);
-      state.checklistShifts = cl.shifts; state.checklistTest = cl.test;
+      state.checklistShifts = cl.shifts; state.checklistTest = cl.test; state.restock = cl.restock ?? [];
       // the tab is hidden outside a shift, except in test mode (administrators always see it then)
       if (cl.test && state.me.me.is_admin && !cl.shifts.length) state.checklistShifts = [{ id: 0, total: 0, done: 0, preview: true }];
-      if (state.view === "checklist" && !state.checklistShifts.length) state.view = "mine";
+      if (state.view === "checklist" && !state.checklistShifts.length && !state.restock.length) state.view = "mine";
       state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
       renderChrome();
     }
@@ -1817,13 +1817,26 @@ async function renderPostBoard() {
   const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
   const nowIso = `${ymd(new Date())}T${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`;
   const live = (sh) => sh.start_at <= nowIso && sh.end_at >= nowIso;
+  // periods of the day (Matin / Après-midi / Soir…): -1 = the whole day. On today's date start with the period we are in.
+  const periods = data.periods ?? [];
+  if (pb.period === undefined || pb.period >= periods.length) pb.period = periods.findIndex((x) => pb.date === ymd(new Date()) && `${pb.date}T${x.start}` <= nowIso && nowIso < `${pb.date}T${x.end}`);
+  const per = () => (pb.period >= 0 ? { a: `${pb.date}T${periods[pb.period].start}`, z: `${pb.date}T${periods[pb.period].end}` } : null);
+  const inPeriod = (sh) => { const q = per(); return !q || (sh.start_at < q.z && sh.end_at > q.a); };
+  // is this person on the post during the selected period (any part of it)?
+  const onIn = (sh, post) => { if (!sh.posts.includes(post.id)) return false; const q = per(), r = sh.ranges?.[post.id]; if (!q) return true; return (r?.start_at ?? sh.start_at) < q.z && (r?.end_at ?? sh.end_at) > q.a; };
   // arrival / departure times of the other shifts that fall inside this one: where a post can be handed over
-  const marksOf = (sh) => [...new Set(data.shifts.filter((x) => x !== sh).flatMap((x) => [x.start_at, x.end_at]).filter((m) => m > sh.start_at && m < sh.end_at))].sort();
+  const marksOf = (sh) => [...new Set([...data.shifts.filter((x) => x !== sh).flatMap((x) => [x.start_at, x.end_at]), ...periods.flatMap((x) => [`${pb.date}T${x.start}`, `${pb.date}T${x.end}`])].filter((m) => m > sh.start_at && m < sh.end_at))].sort();
   const toggle = async (sh, post, cell) => {
     cell.disabled = true;
     try {
-      const marks = marksOf(sh);
-      if (!sh.posts.includes(post.id) && !marks.length) {
+      const marks = marksOf(sh), q = per();
+      if (!sh.posts.includes(post.id) && q) {
+        // a period is selected: the post is put on the person for that period (within their shift)
+        const a = q.a > sh.start_at ? q.a : sh.start_at, z = q.z < sh.end_at ? q.z : sh.end_at;
+        await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id, start_at: a, end_at: z } });
+        sh.posts = [...sh.posts, post.id];
+        if (a !== sh.start_at || z !== sh.end_at) sh.ranges = { ...(sh.ranges ?? {}), [post.id]: { start_at: a, end_at: z } };
+      } else if (!sh.posts.includes(post.id) && !marks.length) {
         await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id } });
         sh.posts = [...sh.posts, post.id];
       } else {
@@ -1886,23 +1899,26 @@ async function renderPostBoard() {
   };
   const holder = h("div", {});
   const paint = () => {
-    const count = (post) => data.shifts.filter((sh) => sh.posts.includes(post.id)).length;
+    const shown = data.shifts.filter(inPeriod);
+    const count = (post) => shown.filter((sh) => onIn(sh, post)).length;
     const row = (sh) => h("tr", { class: live(sh) ? "live" : "" },
       h("th", { class: "pb-who", scope: "row" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 30), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`)), prepButton(sh)),
       data.posts.map((p) => {
-        const on = sh.posts.includes(p.id);
+        const on = onIn(sh, p);
         if (p.kind === "breakfast" && !sh.breakfast && !on) return h("td", {}, h("span", { class: "pb-na", title: t("postsBreakfastClosed") }, "–"));
         const cell = h("button", { type: "button", class: `pb-cell ${on ? "on" : ""}`, "aria-pressed": String(on), title: `${sh.staff_name} · ${nm(p)}`, onClick: () => toggle(sh, p, cell) }, on ? (sh.ranges?.[p.id] ? h("span", { class: "pb-part" }, `${hhmm(sh.ranges[p.id].start_at).replace(/^0/, "").replace(":00", "h")}–${hhmm(sh.ranges[p.id].end_at).replace(/^0/, "").replace(":00", "h")}`) : "✓") : sh.skills.includes(p.id) ? h("span", { class: "pb-skill", title: t("postsSkilled") }, "★") : "");
         return h("td", {}, cell);
       }));
-    const table = data.shifts.length ? h("div", { class: "pb-scroll" }, h("table", { class: "pb" },
+    const table = shown.length ? h("div", { class: "pb-scroll" }, h("table", { class: "pb" },
       h("thead", {}, h("tr", {}, h("th", {}), data.posts.map((p) => h("th", { class: count(p) ? "" : "empty" }, h("span", { class: "pb-post" }, nm(p)), h("small", {}, count(p) ? `${count(p)} ✓` : `⚠ 0`))))),
-      h("tbody", {}, data.shifts.map(row)))) : h("div", { class: "empty" }, t("postsNoShifts"));
+      h("tbody", {}, shown.map(row)))) : h("div", { class: "empty" }, t("postsNoShifts"));
     // phone: one card per shift with the posts as chips
-    const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
+    const cards = h("div", { class: "pb-cards" }, shown.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
       h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`)), prepButton(sh)),
-      h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}${on && sh.ranges?.[p.id] ? ` ${hhmm(sh.ranges[p.id].start_at)}–${hhmm(sh.ranges[p.id].end_at)}` : ""}`); return b; })))));
-    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? handovers() : null, data.shifts.length ? postTimeline() : null);
+      h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = onIn(sh, p); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}${on && sh.ranges?.[p.id] ? ` ${hhmm(sh.ranges[p.id].start_at)}–${hhmm(sh.ranges[p.id].end_at)}` : ""}`); return b; })))));
+    const chips = periods.length ? h("div", { class: "pb-periods", role: "group", "aria-label": t("postsTitle") }, [[-1, t("periodWholeDay")], ...periods.map((x, i) => [i, `${lang === "en" ? x.en : x.fr} ${x.start.replace(/^0/, "").replace(":00", "h")}–${x.end.replace(/^0/, "").replace(":00", "h")}`])].map(([i, label]) =>
+      h("button", { type: "button", class: `chip-btn ${pb.period === i ? "on" : ""}`, "aria-pressed": String(pb.period === i), onClick: () => { pb.period = i; paint(); } }, label))) : null;
+    holder.replaceChildren(chips, table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? handovers() : null, data.shifts.length ? postTimeline() : null);
   };
   const dayNav = h("div", { class: "weeknav" },
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => { pb.date = addDays(pb.date, -1); render(); } }, "‹"),
@@ -1943,13 +1959,56 @@ function issueDialog(taskText, current) {
 
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
+const LOCATION_INFO = { fridge: ["🧊", "locFridge"], freezer: ["❄️", "locFreezer"], backstore: ["📦", "locBackstore"], basement: ["🪜", "locBasement"] };
 async function renderChecklist() {
-  const { test, shifts } = await api("/my-checklist");
-  const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("checklistTab")));
+  const { test, shifts, restock } = await api("/my-checklist");
+  state.restock = restock;
+  const hasEnd = shifts.length > 0 || (test && state.me.me.is_admin);
+  let sub = state.listsSub ?? (hasEnd ? "end" : "restock");
+  if (sub === "end" && !hasEnd && restock.length) sub = "restock";
+  if (sub === "restock" && !restock.length) sub = "end";
+  const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
+  if (restock.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ["restock", t("listsRestock")]].map(([id, label]) =>
+    h("button", { type: "button", role: "tab", "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, label))));
+  if (sub === "restock") { await renderRestock(box, restock); return; }
   if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
   if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`), test ? h("p", { class: "meta" }, t("checklistTestNoShift")) : null); return; }
   for (const sh of shifts) box.append(await checklistCard(sh.id, sh, test));
+}
+// Restocking: tick what is missing at each post; the list to fetch is sorted by the place where things are kept.
+state.restockRestaurant = null;
+async function renderRestock(box, restaurantIds) {
+  const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
+  if (!restos.some((r) => r.id === state.restockRestaurant)) state.restockRestaurant = (restos.find((r) => r.id === state.sel.restaurant) ?? restos[0])?.id ?? null;
+  const rid = state.restockRestaurant;
+  if (!rid) { box.append(h("div", { class: "empty" }, t("noSchedules"))); return; }
+  const data = await api(`/restock?restaurant=${rid}`);
+  const lang = getLang(), gn = (g) => (lang === "en" ? g.name_en : g.name_fr);
+  const holder = h("div", { class: "restock" });
+  const setNeeded = async (items, needed) => {
+    try { await api("/restock", { method: "PUT", body: { restaurant_id: rid, ingredient_ids: items.map((i) => i.id), needed } }); items.forEach((i) => { i.needed = needed; }); paint(); }
+    catch (e) { toast(errorText(e)); }
+  };
+  const paint = () => {
+    const all = data.groups.flatMap((g) => g.items.map((i) => { i.group = gn(g); return i; }));
+    const missing = all.filter((i) => i.needed);
+    // one entry per name and place (the same ingredient can sit in several groups)
+    const fetchBy = Object.keys(LOCATION_INFO).map((loc) => {
+      const m = new Map();
+      for (const i of missing.filter((x) => x.location === loc)) { const e = m.get(i.name) ?? { name: i.name, ids: [], groups: [] }; e.ids.push(i.id); e.groups.push(i.group); m.set(i.name, e); }
+      return [loc, [...m.values()]];
+    }).filter(([, list]) => list.length);
+    const toFetch = h("section", { class: "card restock-fetch" }, h("h3", {}, `🛒 ${t("restockToFetch")}`, missing.length ? h("small", { class: "meta" }, ` · ${new Set(missing.map((i) => i.name)).size} ${t("restockCount")}`) : null),
+      fetchBy.length ? h("div", { class: "restock-places" }, fetchBy.map(([loc, list]) => h("div", { class: "restock-place" }, h("h4", {}, `${LOCATION_INFO[loc][0]} ${t(LOCATION_INFO[loc][1])} (${list.length})`),
+        list.map((e) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded(all.filter((i) => e.ids.includes(i.id)), false) }), h("span", {}, e.name), h("small", { class: "meta" }, ` · ${[...new Set(e.groups)].join(", ")}`)))))) : h("p", { class: "meta" }, t("restockNothing")));
+    const groups = data.groups.length ? data.groups.map((g) => h("section", { class: "card restock-group" }, h("h3", {}, gn(g), g.items.some((i) => i.needed) ? h("small", { class: "meta" }, ` · ${g.items.filter((i) => i.needed).length}`) : null),
+      h("div", { class: "cl-posts", role: "group", "aria-label": gn(g) }, g.items.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.name}`))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
+    holder.replaceChildren(toFetch, h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups));
+  };
+  box.append(h("p", { class: "meta" }, t("restockHelp")),
+    restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null, holder);
+  paint();
 }
 async function checklistCard(shiftId, info, test = false) {
   const card = h("section", { class: "card checklist-card" });
@@ -2011,7 +2070,7 @@ async function checklistCard(shiftId, info, test = false) {
     // keep the badge of the header tab in step with what is left to do
     const entry = state.checklistShifts?.find((x) => x.id === shiftId);
     if (entry) { entry.total = r.total; entry.done = r.done; entry.needs_post = r.total === 0; renderChrome(); }
-    if (!test && r.total && r.done === r.total) setTimeout(() => { state.view = "mine"; render(); }, 2200);
+    if (!test && r.total && r.done === r.total) setTimeout(() => { if (!state.restock?.length) state.view = "mine"; render(); }, 2200);
   }
   await draw();
   return card;
@@ -2649,8 +2708,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -2702,7 +2761,8 @@ async function renderAdmin() {
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
     communities: () => [communitiesPanel(ov)],
-    checklists: () => [checklistsPanel()],
+    checklists: () => [checklistsPanel(), postPeriodsPanel()],
+    ingredients: () => [ingredientsPanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
@@ -3112,6 +3172,88 @@ function previewChecklist(title, items, role) {
 }
 
 // Administration: the end-of-shift lists (per kitchen post and per role) and who did theirs.
+// Administration → Ingrédients: what each restaurant keeps, per group (post or area), and where it is stored.
+function ingredientsPanel() {
+  const box = h("section", { class: "panel ing-panel" });
+  const st = { restaurant: state.restaurants[0]?.id ?? null, groups: [], posts: [] };
+  const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
+  async function load() {
+    const d = await api(`/admin/ingredients?restaurant=${st.restaurant}`);
+    st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i })) })); st.posts = d.posts; draw();
+  }
+  const locSelect = (item) => h("select", { "aria-label": t("ingLocation") ?? "", onChange: (e) => { item.location = e.target.value; } }, Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: item.location === v }, `${ic} ${t(key)}`)));
+  function draw() {
+    const others = state.restaurants.filter((r) => r.id !== st.restaurant);
+    const copySel = h("select", { "aria-label": t("ingCopyFrom") }, others.map((r) => h("option", { value: r.id }, r.name)));
+    box.replaceChildren(h("h2", {}, t("adminIngredients")), h("p", { class: "meta" }, t("ingredientsHelp")),
+      h("div", { class: "ing-top" },
+        h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: state.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; load(); } })),
+        others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
+          if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
+          const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location })) })); draw(); toast(t("ingCopied"));
+        } }, t("editWord"))) ) : null),
+      ...st.groups.map((g, gi) => {
+        const list = h("div", { class: "ing-items" });
+        const drawItems = () => list.replaceChildren(...g.items.map((i, ii) => h("div", { class: "ing-row" },
+          h("input", { value: i.name, maxLength: 80, "aria-label": t("ingName"), onInput: (e) => { i.name = e.target.value; } }), locSelect(i),
+          h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: () => { g.items.splice(ii, 1); drawItems(); } }, "✕"))));
+        drawItems();
+        const bulk = h("input", { placeholder: t("ingBulk"), "aria-label": t("ingBulk") });
+        const addBulk = () => { for (const n of bulk.value.split(",").map((x) => x.trim()).filter(Boolean)) g.items.push({ name: n, location: "fridge" }); bulk.value = ""; drawItems(); };
+        return h("div", { class: "card ing-group" },
+          h("div", { class: "ing-group-head" },
+            h("input", { value: g.name_fr, maxLength: 60, placeholder: t("ingGroupName"), "aria-label": t("ingGroupName"), onInput: (e) => { g.name_fr = e.target.value; } }),
+            h("input", { value: g.name_en, maxLength: 60, placeholder: t("ingGroupNameEn"), "aria-label": t("ingGroupNameEn"), onInput: (e) => { g.name_en = e.target.value; } }),
+            h("select", { "aria-label": t("ingLinkedPost"), onChange: (e) => { g.post_id = Number(e.target.value) || null; } }, h("option", { value: "" }, t("ingNoPost")), st.posts.map((p) => h("option", { value: p.id, selected: g.post_id === p.id }, nm(p)))),
+            h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: async () => { if (!(await ask(t("ingConfirmDeleteGroup")))) return; st.groups.splice(gi, 1); draw(); } }, "🗑")),
+          list,
+          h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => { g.items.push({ name: "", location: "fridge" }); drawItems(); list.querySelector(".ing-row:last-child input")?.focus(); } }, `+ ${t("ingAdd")}`),
+            bulk, h("button", { class: "btn", type: "button", onClick: addBulk }, "+")));
+      }),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: () => { st.groups.push({ name_fr: "", name_en: "", post_id: null, items: [] }); draw(); } }, `+ ${t("ingAddGroup")}`),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try { await api("/admin/ingredients", { method: "PUT", body: { restaurant_id: st.restaurant, groups: st.groups } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+        } }, t("save"))));
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
+// Administration → periods of the Postes screen (Matin / Après-midi / Soir), for all restaurants or one.
+function postPeriodsPanel() {
+  const box = h("section", { class: "panel" });
+  const st = { restaurant: 0, periods: [], custom: false };
+  async function load() {
+    const d = await api(`/admin/post-periods${st.restaurant ? `?restaurant=${st.restaurant}` : ""}`);
+    st.periods = d.periods.map((p) => ({ ...p })); st.custom = d.custom; draw();
+  }
+  function draw() {
+    box.replaceChildren(h("h2", {}, t("periodsTitle")), h("p", { class: "meta" }, t("periodsHelp")),
+      h("div", { class: "field", style: "max-width:340px" }, h("span", {}, t("restaurant")),
+        h("select", { "aria-label": t("restaurant"), onChange: (e) => { st.restaurant = Number(e.target.value); load(); } }, h("option", { value: 0, selected: !st.restaurant }, t("periodsDefaultAll")), state.restaurants.map((r) => h("option", { value: r.id, selected: st.restaurant === r.id }, r.name)))),
+      ...st.periods.map((p, i) => {
+        const a = timeField(p.start), z = timeField(p.end);
+        a.addEventListener("change", () => { p.start = a.value; }); z.addEventListener("change", () => { p.end = z.value; });
+        return h("div", { class: "period-row" },
+          h("input", { value: p.fr, maxLength: 30, placeholder: t("periodNameFr"), "aria-label": t("periodNameFr"), onInput: (e) => { p.fr = e.target.value; } }),
+          h("input", { value: p.en, maxLength: 30, placeholder: t("periodNameEn"), "aria-label": t("periodNameEn"), onInput: (e) => { p.en = e.target.value; } }),
+          a, h("span", {}, "–"), z,
+          h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: () => { st.periods.splice(i, 1); draw(); } }, "✕"));
+      }),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: () => { st.periods.push({ fr: "", en: "", start: "07:00", end: "14:00" }); draw(); } }, `+ ${t("periodAdd")}`),
+        st.custom ? h("button", { class: "btn", type: "button", onClick: async () => { try { await api("/admin/post-periods", { method: "PUT", body: { restaurant_id: st.restaurant || null, periods: null } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); } } }, t("periodReset")) : null,
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          if (!st.periods.length || st.periods.some((p) => !p.fr.trim() || p.start >= p.end)) { toast(t("periodsInvalid")); return; }
+          try { await api("/admin/post-periods", { method: "PUT", body: { restaurant_id: st.restaurant || null, periods: st.periods } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+        } }, t("save"))));
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 function checklistsPanel() {
   const box = h("section", { class: "panel" });
   const st = { key: null, date: ymd(new Date()) };

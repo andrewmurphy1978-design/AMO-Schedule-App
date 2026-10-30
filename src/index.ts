@@ -2374,6 +2374,108 @@ app.put("/api/shifts/:id/prep/:taskId", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---------- Ingredients and restocking ("Remplissage") ----------
+const LOCATIONS = ["fridge", "freezer", "backstore", "basement"] as const;
+/** Who may see and fill the restock list of a restaurant: administrators, its managers, and people with a kitchen or prep role there. */
+async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
+  if (me.is_admin) return (await db.prepare("SELECT id FROM restaurants WHERE client_id = ? ORDER BY id").bind(me.client_id).all<{ id: number }>()).results.map((r) => r.id);
+  return (await db.prepare(
+    `SELECT DISTINCT x.restaurant_id AS id FROM (
+       SELECT sr.restaurant_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1 AND ro.department_id IN ('kitchen', 'prep')
+       UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1 AND department_id IN ('kitchen', 'prep')) x
+     JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
+  ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
+}
+type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; needed?: boolean }[] };
+async function ingredientGroups(db: D1Database, restaurantId: number, needs = false): Promise<IngGroup[]> {
+  const groups = (await db.prepare("SELECT id, name_fr, name_en, post_id, position FROM ingredient_groups WHERE restaurant_id = ? ORDER BY position, id").bind(restaurantId).all<Omit<IngGroup, "items">>()).results;
+  if (!groups.length) return [];
+  const items = (await db.prepare(`SELECT id, group_id, name, location FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string }>()).results;
+  const need = needs ? new Set((await db.prepare("SELECT ingredient_id FROM restock_needs WHERE restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number }>()).results.map((r) => r.ingredient_id)) : null;
+  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, ...(need ? { needed: need.has(i.id) } : {}) })) }));
+}
+app.get("/api/restock", async (c) => {
+  const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
+  if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
+  return c.json({ groups: await ingredientGroups(db, rid, true) });
+});
+app.put("/api/restock", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; ingredient_ids?: number[]; needed?: boolean }>().catch(() => ({} as { restaurant_id?: number; ingredient_ids?: number[]; needed?: boolean }));
+  if (!b.restaurant_id || !Array.isArray(b.ingredient_ids) || !b.ingredient_ids.length || b.ingredient_ids.length > 300 || typeof b.needed !== "boolean") return c.json({ error: "bad_request" }, 400);
+  if (!(await restockRestaurants(db, me)).includes(b.restaurant_id)) return c.json({ error: "forbidden" }, 403);
+  const ids = [...new Set(b.ingredient_ids.filter((x) => Number.isInteger(x)))];
+  // only ingredients of this restaurant
+  const ok = new Set((await db.prepare(`SELECT i.id FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND i.id IN (${ids.map(() => "?").join(",")})`).bind(b.restaurant_id, ...ids).all<{ id: number }>()).results.map((r) => r.id));
+  const valid = ids.filter((i) => ok.has(i));
+  if (valid.length) await db.batch(valid.map((i) => b.needed
+    ? db.prepare("INSERT OR IGNORE INTO restock_needs (restaurant_id, ingredient_id, requested_by, requested_at) VALUES (?, ?, ?, ?)").bind(b.restaurant_id!, i, me.id, Date.now())
+    : db.prepare("DELETE FROM restock_needs WHERE restaurant_id = ? AND ingredient_id = ?").bind(b.restaurant_id!, i)));
+  return c.json({ ok: true, changed: valid.length });
+});
+// Administration: which ingredients each restaurant has, in which group (post / area) and where they are stored. Ids are kept when edited.
+app.get("/api/admin/ingredients", requireAdmin, async (c) => {
+  const db = c.env.DB, rid = intParam(c.req.query("restaurant"));
+  if (!rid) return c.json({ error: "bad_request" }, 400);
+  const posts = (await db.prepare("SELECT id, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
+  return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
+});
+app.put("/api/admin/ingredients", requireAdmin, async (c) => {
+  const db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: { id?: number; name?: string; location?: string }[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: { id?: number; name?: string; location?: string }[] }[] }));
+  if (!b.restaurant_id || !Array.isArray(b.groups) || b.groups.length > 30) return c.json({ error: "invalid_ingredients" }, 400);
+  const groups = b.groups.map((g) => ({ id: g.id, fr: (g.name_fr ?? "").trim(), en: (g.name_en ?? "").trim(), post: g.post_id || null,
+    items: (Array.isArray(g.items) ? g.items : []).map((i) => ({ id: i.id, name: (i.name ?? "").trim(), loc: LOCATIONS.includes(i.location as never) ? i.location! : "fridge" })).filter((i) => i.name) })).filter((g) => g.fr);
+  if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80))) return c.json({ error: "invalid_ingredients" }, 400);
+  const rid = b.restaurant_id;
+  const curGroups = (await db.prepare("SELECT id FROM ingredient_groups WHERE restaurant_id = ?").bind(rid).all<{ id: number }>()).results.map((r) => r.id);
+  const curItems = curGroups.length ? (await db.prepare(`SELECT id FROM ingredients WHERE group_id IN (${curGroups.map(() => "?").join(",")})`).bind(...curGroups).all<{ id: number }>()).results.map((r) => r.id) : [];
+  const keepG = new Set(groups.filter((g) => g.id && curGroups.includes(g.id)).map((g) => g.id!));
+  const keepI = new Set(groups.flatMap((g) => g.items).filter((i) => i.id && curItems.includes(i.id)).map((i) => i.id!));
+  // groups first (new ones need their id before their items), then the items
+  await db.batch([
+    ...curGroups.filter((g) => !keepG.has(g)).map((g) => db.prepare("DELETE FROM ingredient_groups WHERE id = ?").bind(g)),
+    ...curItems.filter((i) => !keepI.has(i)).map((i) => db.prepare("DELETE FROM ingredients WHERE id = ?").bind(i)),
+    ...groups.filter((g) => g.id && keepG.has(g.id)).map((g, _i) => db.prepare("UPDATE ingredient_groups SET name_fr = ?, name_en = ?, post_id = ?, position = ? WHERE id = ? AND restaurant_id = ?").bind(g.fr, g.en || g.fr, g.post, groups.indexOf(g) + 1, g.id!, rid)),
+  ]);
+  for (const [gi, g] of groups.entries()) {
+    let gid = g.id && keepG.has(g.id) ? g.id : 0;
+    if (!gid) gid = (await db.prepare("INSERT INTO ingredient_groups (restaurant_id, name_fr, name_en, post_id, position) VALUES (?, ?, ?, ?, ?)").bind(rid, g.fr, g.en || g.fr, g.post, gi + 1).run()).meta.last_row_id as number;
+    await db.batch(g.items.map((i, pos) => i.id && keepI.has(i.id)
+      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, pos + 1, i.id)
+      : db.prepare("INSERT INTO ingredients (group_id, name, location, position) VALUES (?, ?, ?, ?)").bind(gid, i.name, i.loc, pos + 1)));
+  }
+  return c.json({ ok: true });
+});
+
+// ---------- Periods of the day on the Postes screen (Matin / Après-midi / Soir), per restaurant ----------
+type PostPeriod = { fr: string; en: string; start: string; end: string };
+const DEFAULT_PERIODS: PostPeriod[] = [{ fr: "Matin", en: "Morning", start: "07:00", end: "14:00" }, { fr: "Après-midi", en: "Afternoon", start: "14:00", end: "17:00" }, { fr: "Soir", en: "Evening", start: "17:00", end: "21:00" }];
+async function postPeriods(db: D1Database, clientId: number, restaurantId: number | null): Promise<{ periods: PostPeriod[]; custom: boolean }> {
+  for (const key of restaurantId ? [`post_periods_r${restaurantId}`, "post_periods"] : ["post_periods"]) {
+    const raw = await getSetting(db, clientId, key);
+    if (raw) { try { const v = JSON.parse(raw) as PostPeriod[]; if (Array.isArray(v) && v.length) return { periods: v, custom: key !== "post_periods" || !restaurantId }; } catch { /* use the default */ } }
+  }
+  return { periods: DEFAULT_PERIODS, custom: false };
+}
+app.get("/api/admin/post-periods", requireAdmin, async (c) => {
+  const rid = intParam(c.req.query("restaurant"));
+  const r = await postPeriods(c.env.DB, c.get("me").client_id, rid);
+  const own = rid ? !!(await getSetting(c.env.DB, c.get("me").client_id, `post_periods_r${rid}`)) : r.custom;
+  return c.json({ periods: r.periods, custom: own });
+});
+app.put("/api/admin/post-periods", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number | null; periods?: PostPeriod[] | null }>().catch(() => ({} as { restaurant_id?: number | null; periods?: PostPeriod[] | null }));
+  const key = b.restaurant_id ? `post_periods_r${b.restaurant_id}` : "post_periods";
+  if (b.periods === null) { await delSettingStmt(db, cid, key).run(); return c.json({ ok: true }); } // back to the default
+  if (!Array.isArray(b.periods) || !b.periods.length || b.periods.length > 8) return c.json({ error: "invalid_periods" }, 400);
+  const periods = b.periods.map((p) => ({ fr: (p.fr ?? "").trim(), en: (p.en ?? "").trim() || (p.fr ?? "").trim(), start: p.start, end: p.end }));
+  if (periods.some((p) => !p.fr || p.fr.length > 30 || p.en.length > 30 || !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.end) || p.start >= p.end)) return c.json({ error: "invalid_periods" }, 400);
+  await putSettingStmt(db, cid, key, JSON.stringify(periods)).run();
+  return c.json({ ok: true });
+});
+
 // "Postes du jour": who is on which kitchen post, for the kitchen shifts of one day (managers of the kitchen).
 app.get("/api/post-board", async (c) => {
   const me = c.get("me"), db = c.env.DB;
@@ -2397,7 +2499,7 @@ app.get("/api/post-board", async (c) => {
   for (const x of shifts as { id: number; staff_id: number; start_at: string; end_at: string }[]) withBf.push({ ...x, breakfast: await breakfastRelevant(db, restaurantId, x.start_at, x.end_at) });
   // breakfast columns only exist on days when someone's shift overlaps breakfast
   const anyBf = withBf.some((x) => x.breakfast);
-  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, prep: prepN.get(x.id) ?? 0, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
+  return c.json({ periods: (await postPeriods(db, me.client_id, restaurantId)).periods, posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, prep: prepN.get(x.id) ?? 0, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
 });
 
 // Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.
@@ -2423,7 +2525,7 @@ app.get("/api/my-checklist", async (c) => {
     out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post"),
       next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null });
   }
-  return c.json({ test, shifts: out });
+  return c.json({ test, shifts: out, restock: await restockRestaurants(db, me) });
 });
 
 // Administration: edit the lists. Items keep their id when edited, so the history of past shifts stays right.
