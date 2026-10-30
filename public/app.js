@@ -192,7 +192,7 @@ function renderClientBanner() {
 }
 
 // Icons of the main tabs (shown alone on a phone so that every tab fits).
-const TAB_ICONS = { schedule: "📋", mine: "🕐", community: "💬", account: "👤", admin: "⚙️" };
+const TAB_ICONS = { schedule: "📋", mine: "🕐", checklist: "✅", community: "💬", account: "👤", admin: "⚙️" };
 function renderChrome() {
   renderClientBanner();
   fsLabel();
@@ -200,15 +200,16 @@ function renderChrome() {
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
-    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ["community", t("community")], ["account", t("account")]]
-    : [["mine", t("myShifts")], ["schedule", t("schedule")], ["community", t("community")], ["account", t("account")]];
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length ? [["checklist", t("checklistTab")]] : []), ["community", t("community")], ["account", t("account")]];
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
     ...tabs.map(([id, label]) =>
       h("button", { type: "button", "aria-label": label, title: label, "aria-current": state.view === id ? "page" : false, onClick: () => { state.view = id; render(); } },
         h("span", { class: "tab-ic", "aria-hidden": "true" }, TAB_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, label),
-        id === "community" && (state.communityUnread ?? 0) > 0 ? h("span", { class: "nav-badge", "aria-label": `${state.communityUnread} ${t("newPosts")}` }, String(state.communityUnread)) : null)),
+        id === "community" && (state.communityUnread ?? 0) > 0 ? h("span", { class: "nav-badge", "aria-label": `${state.communityUnread} ${t("newPosts")}` }, String(state.communityUnread)) : null,
+        id === "checklist" ? h("span", { class: "nav-badge" }, String(state.checklistShifts.reduce((n, x) => n + (x.needs_post ? 1 : x.total - x.done), 0) || "!")) : null)),
   );
 }
 
@@ -219,13 +220,16 @@ async function render() {
     // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
     if (state.view !== "admin") {
       let comm;
-      [state.me, state.restaurants, comm] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => [])]);
+      [state.me, state.restaurants, comm, state.checklistShifts] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => [])]);
+      if (state.view === "checklist" && !state.checklistShifts.length && !state.checklistJustDone) state.view = "mine";
+      state.checklistJustDone = false;
       state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
       renderChrome();
     }
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
     else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
+    else if (state.view === "checklist") await renderChecklist();
     else if (state.view === "community") await renderCommunity();
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
@@ -1729,6 +1733,52 @@ const insertAtCursor = (input, text) => {
   input.focus(); input.selectionStart = input.selectionEnd = a + text.length;
 };
 
+// ---------- End-of-shift checklist ----------
+// The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
+async function renderChecklist() {
+  const shifts = await api("/my-checklist");
+  const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("checklistTab")));
+  $app.replaceChildren(box);
+  if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`)); return; }
+  for (const sh of shifts) box.append(await checklistCard(sh.id, sh));
+}
+async function checklistCard(shiftId, info) {
+  const card = h("section", { class: "card checklist-card" });
+  const lang = getLang();
+  const txt = (o) => (lang === "en" ? o.text_en || o.text_fr : o.text_fr);
+  const nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
+  async function draw() {
+    const d = await api(`/shifts/${shiftId}/checklist`);
+    const total = d.lists.reduce((n, l) => n + l.items.length, 0), done = d.lists.reduce((n, l) => n + l.items.filter((i) => i.done).length, 0);
+    const bar = h("div", { class: "cl-progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": done }, h("span", { style: `width:${total ? (done / total) * 100 : 0}%` }));
+    card.replaceChildren(
+      h("div", { class: "cl-head" }, h("b", {}, `${info?.restaurant ?? ""} · ${hhmm(d.shift.start_at)}–${hhmm(d.shift.end_at)}`), h("span", { class: "meta" }, total ? `${done}/${total}` : "")),
+      total ? bar : null,
+      // kitchen: pick the post(s) worked this shift
+      d.posts_available.length || d.lists.some((l) => l.kind === "post") ? h("div", { class: "cl-posts" },
+        h("span", { class: "meta" }, t("checklistMyPost")),
+        ...d.lists.filter((l) => l.kind === "post").map((l) => h("button", { type: "button", class: "chip-btn on", title: t("checklistRemovePost"), onClick: async () => { if (l.items.some((i) => i.done) && !(await ask(t("checklistRemovePostConfirm")))) return; await api(`/shifts/${shiftId}/checklist/posts/${l.target_id}`, { method: "DELETE" }); await refresh(); } }, `${nm(l)} ✕`)),
+        ...d.posts_available.map((p) => h("button", { type: "button", class: "chip-btn", onClick: async () => { await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } }); await refresh(); } }, `+ ${nm(p)}`))) : null,
+      ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l)),
+        ...l.items.map((it) => h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
+          h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
+            const input = e.target;
+            try { await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } }); await refresh(); }
+            catch (err) { input.checked = !input.checked; toast(errorText(err)); }
+          } }), h("span", {}, txt(it)))))),
+      !d.lists.length ? h("p", { class: "meta" }, t("checklistPickPost")) : null,
+      total && done === total ? h("div", { class: "okmsg" }, `🎉 ${t("checklistComplete")}`) : null);
+    return { total, done };
+  }
+  // after each change: when everything is done the tab disappears, so go back to the shifts
+  async function refresh() {
+    const r = await draw();
+    if (r.total && r.done === r.total) setTimeout(() => { state.view = "mine"; state.checklistJustDone = false; render(); }, 2200);
+  }
+  await draw();
+  return card;
+}
+
 // ---------- Communities ----------
 // A message board per restaurant and group of departments; people are in the ones matching their roles.
 const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -2359,8 +2409,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -2412,6 +2462,7 @@ async function renderAdmin() {
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
     communities: () => [communitiesPanel(ov)],
+    checklists: () => [checklistsPanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
@@ -2807,6 +2858,49 @@ function communitiesPanel(ov) {
   return box;
 }
 const COMM_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
+
+// Administration: the end-of-shift lists (per kitchen post and per role) and who did theirs.
+function checklistsPanel() {
+  const box = h("section", { class: "panel" });
+  const st = { key: null, date: ymd(new Date()) };
+  async function load() {
+    const [data, report] = await Promise.all([api("/admin/checklists"), api(`/admin/checklist-report?date=${st.date}`)]);
+    const lang = getLang();
+    const nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
+    const targets = [...data.posts.map((p) => ({ kind: "post", id: p.id, label: `🍳 ${nm(p)}` })), ...data.roles.filter((r) => r.department_id !== "admin").map((r) => ({ kind: "role", id: r.id, label: `${roleIcon(r)} ${roleName(r)}` }))];
+    if (!st.key || !targets.some((x) => `${x.kind}:${x.id}` === st.key)) st.key = `${targets[0].kind}:${targets[0].id}`;
+    const cur = targets.find((x) => `${x.kind}:${x.id}` === st.key);
+    const list = data.lists.find((l) => l.kind === cur.kind && l.target_id === cur.id);
+    let items = (list?.items ?? []).map((i) => ({ id: i.id, text_fr: i.text_fr, text_en: i.text_en ?? "", last_out: !!i.last_out }));
+    const rowsBox = h("div", { class: "cl-edit" });
+    const drawRows = () => rowsBox.replaceChildren(...items.map((it, i) => h("div", { class: "cl-edit-row" },
+      h("input", { value: it.text_fr, maxLength: 200, placeholder: t("checklistFr"), "aria-label": t("checklistFr"), onInput: (e) => { it.text_fr = e.target.value; } }),
+      h("input", { value: it.text_en, maxLength: 200, placeholder: t("checklistEn"), "aria-label": t("checklistEn"), onInput: (e) => { it.text_en = e.target.value; } }),
+      cur.kind === "role" ? h("label", { class: "check cl-lastout", title: t("checklistLastOutHelp") }, h("input", { type: "checkbox", checked: it.last_out, onChange: (e) => { it.last_out = e.target.checked; } }), h("span", {}, t("checklistLastOut"))) : null,
+      h("div", { class: "cl-edit-btns" },
+        h("button", { class: "icon-btn", type: "button", "aria-label": "↑", disabled: i === 0, onClick: () => { [items[i - 1], items[i]] = [items[i], items[i - 1]]; drawRows(); } }, "↑"),
+        h("button", { class: "icon-btn", type: "button", "aria-label": "↓", disabled: i === items.length - 1, onClick: () => { [items[i + 1], items[i]] = [items[i], items[i + 1]]; drawRows(); } }, "↓"),
+        h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), onClick: () => { items.splice(i, 1); drawRows(); } }, "🗑️")))));
+    drawRows();
+    const sel = h("select", { "aria-label": t("checklistWhich"), onChange: (e) => { st.key = e.target.value; load(); } }, targets.map((x) => h("option", { value: `${x.kind}:${x.id}`, selected: `${x.kind}:${x.id}` === st.key }, x.label)));
+    const day = h("input", { type: "date", value: st.date, onChange: (e) => { st.date = e.target.value || st.date; load(); } });
+    box.replaceChildren(h("h2", {}, t("checklistsTitle")), h("p", { class: "meta" }, t("checklistsHelp")),
+      h("div", { class: "field" }, h("span", {}, t("checklistWhich")), sel),
+      rowsBox,
+      h("div", { class: "actions" },
+        h("button", { class: "btn", type: "button", onClick: () => { items.push({ text_fr: "", text_en: "", last_out: false }); drawRows(); rowsBox.querySelector(".cl-edit-row:last-child input")?.focus(); } }, `+ ${t("checklistAddItem")}`),
+        h("button", { class: "btn primary", type: "button", onClick: async () => {
+          try { await api("/admin/checklists", { method: "PUT", body: { kind: cur.kind, target_id: cur.id, items } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+        } }, t("save"))),
+      h("h3", { class: "cl-report-title" }, t("checklistReport")), h("label", { class: "field cl-date" }, h("span", {}, t("date")), day),
+      report.length ? h("div", { class: "cl-report" }, report.map((r) => h("div", { class: `cl-report-row ${r.total && r.done === r.total ? "ok" : ""}` },
+        h("b", {}, r.staff_name), h("span", { class: "meta" }, `${r.restaurant} · ${lang === "en" ? r.role_en : r.role_fr} · ${hhmm(r.start_at)}–${hhmm(r.end_at)}`),
+        h("span", { class: "cl-score" }, r.total ? `${r.done}/${r.total}` : t("checklistNoPost")),
+        r.missing.length && r.done ? h("small", { class: "meta" }, `${t("checklistMissing")} : ${r.missing.map((m) => (lang === "en" ? m.text_en || m.text_fr : m.text_fr)).join(" · ")}`) : null))) : h("p", { class: "meta" }, t("checklistNoShifts")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
 
 // Default hourly rates used when an employee has no rate of their own (Québec minimum wages).
 function defaultRatesPanel(ov) {
@@ -3260,7 +3354,7 @@ async function boot() {
 function openFromLink() {
   const q = new URLSearchParams(location.search);
   const view = q.get("view");
-  if (view && ["mine", "schedule", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
+  if (view && ["mine", "schedule", "checklist", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
     state.view = view;
     if (q.get("c")) state.communityId = Number(q.get("c"));
     if (q.get("tab")) state.accountTab = q.get("tab");

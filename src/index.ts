@@ -15,6 +15,7 @@ import { resolveForDate } from "../public/rules.js";
 import { splitName, joinName, genderedRole } from "../public/names.js";
 import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
 import { getVapid, pushToStaff } from "./push.ts";
+import { listsForShift, progress as checklistProgress } from "./checklists.ts";
 import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminders.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature } from "./twilio.ts";
@@ -2181,7 +2182,7 @@ app.get("/api/my-shifts", async (c) => {
   const bounds = weekBounds(c.req.query("week") ?? "");
   if (!bounds) return c.json({ error: "week_must_be_a_monday" }, 400);
   const r = await c.env.DB.prepare(
-    `SELECT sh.id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex,
+    `SELECT sh.id, sh.staff_id, sh.role_id, sh.restaurant_id, rs.name AS restaurant, ro.department_id, ro.name_fr, ro.name_en, (SELECT sex FROM staff WHERE id = sh.staff_id) AS sex,
             sh.start_at, sh.end_at, sh.until_close, sh.notes, sh.status
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.start_at >= ? AND sh.start_at < ? AND ${shiftVisible(c.get("me"))} ORDER BY sh.start_at`,
@@ -2220,6 +2221,133 @@ const sortByName = <T extends { name: string }>(rows: T[]): T[] => [...rows].sor
 
 // ---------- Roster & admin overview ----------
 // Staff who can be scheduled on a given restaurant+department (managers/admin only).
+// ---------- End-of-shift checklists ----------
+async function checklistShift(c: any, id: number) {
+  const me = c.get("me") as Me, db: D1Database = c.env.DB;
+  const sh = await db.prepare("SELECT sh.id, sh.staff_id, sh.restaurant_id, sh.role_id, sh.start_at, sh.end_at, sh.status, ro.department_id, s.name AS staff_name FROM shifts sh JOIN roles ro ON ro.id = sh.role_id JOIN staff s ON s.id = sh.staff_id WHERE sh.id = ?").bind(id).first<{ id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string; status: string; department_id: string; staff_name: string }>();
+  if (!sh) return null;
+  const owner = sh.staff_id === me.id;
+  if (!owner && !(await canManage(db, me, sh.restaurant_id, sh.department_id))) return null;
+  return { sh, owner, me, db };
+}
+app.get("/api/shifts/:id/checklist", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx) return c.json({ error: "not_found" }, 404);
+  const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
+  // kitchen workers choose the post(s) they worked
+  const kitchen = (await ctx.db.prepare("SELECT 1 FROM roles WHERE id IN (SELECT ?1 UNION SELECT role_id FROM shift_roles WHERE shift_id = ?2 UNION SELECT role_id FROM shift_segments WHERE shift_id = ?2) AND department_id = 'kitchen' LIMIT 1").bind(ctx.sh.role_id, ctx.sh.id).first()) ? true : false;
+  const picked = new Set(lists.filter((l) => l.kind === "post").map((l) => l.target_id));
+  const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string }>()).results.filter((p) => !picked.has(p.id)) : [];
+  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, editable: ctx.owner || ctx.me.is_admin || true, lists, posts_available: posts });
+});
+app.post("/api/shifts/:id/checklist/posts", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ post_id?: number }>().catch(() => ({} as { post_id?: number }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !b.post_id) return c.json({ error: "not_found" }, 404);
+  const list = await ctx.db.prepare("SELECT id FROM checklists WHERE client_id = ? AND kind = 'post' AND target_id = ?").bind(ctx.me.client_id, b.post_id).first<{ id: number }>();
+  if (!list) return c.json({ error: "not_found" }, 404);
+  await ctx.db.prepare("INSERT OR IGNORE INTO shift_checklists (shift_id, checklist_id) VALUES (?, ?)").bind(ctx.sh.id, list.id).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/shifts/:id/checklist/posts/:postId", async (c) => {
+  const id = intParam(c.req.param("id")), postId = intParam(c.req.param("postId"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !postId) return c.json({ error: "not_found" }, 404);
+  const list = await ctx.db.prepare("SELECT id FROM checklists WHERE client_id = ? AND kind = 'post' AND target_id = ?").bind(ctx.me.client_id, postId).first<{ id: number }>();
+  if (list) await ctx.db.batch([
+    ctx.db.prepare("DELETE FROM shift_checklists WHERE shift_id = ? AND checklist_id = ?").bind(ctx.sh.id, list.id),
+    ctx.db.prepare("DELETE FROM shift_checklist_done WHERE shift_id = ? AND item_id IN (SELECT id FROM checklist_items WHERE checklist_id = ?)").bind(ctx.sh.id, list.id),
+  ]);
+  return c.json({ ok: true });
+});
+app.put("/api/shifts/:id/checklist/items", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ item_id?: number; done?: boolean }>().catch(() => ({} as { item_id?: number; done?: boolean }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !b.item_id || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
+  // the item has to be on one of this shift's lists
+  const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
+  if (!lists.some((l) => l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
+  await (b.done
+    ? ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_done (shift_id, item_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, b.item_id, ctx.me.id, Date.now())
+    : ctx.db.prepare("DELETE FROM shift_checklist_done WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id)).run();
+  return c.json({ ok: true });
+});
+
+// Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.
+const CHECKLIST_GRACE_MIN = 60;
+app.get("/api/my-checklist", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const now = localNow(c.env.TIMEZONE);
+  const since = new Date(Date.parse(`${now}:00Z`) - CHECKLIST_GRACE_MIN * 60_000).toISOString().slice(0, 16);
+  const shifts = (await db.prepare(
+    `SELECT sh.id, sh.staff_id, sh.restaurant_id, sh.role_id, sh.start_at, sh.end_at, rs.name AS restaurant, ro.name_fr, ro.name_en, ro.department_id
+     FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+     WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at <= ? AND sh.end_at >= ? AND ${shiftVisible(me)} ORDER BY sh.start_at`,
+  ).bind(me.id, now, since).all<ShiftRefFull>()).results;
+  const out = [];
+  for (const sh of shifts) {
+    const p = await checklistProgress(db, sh, me.client_id);
+    const kitchen = sh.department_id === "kitchen";
+    if (!p.total && !kitchen) continue; // nothing to do for this role
+    if (p.total && p.done === p.total) continue; // finished: the tab goes away
+    out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post") });
+  }
+  return c.json(out);
+});
+
+// Administration: edit the lists. Items keep their id when edited, so the history of past shifts stays right.
+app.get("/api/admin/checklists", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const lists = (await db.prepare("SELECT id, kind, target_id FROM checklists WHERE client_id = ?").bind(cid).all<{ id: number; kind: string; target_id: number }>()).results;
+  const items = lists.length ? (await db.prepare(`SELECT id, checklist_id, text_fr, text_en, last_out FROM checklist_items WHERE checklist_id IN (${lists.map(() => "?").join(",")}) ORDER BY position, id`).bind(...lists.map((l) => l.id)).all<{ checklist_id: number }>()).results : [];
+  const posts = (await db.prepare("SELECT id, name_fr, name_en, department_id FROM posts WHERE all_posts = 0 ORDER BY sort").all()).results;
+  const roles = (await db.prepare("SELECT id, name_fr, name_en, department_id FROM roles ORDER BY id").all()).results;
+  return c.json({ lists: lists.map((l) => ({ ...l, items: items.filter((i) => i.checklist_id === l.id) })), posts, roles });
+});
+app.put("/api/admin/checklists", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const b = await c.req.json<{ kind?: string; target_id?: number; items?: { id?: number; text_fr?: string; text_en?: string; last_out?: boolean }[] }>().catch(() => ({} as { kind?: string; target_id?: number; items?: { id?: number; text_fr?: string; text_en?: string; last_out?: boolean }[] }));
+  if ((b.kind !== "post" && b.kind !== "role") || !b.target_id || !Array.isArray(b.items) || b.items.length > 60) return c.json({ error: "invalid_checklist" }, 400);
+  const exists = b.kind === "post" ? await db.prepare("SELECT 1 FROM posts WHERE id = ?").bind(b.target_id).first() : await db.prepare("SELECT 1 FROM roles WHERE id = ?").bind(b.target_id).first();
+  if (!exists) return c.json({ error: "not_found" }, 404);
+  const items = b.items.map((x) => ({ id: x.id, fr: (x.text_fr ?? "").trim(), en: (x.text_en ?? "").trim(), last: x.last_out ? 1 : 0 })).filter((x) => x.fr);
+  if (items.some((x) => x.fr.length > 200 || x.en.length > 200)) return c.json({ error: "invalid_checklist" }, 400);
+  await db.prepare("INSERT OR IGNORE INTO checklists (client_id, kind, target_id) VALUES (?, ?, ?)").bind(cid, b.kind, b.target_id).run();
+  const list = (await db.prepare("SELECT id FROM checklists WHERE client_id = ? AND kind = ? AND target_id = ?").bind(cid, b.kind, b.target_id).first<{ id: number }>())!;
+  const current = (await db.prepare("SELECT id FROM checklist_items WHERE checklist_id = ?").bind(list.id).all<{ id: number }>()).results.map((r) => r.id);
+  const keep = new Set(items.filter((x) => x.id && current.includes(x.id)).map((x) => x.id!));
+  await db.batch([
+    ...current.filter((i) => !keep.has(i)).map((i) => db.prepare("DELETE FROM checklist_items WHERE id = ?").bind(i)),
+    ...items.map((x, pos) => x.id && keep.has(x.id)
+      ? db.prepare("UPDATE checklist_items SET position = ?, text_fr = ?, text_en = ?, last_out = ? WHERE id = ? AND checklist_id = ?").bind(pos + 1, x.fr, x.en || null, x.last, x.id, list.id)
+      : db.prepare("INSERT INTO checklist_items (checklist_id, position, text_fr, text_en, last_out) VALUES (?, ?, ?, ?, ?)").bind(list.id, pos + 1, x.fr, x.en || null, x.last)),
+  ]);
+  return c.json({ ok: true, id: list.id });
+});
+// Who did their end-of-shift list on a day (all restaurants of the client).
+app.get("/api/admin/checklist-report", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const date = c.req.query("date") ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: "invalid_date" }, 400);
+  const shifts = (await db.prepare(
+    `SELECT sh.id, sh.staff_id, sh.restaurant_id, sh.role_id, sh.start_at, sh.end_at, s.name AS staff_name, rs.name AS restaurant, ro.name_fr, ro.name_en, ro.department_id
+     FROM shifts sh JOIN staff s ON s.id = sh.staff_id JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
+     WHERE rs.client_id = ? AND sh.status = 'ok' AND substr(sh.start_at, 1, 10) = ? ORDER BY rs.name, sh.end_at, s.name`,
+  ).bind(cid, date).all<ShiftRefFull>()).results;
+  const rows = [];
+  for (const sh of shifts) {
+    const p = await checklistProgress(db, sh, cid);
+    if (!p.total && !(await db.prepare("SELECT 1 FROM roles WHERE id = ? AND department_id = 'kitchen'").bind(sh.role_id).first())) continue;
+    rows.push({ shift_id: sh.id, staff_name: sh.staff_name, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done,
+      missing: p.lists.flatMap((l) => l.items.filter((i) => !i.done).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en }))) });
+  }
+  return c.json(rows);
+});
+type ShiftRefFull = { id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string; staff_name: string; restaurant: string; name_fr: string; name_en: string; department_id: string };
+
 // ---------- Web Push (this device) ----------
 app.get("/api/push/key", async (c) => c.json({ publicKey: (await getVapid(c.env.DB)).publicKey }));
 app.get("/api/push/status", async (c) => {
