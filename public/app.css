@@ -956,3 +956,12 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 .cl-issue-btn{margin-left:auto;border:0;background:none;font-size:1.15rem;cursor:pointer;padding:.2rem .4rem;opacity:.55}.cl-issue-btn:hover,.cl-item-wrap.issue .cl-issue-btn{opacity:1}
 .cl-issue{font-size:.88rem;color:#92400e;padding:.25rem .6rem 0 2.4rem}@media (prefers-color-scheme:dark){.cl-issue{color:#fcd34d}}
 small.cl-issue{display:block;grid-column:1/-1;padding:0}
+
+.pt{margin-top:1.4rem}.pt h3{margin:.2rem 0 .5rem}.pt-scroll{overflow-x:auto}.pt-grid{min-width:640px}
+.pt-row{display:grid;grid-template-columns:150px 1fr;gap:.6rem;align-items:center;margin:.25rem 0}.pt-label{font-weight:600;font-size:.88rem;text-align:right}
+.pt-track{position:relative;background:color-mix(in srgb,var(--line) 35%,transparent);border-radius:8px;overflow:hidden}
+.pt-gap{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(135deg,rgba(220,38,38,.28) 0 5px,transparent 5px 10px);border-left:1px dashed rgba(220,38,38,.5);border-right:1px dashed rgba(220,38,38,.5)}
+.pt-bar{position:absolute;height:26px;border-radius:7px;font-size:.76rem;font-weight:700;padding:0 .4rem;display:flex;align-items:center;white-space:nowrap;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.pt-axis{position:relative;height:18px;font-size:.72rem;color:var(--muted)}.pt-axis span{position:absolute;transform:translateX(-50%)}.pt-head{margin-bottom:0}
+@media (max-width:899px){.pt-row{grid-template-columns:96px 1fr}.pt-label{font-size:.78rem}.pt-grid{min-width:560px}}
+.pt-grid{padding-right:14px}

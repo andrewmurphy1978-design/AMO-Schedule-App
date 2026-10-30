@@ -1773,6 +1773,31 @@ async function renderPostBoard() {
       paint();
     } catch (e) { toast(errorText(e)); cell.disabled = false; }
   };
+  // who is on which post, hour by hour: one row per post, a bar per assigned shift, hatched where nobody is on the post
+  const postTimeline = () => {
+    const toM = (iso, day) => Math.round((Date.parse(`${iso}:00Z`) - Date.parse(`${day}T00:00:00Z`)) / 60000);
+    const hrs = hoursOn(pb.restaurant, pb.date);
+    let from = Math.min(toM(`${pb.date}T${hrs.open}`, pb.date), ...data.shifts.map((x) => toM(x.start_at, pb.date)));
+    let to = Math.max(toM(`${pb.date}T${hrs.close}`, pb.date), ...data.shifts.map((x) => toM(x.end_at, pb.date)));
+    from = Math.floor(from / 60) * 60; to = Math.ceil(to / 60) * 60;
+    const pct = (m) => ((m - from) / (to - from)) * 100;
+    const open = toM(`${pb.date}T${hrs.open}`, pb.date), close = toM(`${pb.date}T${hrs.close}`, pb.date);
+    const hoursAxis = h("div", { class: "pt-axis" }, Array.from({ length: (to - from) / 60 + 1 }, (_, i) => h("span", { style: `left:${pct(from + i * 60)}%` }, `${((from + i * 60) / 60) % 24}h`)));
+    const rows = data.posts.map((p) => {
+      const mine = data.shifts.filter((x) => x.posts.includes(p.id)).map((x) => ({ x, a: toM(x.start_at, pb.date), b: toM(x.end_at, pb.date) })).sort((u, v) => u.a - v.a);
+      // lanes for people on the same post at the same time
+      const laneEnd = [];
+      for (const it of mine) { let l = laneEnd.findIndex((e) => e <= it.a); if (l < 0) l = laneEnd.length; laneEnd[l] = it.b; it.lane = l; }
+      const lanes = Math.max(1, laneEnd.length);
+      // uncovered stretches inside opening hours (breakfast posts: only while someone is assigned, they are not needed all day)
+      const gaps = []; if (p.kind !== "breakfast") { let cur = open; for (const it of [...mine].sort((u, v) => u.a - v.a)) { if (it.a > cur) gaps.push([cur, Math.min(it.a, close)]); cur = Math.max(cur, it.b); } if (cur < close) gaps.push([cur, close]); }
+      return h("div", { class: "pt-row" }, h("div", { class: "pt-label" }, nm(p)),
+        h("div", { class: "pt-track", style: `height:${lanes * 30 + 6}px` },
+          ...gaps.filter(([a, b]) => b > a).map(([a, b]) => h("div", { class: "pt-gap", title: `${t("postsNobody")} ${fromMin(((a % 1440) + 1440) % 1440)}–${fromMin(((b % 1440) + 1440) % 1440)}`, style: `left:${pct(a)}%;width:${pct(b) - pct(a)}%` })),
+          ...mine.map((it) => { const c = staffColor(it.x.staff_id, it.x.staff_color); return h("div", { class: "pt-bar", title: `${it.x.staff_name} · ${hhmm(it.x.start_at)}–${hhmm(it.x.end_at)}`, style: `left:${pct(it.a)}%;width:${pct(it.b) - pct(it.a)}%;top:${it.lane * 30 + 3}px;background:${c};color:${textOn(c)}` }, `${it.x.first_name || it.x.staff_name} ${hhmm(it.x.start_at)}–${hhmm(it.x.end_at)}`); })));
+    });
+    return h("section", { class: "pt" }, h("h3", {}, t("postsTimeline")), h("div", { class: "pt-scroll" }, h("div", { class: "pt-grid" }, h("div", { class: "pt-row pt-head" }, h("div", { class: "pt-label" }), hoursAxis), ...rows)), h("p", { class: "meta" }, `▨ ${t("postsNobody")}`));
+  };
   const holder = h("div", {});
   const paint = () => {
     const count = (post) => data.shifts.filter((sh) => sh.posts.includes(post.id)).length;
@@ -1791,7 +1816,7 @@ async function renderPostBoard() {
     const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
       h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
       h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}`); return b; })))));
-    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null);
+    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? postTimeline() : null);
   };
   const dayNav = h("div", { class: "weeknav" },
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => { pb.date = addDays(pb.date, -1); render(); } }, "‹"),
@@ -1890,6 +1915,9 @@ async function checklistCard(shiftId, info, test = false) {
   // after each change: when everything is done the tab disappears, so go back to the shifts
   async function refresh() {
     const r = await draw();
+    // keep the badge of the header tab in step with what is left to do
+    const entry = state.checklistShifts?.find((x) => x.id === shiftId);
+    if (entry) { entry.total = r.total; entry.done = r.done; entry.needs_post = r.total === 0; renderChrome(); }
     if (!test && r.total && r.done === r.total) setTimeout(() => { state.view = "mine"; render(); }, 2200);
   }
   await draw();
