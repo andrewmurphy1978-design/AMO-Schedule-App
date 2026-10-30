@@ -2293,7 +2293,7 @@ app.put("/api/shifts/:id/checklist/items", async (c) => {
   if (!ctx || !b.item_id || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
   // the item has to be on one of this shift's lists
   const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
-  if (!lists.some((l) => l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
+  if (!lists.some((l) => l.kind !== "prep" && l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
   await (b.done
     ? ctx.db.batch([ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_done (shift_id, item_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, b.item_id, ctx.me.id, Date.now()),
         ctx.db.prepare("DELETE FROM shift_checklist_issues WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id)])
@@ -2316,7 +2316,7 @@ app.put("/api/shifts/:id/checklist/issues", async (c) => {
   const note = (b.note ?? "").trim();
   if ((b.reason !== "missing_ingredient" && b.reason !== "other") || !note || note.length > 200) return c.json({ error: "invalid_issue" }, 400);
   const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
-  const item = lists.flatMap((l) => l.items.map((i) => ({ ...i, list: l }))).find((i) => i.id === b.item_id);
+  const item = lists.filter((l) => l.kind !== "prep").flatMap((l) => l.items.map((i) => ({ ...i, list: l }))).find((i) => i.id === b.item_id);
   if (!item) return c.json({ error: "not_found" }, 404);
   const wasNew = !item.issue;
   await ctx.db.batch([
@@ -2332,6 +2332,45 @@ app.put("/api/shifts/:id/checklist/issues", async (c) => {
         await pushToStaff(ctx.db, m.id, { title: `${m.lang === "en" ? "Missing ingredient" : "Ingrédient manquant"} · ${rest}`, body: `${ctx.sh.staff_name.split(" ")[0]} : ${note}`.slice(0, 160), url: "/?view=admin&section=checklists", tag: `missing-${ctx.sh.restaurant_id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
     } catch { /* notifications never block */ }
   })());
+  return c.json({ ok: true });
+});
+
+// Prep tasks: a manager assigns a task to someone on a shift (with a time it has to be done by); the person ticks it in the checklist.
+const prepManager = async (ctx: NonNullable<Awaited<ReturnType<typeof checklistShift>>>) => canManage(ctx.db, ctx.me, ctx.sh.restaurant_id, ctx.sh.department_id);
+app.get("/api/shifts/:id/prep", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx) return c.json({ error: "not_found" }, 404);
+  return c.json((await ctx.db.prepare("SELECT id, text_fr AS text, due_at, done_at FROM shift_prep_tasks WHERE shift_id = ? ORDER BY COALESCE(due_at, ''), id").bind(ctx.sh.id).all()).results);
+});
+app.post("/api/shifts/:id/prep", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ text?: string; due_at?: string | null }>().catch(() => ({} as { text?: string; due_at?: string | null }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !(await prepManager(ctx))) return c.json({ error: "not_found" }, 404);
+  const text = (b.text ?? "").trim();
+  if (!text || text.length > 200) return c.json({ error: "invalid_task" }, 400);
+  if (b.due_at && (!SHIFT_TIME_RE.test(b.due_at) || b.due_at < ctx.sh.start_at || b.due_at > ctx.sh.end_at)) return c.json({ error: "invalid_times" }, 400);
+  const n = (await ctx.db.prepare("SELECT COUNT(*) AS n FROM shift_prep_tasks WHERE shift_id = ?").bind(ctx.sh.id).first<{ n: number }>())!.n;
+  if (n >= 30) return c.json({ error: "too_many" }, 400);
+  const due = b.due_at && b.due_at !== ctx.sh.end_at ? b.due_at : null;
+  const r = await ctx.db.prepare("INSERT INTO shift_prep_tasks (shift_id, text_fr, due_at, assigned_by, created_at) VALUES (?, ?, ?, ?, ?)").bind(ctx.sh.id, text, due, ctx.me.id, Date.now()).run();
+  return c.json({ ok: true, id: r.meta.last_row_id });
+});
+app.delete("/api/shifts/:id/prep/:taskId", async (c) => {
+  const id = intParam(c.req.param("id")), taskId = intParam(c.req.param("taskId"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !taskId || !(await prepManager(ctx))) return c.json({ error: "not_found" }, 404);
+  await ctx.db.prepare("DELETE FROM shift_prep_tasks WHERE id = ? AND shift_id = ?").bind(taskId, ctx.sh.id).run();
+  return c.json({ ok: true });
+});
+app.put("/api/shifts/:id/prep/:taskId", async (c) => {
+  const id = intParam(c.req.param("id")), taskId = intParam(c.req.param("taskId"));
+  const b = await c.req.json<{ done?: boolean }>().catch(() => ({} as { done?: boolean }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !taskId || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
+  const r = await ctx.db.prepare("UPDATE shift_prep_tasks SET done_at = ?, done_by = ? WHERE id = ? AND shift_id = ?").bind(b.done ? Date.now() : null, b.done ? ctx.me.id : null, taskId, ctx.sh.id).run();
+  if (!r.meta.changes) return c.json({ error: "not_found" }, 404);
   return c.json({ ok: true });
 });
 
@@ -2353,11 +2392,12 @@ app.get("/api/post-board", async (c) => {
   const posts = (await db.prepare("SELECT p.id, p.code, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists k ON k.target_id = p.id AND k.kind = 'post' AND k.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(me.client_id).all<{ id: number }>()).results;
   const assigned = shifts.length ? (await db.prepare(`SELECT sc.shift_id, k.target_id AS post_id, sc.start_at, sc.end_at FROM shift_checklists sc JOIN checklists k ON k.id = sc.checklist_id AND k.kind = 'post' WHERE sc.shift_id IN (${shifts.map(() => "?").join(",")})`).bind(...shifts.map((x) => x.id)).all<{ shift_id: number; post_id: number; start_at: string | null; end_at: string | null }>()).results : [];
   const skills = shifts.length ? (await db.prepare(`SELECT staff_id, post_id FROM staff_post_skills WHERE staff_id IN (${[...new Set(shifts.map((x) => x.staff_id))].map(() => "?").join(",")})`).bind(...new Set(shifts.map((x) => x.staff_id))).all<{ staff_id: number; post_id: number }>()).results : [];
+  const prepN = new Map((shifts.length ? (await db.prepare(`SELECT shift_id, COUNT(*) AS n FROM shift_prep_tasks WHERE shift_id IN (${shifts.map(() => "?").join(",")}) GROUP BY shift_id`).bind(...shifts.map((x) => x.id)).all<{ shift_id: number; n: number }>()).results : []).map((r) => [r.shift_id, r.n]));
   const withBf = [];
   for (const x of shifts as { id: number; staff_id: number; start_at: string; end_at: string }[]) withBf.push({ ...x, breakfast: await breakfastRelevant(db, restaurantId, x.start_at, x.end_at) });
   // breakfast columns only exist on days when someone's shift overlaps breakfast
   const anyBf = withBf.some((x) => x.breakfast);
-  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
+  return c.json({ posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, prep: prepN.get(x.id) ?? 0, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
 });
 
 // Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.
@@ -2380,7 +2420,8 @@ app.get("/api/my-checklist", async (c) => {
     const kitchen = sh.department_id === "kitchen";
     if (!p.total && !kitchen) continue; // nothing to do for this role
     if (!test && p.total && p.done === p.total) continue; // finished: the tab goes away
-    out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post") });
+    out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post"),
+      next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null });
   }
   return c.json({ test, shifts: out });
 });

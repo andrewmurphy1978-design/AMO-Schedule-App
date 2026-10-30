@@ -42,26 +42,31 @@ export async function sendShiftReminders(env: Env, db: D1Database, nowLocalStr =
     for (const sh of shifts.filter((x) => x.staff_id === r.staff_id)) {
       if (!pubs.has(`${sh.restaurant_id}|${sh.department_id}|${mondayOfDate(sh.start_at.slice(0, 10))}`)) continue;
       const atEnd = r.anchor === "end";
-      const ref = asMs(atEnd ? sh.end_at : sh.start_at);
-      const due = ref - r.minutes_before * 60_000;
-      if (ref <= now || due > now || now - due > GRACE_MIN * 60_000) continue;
-      // "shift ends soon": only for people who still have a checklist to do
+      // "ends soon" points: the end of the shift, and the handover of every post someone leaves before the end of the shift (list still to do)
+      let points: { ref: number; slot: string; what: string[] }[] = [{ ref: asMs(sh.start_at), slot: "", what: [] }];
       if (atEnd) {
         const p = await checklistProgress(db, { id: sh.id, staff_id: sh.staff_id, restaurant_id: sh.restaurant_id, role_id: sh.role_id, start_at: sh.start_at, end_at: sh.end_at }, r.client_id);
+        const pending = p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue));
         const kitchen = sh.department_id === "kitchen";
-        if ((!p.total && !kitchen) || (p.total && p.done === p.total)) continue;
+        const by = new Map<string, string[]>();
+        for (const l of pending) by.set(l.due_at, [...(by.get(l.due_at) ?? []), r.lang === "en" ? l.name_en : l.name_fr]);
+        if (kitchen && !p.lists.some((l) => l.kind === "post") && !by.has(sh.end_at)) by.set(sh.end_at, []);
+        points = [...by].map(([due, what]) => ({ ref: asMs(due), slot: due === sh.end_at ? "" : due, what: what }));
       }
-      const claim = await db.prepare("INSERT OR IGNORE INTO shift_reminder_log (reminder_id, shift_id, sent_at) VALUES (?, ?, ?)").bind(r.id, sh.id, Date.now()).run();
+      for (const pt of points) {
+      const due = pt.ref - r.minutes_before * 60_000;
+      if (pt.ref <= now || due > now || now - due > GRACE_MIN * 60_000) continue;
+      const claim = await db.prepare("INSERT OR IGNORE INTO shift_reminder_log (reminder_id, shift_id, slot, sent_at) VALUES (?, ?, ?, ?)").bind(r.id, sh.id, pt.slot, Date.now()).run();
       if (!claim.meta.changes) continue; // already sent
       let conn = conns.get(r.client_id);
       if (!conn) { conn = await loadConnections(env, db, r.client_id); conns.set(r.client_id, conn); }
       const lang = r.lang === "en" ? "en" : "fr";
-      const build = (channelIsSms: boolean) => atEnd ? T.shiftEndReminder(lang, { minutes: r.minutes_before, restaurant: sh.restaurant, url: `${conn!.appUrl.replace(/\/$/, "")}/?view=checklist`, sms: channelIsSms }) : T.shiftReminder(lang, { minutes: r.minutes_before, restaurant: sh.restaurant, role: lang === "fr" ? sh.name_fr : sh.name_en, start: sh.start_at.slice(11, 16), end: sh.end_at.slice(11, 16), untilClose: !!sh.until_close, url: conn!.appUrl, sms: channelIsSms });
+      const build = (channelIsSms: boolean) => atEnd ? T.shiftEndReminder(lang, { minutes: r.minutes_before, restaurant: sh.restaurant, what: pt.slot ? pt.what.join(", ") : "", url: `${conn!.appUrl.replace(/\/$/, "")}/?view=checklist`, sms: channelIsSms }) : T.shiftReminder(lang, { minutes: r.minutes_before, restaurant: sh.restaurant, role: lang === "fr" ? sh.name_fr : sh.name_en, start: sh.start_at.slice(11, 16), end: sh.end_at.slice(11, 16), untilClose: !!sh.until_close, url: conn!.appUrl, sms: channelIsSms });
       const person = { id: r.staff_id, name: r.name, phone: r.phone, email: r.email, lang: r.lang, notify_channel: r.notify_channel };
       let done = false;
       if (r.channel === "push") {
         const m = build(false);
-        done = (await pushToStaff(db, r.staff_id, { title: m.subject, body: m.short, url: atEnd ? "/?view=checklist" : "/?view=mine", tag: `shift-${sh.id}-${atEnd ? "end" : "start"}` }, { urgent: true, appUrl: conn.appUrl }).catch(() => 0)) > 0;
+        done = (await pushToStaff(db, r.staff_id, { title: m.subject, body: m.short, url: atEnd ? "/?view=checklist" : "/?view=mine", tag: `shift-${sh.id}-${atEnd ? "end" + pt.slot : "start"}` }, { urgent: true, appUrl: conn.appUrl }).catch(() => 0)) > 0;
         if (done) await db.prepare("INSERT INTO notifications (created_at, staff_id, channel, to_addr, subject, body, kind, status) VALUES (?, ?, 'push', NULL, ?, ?, 'shift_reminder', 'sent')").bind(Date.now(), r.staff_id, m.subject, m.text).run();
       } else if (r.channel === "sms" && conn.twilio && r.phone) {
         done = (await deliver(db, conn, "sms", r.phone, build(true), "shift_reminder", r.staff_id)).ok;
@@ -71,6 +76,7 @@ export async function sendShiftReminders(env: Env, db: D1Database, nowLocalStr =
       // chosen way not available (no device, no phone…): the person's usual channel
       if (!done) done = (await notifyStaff(db, conn, person, (_l, ch) => build(ch === "sms"), "shift_reminder_fallback")) === "sent";
       if (done) sent++;
+      }
     }
   }
   // keep the log small

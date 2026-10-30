@@ -1754,7 +1754,7 @@ const insertAtCursor = (input, text) => {
 };
 
 // Put a post on someone for part of the shift only (or take it off). Resolves to { start_at, end_at } (whole shift = both null), { remove: true } or null.
-function postRangeDialog(shift, post, current) {
+function postRangeDialog(shift, post, current, marks = []) {
   return new Promise((resolve) => {
     let dlg = document.getElementById("post-range-modal");
     if (!dlg) { dlg = h("dialog", { id: "post-range-modal" }); document.body.append(dlg); }
@@ -1765,14 +1765,45 @@ function postRangeDialog(shift, post, current) {
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); const a = iso(from.value), z = iso(to.value); if (a >= z || a < shift.start_at || z > shift.end_at) { toast(t("postsRangeInvalid")); return; } finish({ start_at: a, end_at: z }); } },
       h("h2", {}, post), h("p", { class: "meta" }, `${shift.first_name || shift.staff_name} · ${hhmm(shift.start_at)}–${hhmm(shift.end_at)}`),
       h("div", { class: "td-times" }, h("label", { class: "field" }, h("span", {}, t("from")), from), h("label", { class: "field" }, h("span", {}, t("to")), to)),
+      // times when other people arrive or leave: one tap to hand the post over then
+      marks.length ? h("div", { class: "pr-marks" }, marks.flatMap((m) => [
+        h("button", { class: "chip-btn", type: "button", onClick: () => { to.value = hhmm(m); } }, `${t("postsUntilMark")} ${hhmm(m)}`),
+        h("button", { class: "chip-btn", type: "button", onClick: () => { from.value = hhmm(m); } }, `${t("postsFromMark")} ${hhmm(m)}`)])) : null,
       h("button", { class: "btn", type: "button", onClick: () => finish({ start_at: shift.start_at, end_at: shift.end_at }) }, t("postsWholeShift")),
       h("div", { class: "actions" },
-        h("button", { class: "btn danger", type: "button", onClick: () => finish({ remove: true }) }, t("postsRemove")),
+        current ? h("button", { class: "btn danger", type: "button", onClick: () => finish({ remove: true }) }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")),
         h("button", { class: "btn primary", type: "submit" }, t("save")))));
     dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
     dlg.showModal();
   });
+}
+
+// The prep tasks a manager gives to someone on a shift, with the time they are due. The person ticks them in his or her checklist.
+async function prepDialog(shift) {
+  let dlg = document.getElementById("prep-modal");
+  if (!dlg) { dlg = h("dialog", { id: "prep-modal" }); document.body.append(dlg); }
+  const day = dayOf(shift.start_at);
+  const iso = (hm) => `${hm >= hhmm(shift.start_at) ? day : addDays(day, 1)}T${hm}`;
+  const text = h("input", { maxLength: 200, placeholder: t("prepText"), "aria-label": t("prepText") });
+  const due = timeField(hhmm(shift.end_at));
+  const list = h("div", { class: "prep-list" });
+  const load = async () => {
+    const rows = await api(`/shifts/${shift.id}/prep`);
+    list.replaceChildren(...(rows.length ? rows.map((r) => h("div", { class: `prep-row ${r.done_at ? "done" : ""}` },
+      h("span", {}, `${r.done_at ? "✓ " : ""}${r.text}`), h("small", { class: "meta" }, `${t("prepDueBy")} ${hhmm(r.due_at ?? shift.end_at)}`),
+      h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: async () => { if (!(await ask(t("prepRemoveConfirm")))) return; await api(`/shifts/${shift.id}/prep/${r.id}`, { method: "DELETE" }); load(); } }, "✕"))) : [h("p", { class: "meta" }, t("prepNone"))]));
+  };
+  await load();
+  dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
+      e.preventDefault();
+      if (!text.value.trim()) return;
+      try { await api(`/shifts/${shift.id}/prep`, { method: "POST", body: { text: text.value.trim(), due_at: iso(due.value) } }); text.value = ""; await load(); } catch (err) { toast(errorText(err)); }
+    } },
+    h("h2", {}, `📝 ${t("prepTitle")}`), h("p", { class: "meta" }, `${shift.first_name || shift.staff_name} · ${hhmm(shift.start_at)}–${hhmm(shift.end_at)}`), list,
+    h("div", { class: "prep-add" }, text, h("label", { class: "field" }, h("span", {}, t("prepDueBy")), due), h("button", { class: "btn primary", type: "submit" }, t("prepAdd"))),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")))));
+  await new Promise((res) => { dlg.addEventListener("close", res, { once: true }); dlg.showModal(); });
 }
 
 // ---------- Postes du jour: put the kitchen posts on the day's shifts ----------
@@ -1786,19 +1817,24 @@ async function renderPostBoard() {
   const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
   const nowIso = `${ymd(new Date())}T${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`;
   const live = (sh) => sh.start_at <= nowIso && sh.end_at >= nowIso;
+  // arrival / departure times of the other shifts that fall inside this one: where a post can be handed over
+  const marksOf = (sh) => [...new Set(data.shifts.filter((x) => x !== sh).flatMap((x) => [x.start_at, x.end_at]).filter((m) => m > sh.start_at && m < sh.end_at))].sort();
   const toggle = async (sh, post, cell) => {
     cell.disabled = true;
     try {
-      if (!sh.posts.includes(post.id)) {
+      const marks = marksOf(sh);
+      if (!sh.posts.includes(post.id) && !marks.length) {
         await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id } });
         sh.posts = [...sh.posts, post.id];
       } else {
-        // already on it: set the hours of the post within the shift, or take the post off
-        const r = await postRangeDialog(sh, nm(post), sh.ranges?.[post.id]);
-        if (!r) { cell.disabled = false; return; }
+        // set the hours of the post within the shift (offered at once when people arrive or leave during the shift), or take the post off
+        const was = sh.posts.includes(post.id);
+        const r = await postRangeDialog(sh, nm(post), was ? sh.ranges?.[post.id] ?? { start_at: sh.start_at, end_at: sh.end_at } : null, marks);
+        if (!r || (r.remove && !was)) { cell.disabled = false; return; }
         if (r.remove) { await api(`/shifts/${sh.id}/checklist/posts/${post.id}`, { method: "DELETE" }); sh.posts = sh.posts.filter((x) => x !== post.id); delete sh.ranges?.[post.id]; }
         else {
           await api(`/shifts/${sh.id}/checklist/posts`, { method: "POST", body: { post_id: post.id, start_at: r.start_at, end_at: r.end_at } });
+          if (!was) sh.posts = [...sh.posts, post.id];
           sh.ranges = { ...(sh.ranges ?? {}) };
           if (r.start_at === sh.start_at && r.end_at === sh.end_at) delete sh.ranges[post.id]; else sh.ranges[post.id] = r;
         }
@@ -1831,11 +1867,28 @@ async function renderPostBoard() {
     });
     return h("section", { class: "pt" }, h("h3", {}, t("postsTimeline")), h("div", { class: "pt-scroll" }, h("div", { class: "pt-grid" }, h("div", { class: "pt-row pt-head" }, h("div", { class: "pt-label" }), hoursAxis), ...rows)), h("p", { class: "meta" }, `▨ ${t("postsNobody")}`));
   };
+  const prepButton = (sh) => h("button", { type: "button", class: "pb-prep", title: t("prepTitle"), "aria-label": `${t("prepTitle")} · ${sh.first_name || sh.staff_name}`, onClick: async () => { await prepDialog(sh); try { sh.prep = (await api(`/shifts/${sh.id}/prep`)).length; } catch { /* keep */ } paint(); } }, `📝${sh.prep ? ` ${sh.prep}` : ""}`);
+  // who arrives / leaves a post at each time someone starts: the posts nobody holds from then on are to be covered
+  const handovers = () => {
+    const covered = (p, at) => data.shifts.some((x) => x.posts.includes(p.id) && (x.ranges?.[p.id]?.start_at ?? x.start_at) <= at && at < (x.ranges?.[p.id]?.end_at ?? x.end_at));
+    const first = data.shifts.reduce((m, x) => (x.start_at < m ? x.start_at : m), "9");
+    const times = [...new Set(data.shifts.map((x) => x.start_at))].filter((a) => a > first).sort();
+    if (!times.length) return null;
+    return h("section", { class: "pb-handover" }, h("h3", {}, t("postsHandover")), h("p", { class: "meta" }, t("postsHandoverHelp")),
+      times.map((at) => {
+        const arriving = data.shifts.filter((x) => x.start_at === at), leaving = data.posts.filter((p) => data.shifts.some((x) => x.posts.includes(p.id) && (x.ranges?.[p.id]?.end_at ?? x.end_at) === at));
+        const open = data.posts.filter((p) => (p.kind !== "breakfast") && !covered(p, at));
+        return h("div", { class: `pb-ho ${open.length ? "warn" : "ok"}` }, h("b", {}, hhmm(at)),
+          h("span", {}, `${arriving.map((x) => x.first_name || x.staff_name).join(", ")} ${t("postsArrive")}`),
+          leaving.length ? h("small", {}, `${leaving.map(nm).join(", ")} : ${t("postsLeave")}`) : null,
+          open.length ? h("small", { class: "pb-ho-open" }, `⚠ ${open.map(nm).join(", ")} ${t("postsUncovered")}`) : h("small", {}, "✓"));
+      }));
+  };
   const holder = h("div", {});
   const paint = () => {
     const count = (post) => data.shifts.filter((sh) => sh.posts.includes(post.id)).length;
     const row = (sh) => h("tr", { class: live(sh) ? "live" : "" },
-      h("th", { class: "pb-who", scope: "row" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 30), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
+      h("th", { class: "pb-who", scope: "row" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 30), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`)), prepButton(sh)),
       data.posts.map((p) => {
         const on = sh.posts.includes(p.id);
         if (p.kind === "breakfast" && !sh.breakfast && !on) return h("td", {}, h("span", { class: "pb-na", title: t("postsBreakfastClosed") }, "–"));
@@ -1847,9 +1900,9 @@ async function renderPostBoard() {
       h("tbody", {}, data.shifts.map(row)))) : h("div", { class: "empty" }, t("postsNoShifts"));
     // phone: one card per shift with the posts as chips
     const cards = h("div", { class: "pb-cards" }, data.shifts.map((sh) => h("div", { class: `card pb-card ${live(sh) ? "live" : ""}` },
-      h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`))),
+      h("div", { class: "pb-who" }, avatar(sh.staff_id, sh.staff_name, sh.staff_color, sh.photo_v, 34), h("span", {}, h("b", {}, sh.first_name || sh.staff_name), h("small", {}, `${hhmm(sh.start_at)}–${sh.until_close ? "F" : hhmm(sh.end_at)}${live(sh) ? ` · ${t("postsNow")}` : ""}`)), prepButton(sh)),
       h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = sh.posts.includes(p.id); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}${on && sh.ranges?.[p.id] ? ` ${hhmm(sh.ranges[p.id].start_at)}–${hhmm(sh.ranges[p.id].end_at)}` : ""}`); return b; })))));
-    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? postTimeline() : null);
+    holder.replaceChildren(table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? handovers() : null, data.shifts.length ? postTimeline() : null);
   };
   const dayNav = h("div", { class: "weeknav" },
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => { pb.date = addDays(pb.date, -1); render(); } }, "‹"),
@@ -1903,6 +1956,7 @@ async function checklistCard(shiftId, info, test = false) {
   const lang = getLang();
   const txt = (o) => (lang === "en" ? o.text_en || o.text_fr : o.text_fr);
   const nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
+  const dueSoon = (at) => { const n = new Date(); return `${ymd(n)}T${pad(n.getHours())}:${pad(n.getMinutes())}` >= new Date(Date.parse(`${at}:00Z`) - 30 * 60000).toISOString().slice(0, 16); };
   async function draw() {
     const d = await api(`/shifts/${shiftId}/checklist`);
     const total = d.lists.reduce((n, l) => n + l.items.length, 0), done = d.lists.reduce((n, l) => n + l.items.filter((i) => i.done || i.issue).length, 0);
@@ -1921,16 +1975,22 @@ async function checklistCard(shiftId, info, test = false) {
           } else await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } });
           await refresh();
         } }, `${p.picked ? "✓ " : ""}${nm(p)}`)))) : null,
-      ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l), l.start_at ? h("small", { class: "meta" }, ` · ${hhmm(l.start_at)}–${hhmm(l.end_at)}`) : null),
+      ...d.lists.map((l) => h("div", { class: `cl-list ${l.kind === "prep" ? "prep" : ""}` }, h("h3", {}, l.kind === "prep" ? `📝 ${t("prepTitle")}` : nm(l), l.start_at ? h("small", { class: "meta" }, ` · ${hhmm(l.start_at)}–${hhmm(l.end_at)}`) : null),
+        // a post handed over before the end of the shift: its list is due at the handover
+        l.due_at < d.shift.end_at && l.kind !== "prep" ? h("div", { class: `cl-due ${dueSoon(l.due_at) ? "soon" : ""}` }, `⏰ ${t("checklistDueBy")} ${hhmm(l.due_at)}`) : null,
         ...l.items.map((it) => h("div", { class: `cl-item-wrap ${it.issue ? "issue" : ""}` },
           h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
             h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
               const input = e.target;
-              try { await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } }); await refresh(); }
+              try {
+                if (l.kind === "prep") await api(`/shifts/${shiftId}/prep/${it.id}`, { method: "PUT", body: { done: input.checked } });
+                else await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } });
+                await refresh();
+              }
               catch (err) { input.checked = !input.checked; toast(errorText(err)); }
-            } }), h("span", {}, txt(it)),
+            } }), h("span", {}, txt(it)), l.kind === "prep" && it.due_at ? h("small", { class: "meta" }, ` · ${t("prepDueBy")} ${hhmm(it.due_at)}`) : null,
             // could not finish it: say why (missing ingredients…)
-            h("button", { type: "button", class: "cl-issue-btn", title: t("checklistCannot"), "aria-label": t("checklistCannot"), onClick: async (e) => {
+            l.kind === "prep" ? null : h("button", { type: "button", class: "cl-issue-btn", title: t("checklistCannot"), "aria-label": t("checklistCannot"), onClick: async (e) => {
               e.preventDefault();
               const r = await issueDialog(txt(it), it.issue);
               if (!r) return;

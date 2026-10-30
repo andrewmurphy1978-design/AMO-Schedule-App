@@ -107,8 +107,12 @@ export const T = {
   },
 
   /** "Your shift ends soon": a nudge to do the end-of-shift checklist. */
-  shiftEndReminder: (l: Lang, c: { minutes: number; restaurant: string; url: string; sms: boolean }): Msg & { short: string } => {
+  shiftEndReminder: (l: Lang, c: { minutes: number; restaurant: string; url: string; sms: boolean; what?: string }): Msg & { short: string } => {
     const dur = durationText(c.minutes, l);
+    // a post handed over before the end of the shift: the list of that post is due, not the whole shift
+    if (c.what !== undefined && c.what !== "") return l === "fr"
+      ? { subject: `✅ Relève dans ${dur}`, short: `Fais ta liste : ${c.what} · ${c.restaurant}`, text: `Mikes: la relève arrive dans ${dur}. Fais ta liste de fin de poste (${c.what}) · ${c.restaurant}.${c.sms || !c.url ? "" : `\n${c.url}`}` }
+      : { subject: `✅ Handover in ${dur}`, short: `Do your list: ${c.what} · ${c.restaurant}`, text: `Mikes: the next crew arrives in ${dur}. Do your end-of-post list (${c.what}) · ${c.restaurant}.${c.sms || !c.url ? "" : `\n${c.url}`}` };
     return l === "fr"
       ? { subject: `✅ Ton quart se termine dans ${dur}`, short: `Pense à ta liste de fin de quart · ${c.restaurant}`, text: `Mikes: ton quart se termine dans ${dur}. Pense à ta liste de fin de quart (${c.restaurant}).${c.sms || !c.url ? "" : `\n${c.url}`}` }
       : { subject: `✅ Your shift ends in ${dur}`, short: `Remember your end-of-shift checklist · ${c.restaurant}`, text: `Mikes: your shift ends in ${dur}. Remember your end-of-shift checklist (${c.restaurant}).${c.sms || !c.url ? "" : `\n${c.url}`}` };
