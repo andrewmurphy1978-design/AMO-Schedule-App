@@ -951,3 +951,8 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 @media (max-width:899px){.pb-scroll{display:none}.pb-cards{display:block}}
 @media (min-width:900px) and (max-width:1500px){#main-tabs button{padding:0 .5rem;font-size:.9rem}#main-tabs .tab-ic{margin-right:.25rem;font-size:.95rem}.nav-badge{margin-left:.25rem}}
 .pb-na{color:var(--muted);opacity:.5}
+
+.cl-item-wrap{margin:.3rem 0}.cl-item-wrap .cl-item{margin:0}.cl-item-wrap.issue .cl-item{border-color:#d97706;background:color-mix(in srgb,#f59e0b 12%,var(--card))}
+.cl-issue-btn{margin-left:auto;border:0;background:none;font-size:1.15rem;cursor:pointer;padding:.2rem .4rem;opacity:.55}.cl-issue-btn:hover,.cl-item-wrap.issue .cl-issue-btn{opacity:1}
+.cl-issue{font-size:.88rem;color:#92400e;padding:.25rem .6rem 0 2.4rem}@media (prefers-color-scheme:dark){.cl-issue{color:#fcd34d}}
+small.cl-issue{display:block;grid-column:1/-1;padding:0}

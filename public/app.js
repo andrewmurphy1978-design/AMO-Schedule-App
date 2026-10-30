@@ -1804,6 +1804,32 @@ async function renderPostBoard() {
     dayNav, holder));
 }
 
+// "I could not complete this task": why, and which ingredients are missing. Resolves to { reason, note }, { remove: true } or null.
+function issueDialog(taskText, current) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("issue-modal");
+    if (!dlg) { dlg = h("dialog", { id: "issue-modal" }); document.body.append(dlg); }
+    let done = false; const finish = (v) => { if (done) return; done = true; resolve(v); dlg.close(); };
+    let reason = current?.reason ?? "missing_ingredient";
+    const note = h("input", { maxLength: 200, value: current?.note ?? "", required: true, autocomplete: "off" });
+    const label = h("span", {});
+    const sync = () => { label.textContent = reason === "missing_ingredient" ? t("checklistWhichIng") : t("checklistWhy"); note.placeholder = reason === "missing_ingredient" ? t("checklistIngExample") : ""; };
+    const radios = [["missing_ingredient", t("checklistMissingIng")], ["other", t("checklistOtherReason")]].map(([v, l]) =>
+      h("label", { class: "reason" }, h("input", { type: "radio", name: "issue-reason", value: v, checked: v === reason, onChange: () => { reason = v; sync(); } }), h("span", {}, l)));
+    sync();
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: (e) => { e.preventDefault(); if (note.value.trim()) finish({ reason, note: note.value.trim() }); } },
+      h("h2", {}, t("checklistCannot")), h("p", { class: "meta" }, taskText),
+      h("div", { class: "reason-list", role: "radiogroup" }, radios),
+      h("label", { class: "field" }, label, note),
+      h("div", { class: "actions" },
+        current ? h("button", { class: "btn danger", type: "button", onClick: () => finish({ remove: true }) }, t("checklistRemoveIssue")) : null,
+        h("button", { class: "btn", type: "button", onClick: () => finish(null) }, t("cancel")),
+        h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.addEventListener("close", () => { if (!done) { done = true; resolve(null); } }, { once: true });
+    dlg.showModal(); note.focus();
+  });
+}
+
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
 async function renderChecklist() {
@@ -1821,7 +1847,7 @@ async function checklistCard(shiftId, info, test = false) {
   const nm = (o) => (lang === "en" ? o.name_en : o.name_fr);
   async function draw() {
     const d = await api(`/shifts/${shiftId}/checklist`);
-    const total = d.lists.reduce((n, l) => n + l.items.length, 0), done = d.lists.reduce((n, l) => n + l.items.filter((i) => i.done).length, 0);
+    const total = d.lists.reduce((n, l) => n + l.items.length, 0), done = d.lists.reduce((n, l) => n + l.items.filter((i) => i.done || i.issue).length, 0);
     const bar = h("div", { class: "cl-progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": done }, h("span", { style: `width:${total ? (done / total) * 100 : 0}%` }));
     card.replaceChildren(
       h("div", { class: "cl-head" }, h("b", {}, `${info?.restaurant ?? ""} · ${dayOf(d.shift.start_at) === ymd(new Date()) ? "" : `${fmt(dayOf(d.shift.start_at), { weekday: "short", day: "numeric", month: "short" })} `}${hhmm(d.shift.start_at)}–${hhmm(d.shift.end_at)}`), h("span", { class: "meta" }, total ? `${done}/${total}` : "")),
@@ -1838,12 +1864,25 @@ async function checklistCard(shiftId, info, test = false) {
           await refresh();
         } }, `${p.picked ? "✓ " : ""}${nm(p)}`)))) : null,
       ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l)),
-        ...l.items.map((it) => h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
-          h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
-            const input = e.target;
-            try { await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } }); await refresh(); }
-            catch (err) { input.checked = !input.checked; toast(errorText(err)); }
-          } }), h("span", {}, txt(it)))))),
+        ...l.items.map((it) => h("div", { class: `cl-item-wrap ${it.issue ? "issue" : ""}` },
+          h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
+            h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
+              const input = e.target;
+              try { await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } }); await refresh(); }
+              catch (err) { input.checked = !input.checked; toast(errorText(err)); }
+            } }), h("span", {}, txt(it)),
+            // could not finish it: say why (missing ingredients…)
+            h("button", { type: "button", class: "cl-issue-btn", title: t("checklistCannot"), "aria-label": t("checklistCannot"), onClick: async (e) => {
+              e.preventDefault();
+              const r = await issueDialog(txt(it), it.issue);
+              if (!r) return;
+              try {
+                if (r.remove) await api(`/shifts/${shiftId}/checklist/issues/${it.id}`, { method: "DELETE" });
+                else await api(`/shifts/${shiftId}/checklist/issues`, { method: "PUT", body: { item_id: it.id, reason: r.reason, note: r.note } });
+                await refresh();
+              } catch (err) { toast(errorText(err)); }
+            } }, "⚠️")),
+          it.issue ? h("div", { class: "cl-issue" }, h("b", {}, it.issue.reason === "missing_ingredient" ? `${t("checklistMissingIng")} : ` : `${t("checklistOtherReason")} : `), it.issue.note) : null)))),
       !d.lists.length ? h("p", { class: "cl-pick-hint" }, `👆 ${t("checklistPickPost")}`) : null,
       total && done === total ? h("div", { class: "okmsg" }, `🎉 ${t("checklistComplete")}`) : null);
     return { total, done };
@@ -2991,6 +3030,7 @@ function checklistsPanel() {
       report.length ? h("div", { class: "cl-report" }, report.map((r) => h("div", { class: `cl-report-row ${r.total && r.done === r.total ? "ok" : ""}` },
         h("b", {}, r.staff_name), h("span", { class: "meta" }, `${r.restaurant} · ${lang === "en" ? r.role_en : r.role_fr} · ${hhmm(r.start_at)}–${hhmm(r.end_at)}`),
         h("span", { class: "cl-score" }, r.total ? `${r.done}/${r.total}` : t("checklistNoPost")),
+        r.issues?.length ? h("small", { class: "cl-issue" }, r.issues.map((x) => `⚠ ${x.reason === "missing_ingredient" ? t("checklistMissingIng") : t("checklistOtherReason")} : ${x.note} (${lang === "en" ? x.text_en || x.text_fr : x.text_fr})`).join(" · ")) : null,
         r.missing.length && r.done ? h("small", { class: "meta" }, `${t("checklistMissing")} : ${r.missing.map((m) => (lang === "en" ? m.text_en || m.text_fr : m.text_fr)).join(" · ")}`) : null))) : h("p", { class: "meta" }, t("checklistNoShifts")));
   }
   load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));

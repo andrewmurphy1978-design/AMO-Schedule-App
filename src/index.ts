@@ -13,7 +13,7 @@ import { DEFAULT_BOUNDARIES, GRID_KEYS, hoursFor } from "../public/coverage.js";
 import { resolveForDate } from "../public/rules.js";
 // @ts-ignore plain JS module shared with the browser
 import { splitName, joinName, genderedRole } from "../public/names.js";
-import { loadConnections, deliver, notifyStaff, type StaffContact } from "./notify.ts";
+import { loadConnections, deliver, notifyStaff, managersOf, type StaffContact } from "./notify.ts";
 import { getVapid, pushToStaff } from "./push.ts";
 import { listsForShift, progress as checklistProgress } from "./checklists.ts";
 import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminders.ts";
@@ -2288,8 +2288,43 @@ app.put("/api/shifts/:id/checklist/items", async (c) => {
   const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
   if (!lists.some((l) => l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
   await (b.done
-    ? ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_done (shift_id, item_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, b.item_id, ctx.me.id, Date.now())
-    : ctx.db.prepare("DELETE FROM shift_checklist_done WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id)).run();
+    ? ctx.db.batch([ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_done (shift_id, item_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, b.item_id, ctx.me.id, Date.now()),
+        ctx.db.prepare("DELETE FROM shift_checklist_issues WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id)])
+    : ctx.db.prepare("DELETE FROM shift_checklist_done WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id).run());
+  return c.json({ ok: true });
+});
+// "I could not finish this": say why (typically which ingredients are missing). The task then counts as handled; the kitchen managers are told.
+app.delete("/api/shifts/:id/checklist/issues/:itemId", async (c) => {
+  const id = intParam(c.req.param("id")), itemId = intParam(c.req.param("itemId"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !itemId) return c.json({ error: "not_found" }, 404);
+  await ctx.db.prepare("DELETE FROM shift_checklist_issues WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, itemId).run();
+  return c.json({ ok: true });
+});
+app.put("/api/shifts/:id/checklist/issues", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ item_id?: number; reason?: string; note?: string }>().catch(() => ({} as { item_id?: number; reason?: string; note?: string }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !b.item_id) return c.json({ error: "not_found" }, 404);
+  const note = (b.note ?? "").trim();
+  if ((b.reason !== "missing_ingredient" && b.reason !== "other") || !note || note.length > 200) return c.json({ error: "invalid_issue" }, 400);
+  const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
+  const item = lists.flatMap((l) => l.items.map((i) => ({ ...i, list: l }))).find((i) => i.id === b.item_id);
+  if (!item) return c.json({ error: "not_found" }, 404);
+  const wasNew = !item.issue;
+  await ctx.db.batch([
+    ctx.db.prepare("DELETE FROM shift_checklist_done WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id),
+    ctx.db.prepare("INSERT INTO shift_checklist_issues (shift_id, item_id, reason, note, reported_by, reported_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (shift_id, item_id) DO UPDATE SET reason = excluded.reason, note = excluded.note, reported_by = excluded.reported_by, reported_at = excluded.reported_at")
+      .bind(ctx.sh.id, b.item_id, b.reason, note, ctx.me.id, Date.now()),
+  ]);
+  // missing ingredients: tell the kitchen managers right away
+  if (wasNew && b.reason === "missing_ingredient") c.executionCtx.waitUntil((async () => {
+    try {
+      const rest = (await ctx.db.prepare("SELECT name FROM restaurants WHERE id = ?").bind(ctx.sh.restaurant_id).first<{ name: string }>())?.name ?? "";
+      for (const m of await managersOf(ctx.db, ctx.sh.restaurant_id, "kitchen")) if (m.id !== ctx.me.id)
+        await pushToStaff(ctx.db, m.id, { title: `${m.lang === "en" ? "Missing ingredient" : "Ingrédient manquant"} · ${rest}`, body: `${ctx.sh.staff_name.split(" ")[0]} : ${note}`.slice(0, 160), url: "/?view=admin&section=checklists", tag: `missing-${ctx.sh.restaurant_id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+    } catch { /* notifications never block */ }
+  })());
   return c.json({ ok: true });
 });
 
@@ -2394,7 +2429,8 @@ app.get("/api/admin/checklist-report", requireAdmin, async (c) => {
     const p = await checklistProgress(db, sh, cid);
     if (!p.total && !(await db.prepare("SELECT 1 FROM roles WHERE id = ? AND department_id = 'kitchen'").bind(sh.role_id).first())) continue;
     rows.push({ shift_id: sh.id, staff_name: sh.staff_name, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done,
-      missing: p.lists.flatMap((l) => l.items.filter((i) => !i.done).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en }))) });
+      missing: p.lists.flatMap((l) => l.items.filter((i) => !i.done && !i.issue).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en }))),
+      issues: p.lists.flatMap((l) => l.items.filter((i) => i.issue).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en, reason: i.issue!.reason, note: i.issue!.note }))) });
   }
   return c.json(rows);
 });

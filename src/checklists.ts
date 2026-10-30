@@ -3,7 +3,8 @@
 // department to leave that day (e.g. the last delivery driver closes the day).
 
 export interface ShiftRef { id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string }
-export interface Item { id: number; text_fr: string; text_en: string | null; last_out: number; done: boolean }
+export interface Issue { reason: string; note: string }
+export interface Item { id: number; text_fr: string; text_en: string | null; last_out: number; done: boolean; issue: Issue | null }
 export interface ShiftList { checklist_id: number; kind: "post" | "role"; target_id: number; name_fr: string; name_en: string; removable: boolean; items: Item[] }
 
 export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: number): Promise<ShiftList[]> {
@@ -26,6 +27,7 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
   if (!all.length) return [];
   const items = (await db.prepare(`SELECT id, checklist_id, text_fr, text_en, last_out FROM checklist_items WHERE checklist_id IN (${all.map(() => "?").join(",")}) ORDER BY position, id`).bind(...all.map((x) => x.id)).all<{ id: number; checklist_id: number; text_fr: string; text_en: string | null; last_out: number }>()).results;
   const done = new Set((await db.prepare("SELECT item_id FROM shift_checklist_done WHERE shift_id = ?").bind(shift.id).all<{ item_id: number }>()).results.map((r) => r.item_id));
+  const issues = new Map((await db.prepare("SELECT item_id, reason, note FROM shift_checklist_issues WHERE shift_id = ?").bind(shift.id).all<{ item_id: number; reason: string; note: string }>()).results.map((r) => [r.item_id, { reason: r.reason, note: r.note }]));
   // "last one to leave": nobody else of the same department finishes later that day at this restaurant
   const lastOut = new Map<string, boolean>();
   const isLast = async (dept: string) => {
@@ -44,16 +46,16 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
     const mine: Item[] = [];
     for (const it of items.filter((x) => x.checklist_id === l.id)) {
       if (it.last_out && !(l.department_id && (await isLast(l.department_id)))) continue;
-      mine.push({ ...it, done: done.has(it.id) });
+      mine.push({ ...it, done: done.has(it.id), issue: issues.get(it.id) ?? null });
     }
     out.push({ checklist_id: l.id, kind: l.kind, target_id: l.target_id, name_fr: l.name_fr, name_en: l.name_en, removable: l.removable, items: mine });
   }
   return out;
 }
 
-/** Done / total over every list of the shift, and whether the person works in the kitchen (and so picks a post). */
+/** Done / total over every list of the shift. A task reported as not completable (missing ingredient…) counts as handled. */
 export async function progress(db: D1Database, shift: ShiftRef, clientId: number) {
   const lists = await listsForShift(db, shift, clientId);
-  const total = lists.reduce((n, l) => n + l.items.length, 0), done = lists.reduce((n, l) => n + l.items.filter((i) => i.done).length, 0);
+  const total = lists.reduce((n, l) => n + l.items.length, 0), done = lists.reduce((n, l) => n + l.items.filter((i) => i.done || i.issue).length, 0);
   return { total, done, lists };
 }
