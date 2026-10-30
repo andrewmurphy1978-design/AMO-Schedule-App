@@ -935,3 +935,6 @@ button.vtl-cell.picked{outline:2px solid var(--brand,#da291c);outline-offset:-2p
 
 .reminder-sels{grid-template-columns:1fr 1fr 1fr}@media (max-width:600px){.reminder-sels{grid-template-columns:1fr}}
 .test-banner{margin:.4rem 0 .8rem}.cl-test{margin:.4rem 0}
+
+.cl-posts-title{font-weight:700;margin-bottom:.35rem}.cl-posts-box{padding:.6rem;border:1px dashed var(--line);border-radius:10px}
+.chip-btn.on{background:var(--brand);border-color:var(--brand);color:#fff}.cl-pick-hint{margin:.4rem 0;color:var(--muted)}

@@ -1758,11 +1758,17 @@ async function checklistCard(shiftId, info, test = false) {
     card.replaceChildren(
       h("div", { class: "cl-head" }, h("b", {}, `${info?.restaurant ?? ""} · ${dayOf(d.shift.start_at) === ymd(new Date()) ? "" : `${fmt(dayOf(d.shift.start_at), { weekday: "short", day: "numeric", month: "short" })} `}${hhmm(d.shift.start_at)}–${hhmm(d.shift.end_at)}`), h("span", { class: "meta" }, total ? `${done}/${total}` : "")),
       total ? bar : null,
-      // kitchen: pick the post(s) worked this shift
-      d.posts_available.length || d.lists.some((l) => l.kind === "post") ? h("div", { class: "cl-posts" },
-        h("span", { class: "meta" }, t("checklistMyPost")),
-        ...d.lists.filter((l) => l.kind === "post").map((l) => h("button", { type: "button", class: "chip-btn on", title: t("checklistRemovePost"), onClick: async () => { if (l.items.some((i) => i.done) && !(await ask(t("checklistRemovePostConfirm")))) return; await api(`/shifts/${shiftId}/checklist/posts/${l.target_id}`, { method: "DELETE" }); await refresh(); } }, `${nm(l)} ✕`)),
-        ...d.posts_available.map((p) => h("button", { type: "button", class: "chip-btn", onClick: async () => { await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } }); await refresh(); } }, `+ ${nm(p)}`))) : null,
+      // kitchen: the posts are not in the schedule, so the employee ticks the post(s) he worked and the list below follows
+      d.posts.length ? h("div", { class: "cl-posts-box" },
+        h("div", { class: "cl-posts-title" }, t("checklistMyPost")),
+        h("div", { class: "cl-posts", role: "group", "aria-label": t("checklistMyPost") }, d.posts.map((p) => h("button", { type: "button", class: `chip-btn ${p.picked ? "on" : ""}`, "aria-pressed": String(p.picked), onClick: async () => {
+          const list = d.lists.find((l) => l.kind === "post" && l.target_id === p.id);
+          if (p.picked) {
+            if (list?.items.some((i) => i.done) && !(await ask(t("checklistRemovePostConfirm")))) return;
+            await api(`/shifts/${shiftId}/checklist/posts/${p.id}`, { method: "DELETE" });
+          } else await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } });
+          await refresh();
+        } }, `${p.picked ? "✓ " : ""}${nm(p)}`)))) : null,
       ...d.lists.map((l) => h("div", { class: "cl-list" }, h("h3", {}, nm(l)),
         ...l.items.map((it) => h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
           h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
@@ -1770,7 +1776,7 @@ async function checklistCard(shiftId, info, test = false) {
             try { await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } }); await refresh(); }
             catch (err) { input.checked = !input.checked; toast(errorText(err)); }
           } }), h("span", {}, txt(it)))))),
-      !d.lists.length ? h("p", { class: "meta" }, t("checklistPickPost")) : null,
+      !d.lists.length ? h("p", { class: "cl-pick-hint" }, `👆 ${t("checklistPickPost")}`) : null,
       total && done === total ? h("div", { class: "okmsg" }, `🎉 ${t("checklistComplete")}`) : null);
     return { total, done };
   }

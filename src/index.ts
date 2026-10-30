@@ -2239,8 +2239,8 @@ app.get("/api/shifts/:id/checklist", async (c) => {
   // kitchen workers choose the post(s) they worked
   const kitchen = (await ctx.db.prepare("SELECT 1 FROM roles WHERE id IN (SELECT ?1 UNION SELECT role_id FROM shift_roles WHERE shift_id = ?2 UNION SELECT role_id FROM shift_segments WHERE shift_id = ?2) AND department_id = 'kitchen' LIMIT 1").bind(ctx.sh.role_id, ctx.sh.id).first()) ? true : false;
   const picked = new Set(lists.filter((l) => l.kind === "post").map((l) => l.target_id));
-  const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string }>()).results.filter((p) => !picked.has(p.id)) : [];
-  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, editable: ctx.owner || ctx.me.is_admin || true, lists, posts_available: posts });
+  const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string }>()).results.map((p) => ({ ...p, picked: picked.has(p.id) })) : [];
+  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts });
 });
 app.post("/api/shifts/:id/checklist/posts", async (c) => {
   const id = intParam(c.req.param("id"));
