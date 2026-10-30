@@ -998,3 +998,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .ing-matrix .ing-name{border:1px solid transparent;background:transparent;font-weight:600;width:100%;min-width:10rem}.ing-matrix .ing-name:hover,.ing-matrix .ing-name:focus{border-color:var(--line);background:#fff}
 .restock-cat h4{margin:.7rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
 .restock-group{display:block !important}.restock-group .restock-cat .cl-posts{margin:0}
+.ca-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.6rem 1.2rem;margin:.6rem 0}.ca-resto h5{margin:.2rem 0}.ca-resto .check{display:flex;margin:.25rem 0}

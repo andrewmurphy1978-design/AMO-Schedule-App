@@ -967,6 +967,34 @@ app.put("/api/staff/:id/view-access", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
+// Which communities an employee sees (administrators only to change). "auto" = the ones of their roles.
+app.get("/api/staff/:id/community-access", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id")), cid = c.get("me").client_id, db = c.env.DB;
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const row = await db.prepare("SELECT community_custom FROM staff WHERE id = ?").bind(id).first<{ community_custom: number }>();
+  if (!row) return c.json({ error: "not_found" }, 404);
+  const communities = (await db.prepare("SELECT c.id, c.name, c.restaurant_id, r.name AS restaurant FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE r.client_id = ? ORDER BY r.name, c.position, c.id").bind(cid).all<{ id: number; name: string; restaurant_id: number; restaurant: string }>()).results;
+  const ids = (await db.prepare("SELECT community_id FROM staff_community_access WHERE staff_id = ?").bind(id).all<{ community_id: number }>()).results.map((r) => r.community_id);
+  const auto = (await db.prepare(
+    `SELECT DISTINCT c.id FROM communities c JOIN restaurants r ON r.id = c.restaurant_id JOIN community_departments cd ON cd.community_id = c.id JOIN roles ro ON ro.department_id = cd.department_id
+     JOIN staff_roles sr ON sr.role_id = ro.id AND sr.restaurant_id = c.restaurant_id WHERE sr.staff_id = ? AND r.client_id = ?`,
+  ).bind(id, cid).all<{ id: number }>()).results.map((r) => r.id);
+  return c.json({ custom: row.community_custom === 1, ids, auto, communities });
+});
+app.put("/api/staff/:id/community-access", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id")), cid = c.get("me").client_id, db = c.env.DB;
+  const b = await c.req.json<{ custom?: boolean; ids?: number[] }>().catch(() => ({} as { custom?: boolean; ids?: number[] }));
+  if (!id || typeof b.custom !== "boolean" || !Array.isArray(b.ids) || b.ids.length > 200 || b.ids.some((x) => !Number.isInteger(x))) return c.json({ error: "bad_request" }, 400);
+  const own = new Set((await db.prepare("SELECT c.id FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE r.client_id = ?").bind(cid).all<{ id: number }>()).results.map((r) => r.id));
+  const ids = b.custom ? [...new Set(b.ids)].filter((x) => own.has(x)) : [];
+  await db.batch([
+    db.prepare("UPDATE staff SET community_custom = ? WHERE id = ?").bind(b.custom ? 1 : 0, id),
+    db.prepare("DELETE FROM staff_community_access WHERE staff_id = ?").bind(id),
+    ...ids.map((x) => db.prepare("INSERT OR IGNORE INTO staff_community_access (staff_id, community_id) VALUES (?, ?)").bind(id, x)),
+  ]);
+  return c.json({ ok: true });
+});
+
 // ---------- Staff (admin) ----------
 app.get("/api/staff", async (c) => {
   const me = c.get("me");
@@ -2620,12 +2648,15 @@ const COMMUNITY_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 type CommunityRow = { id: number; name: string; restaurant_id: number; restaurant: string; position: number };
 async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null; departments: string[] })[]> {
   const base = "SELECT DISTINCT c.id, c.name, c.restaurant_id, r.name AS restaurant, c.position FROM communities c JOIN restaurants r ON r.id = c.restaurant_id";
+  const custom = !me.is_admin && (await db.prepare("SELECT community_custom FROM staff WHERE id = ?").bind(me.id).first<{ community_custom: number }>())?.community_custom === 1;
+  const byRole = `${base} JOIN community_departments cd ON cd.community_id = c.id JOIN roles ro ON ro.department_id = cd.department_id
+             JOIN staff_roles sr ON sr.role_id = ro.id AND sr.restaurant_id = c.restaurant_id WHERE sr.staff_id = ?1 AND r.client_id = ?2`;
+  const picked = `${base} JOIN staff_community_access a ON a.community_id = c.id WHERE a.staff_id = ?1 AND r.client_id = ?2`;
   const rows = me.is_admin
     ? (await db.prepare(`${base} WHERE r.client_id = ? ORDER BY r.name, c.position, c.id`).bind(me.client_id).all<CommunityRow>()).results
     : (await db.prepare(
         `SELECT * FROM (
-           ${base} JOIN community_departments cd ON cd.community_id = c.id JOIN roles ro ON ro.department_id = cd.department_id
-             JOIN staff_roles sr ON sr.role_id = ro.id AND sr.restaurant_id = c.restaurant_id WHERE sr.staff_id = ?1 AND r.client_id = ?2
+           ${custom ? picked : byRole}
            UNION
            ${base} JOIN community_departments cd ON cd.community_id = c.id JOIN managers m ON m.department_id = cd.department_id AND m.restaurant_id = c.restaurant_id WHERE m.staff_id = ?1 AND r.client_id = ?2
          ) ORDER BY restaurant, position, id`,
@@ -2711,7 +2742,8 @@ app.post("/api/communities/:id/posts", async (c) => {
       const people = (await db.prepare(
         `SELECT DISTINCT s.id FROM staff s JOIN push_subscriptions ps ON ps.staff_id = s.id
          WHERE s.active = 1 AND s.id != ?1 AND s.client_id = ?2 AND (s.is_admin = 1
-           OR s.id IN (SELECT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN community_departments cd ON cd.department_id = ro.department_id WHERE cd.community_id = ?3 AND sr.restaurant_id = ?4)
+           OR s.id IN (SELECT staff_id FROM staff_community_access WHERE community_id = ?3)
+           OR (s.community_custom = 0 AND s.id IN (SELECT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN community_departments cd ON cd.department_id = ro.department_id WHERE cd.community_id = ?3 AND sr.restaurant_id = ?4))
            OR s.id IN (SELECT m.staff_id FROM managers m JOIN community_departments cd ON cd.department_id = m.department_id WHERE cd.community_id = ?3 AND m.restaurant_id = ?4))`,
       ).bind(me.id, me.client_id, id, community.restaurant_id).all<{ id: number }>()).results;
       const first = me.name.split(" ")[0];

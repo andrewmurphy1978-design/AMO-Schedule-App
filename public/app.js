@@ -1314,6 +1314,29 @@ function skillsBox(person) {
 }
 
 // Which schedules (restaurant x department) this employee may look at: automatic (where they hold a role) or ticked by hand.
+// Which communities one employee sees: those of their roles by default, or exactly the ones ticked here.
+function communityAccessPane(person) {
+  const box = h("div", { class: "sched-access" });
+  async function load() {
+    const d = await api(`/staff/${person.id}/community-access`);
+    const boxes = new Map();
+    const start = new Set(d.custom ? d.ids : d.auto); // switching to "custom" starts from what they see now
+    const mode = radioGroup(`ca-${person.id}`, [["auto", t("caAuto")], ["custom", t("caCustom")]], d.custom ? "custom" : "auto");
+    const restos = [...new Set(d.communities.map((c) => c.restaurant_id))];
+    const list = h("div", { class: "ca-list" }, restos.map((rid) => h("div", { class: "ca-resto" }, h("h5", {}, d.communities.find((c) => c.restaurant_id === rid).restaurant),
+      d.communities.filter((c) => c.restaurant_id === rid).map((c) => { const input = h("input", { type: "checkbox", checked: start.has(c.id) }); boxes.set(c.id, input); return h("label", { class: "check" }, input, h("span", {}, c.name)); }))));
+    const sync = () => { const custom = mode.value === "custom"; boxes.forEach((input, id) => { input.disabled = !custom; if (!custom) input.checked = d.auto.includes(id); }); };
+    mode.addEventListener("change", sync); sync();
+    box.replaceChildren(h("h4", {}, t("community")), h("p", { class: "meta" }, t("caHelp")), mode, list,
+      h("button", { class: "btn primary", type: "button", onClick: async () => {
+        const custom = mode.value === "custom";
+        try { await api(`/staff/${person.id}/community-access`, { method: "PUT", body: { custom, ids: custom ? [...boxes].filter(([, i]) => i.checked).map(([id]) => id) : [] } }); toast(t("saved")); load(); } catch (e) { toast(errorText(e)); }
+      } }, t("save")));
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
+}
+
 function scheduleAccessPane(person, ov) {
   const box = h("div", { class: "sched-access" });
   async function load() {
@@ -3655,7 +3678,7 @@ function staffCard(s, ov) {
     if (!dlg) { dlg = h("dialog", { id: "staff-modal", class: "wide" }); document.body.append(dlg); }
     // Four tabs: details (the form), roles, availability and requested time off. Save only applies to the details tab.
     // the kitchen tab only exists for Chef, Cook and Assistant cook
-    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", mqDesktop.matches ? t("tabDaysOff") : t("fixedDaysOff")], ["availability", mqDesktop.matches ? t("tabAvailability") : t("availability")], ["timeoff", mqDesktop.matches ? t("tabTimeOff") : t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", mqDesktop.matches ? t("tabSchedules") : t("scheduleAccessTab")]];
+    const tabList = () => [["details", t("details")], ["roles", t("rolesTab")], ...(hasKitchenRole(s) ? [["kitchen", t("kitchenTab")]] : []), ["daysoff", mqDesktop.matches ? t("tabDaysOff") : t("fixedDaysOff")], ["availability", mqDesktop.matches ? t("tabAvailability") : t("availability")], ["timeoff", mqDesktop.matches ? t("tabTimeOff") : t("requestedTimeOff")], ["planning", t("planningTab")], ["attendance", t("attendanceTab")], ["scheduleaccess", mqDesktop.matches ? t("tabSchedules") : t("scheduleAccessTab")], ["communities", t("community")]];
     let tab = "details";
     const saveBtn = h("button", { class: "btn primary icon-mobile", type: "submit", form: `staff-form-${s.id}`, "aria-label": t("save"), title: t("save") }, h("span", { class: "ic", "aria-hidden": "true" }, "✓"), h("span", { class: "tx" }, t("save")));
     const saveTarget = () => { saveBtn.setAttribute("form", tab === "planning" ? `planning-form-${s.id}` : `staff-form-${s.id}`); saveBtn.hidden = tab !== "details" && tab !== "planning"; };
@@ -3674,6 +3697,7 @@ function staffCard(s, ov) {
       planning: () => [planningForm(s)],
       attendance: () => [attendancePane(s, ov)],
       scheduleaccess: () => [scheduleAccessPane(s, ov)],
+      communities: () => [communityAccessPane(s)],
     };
     const drawTabs = () => {
       if (!tabList().some(([id]) => id === tab)) tab = "roles";
