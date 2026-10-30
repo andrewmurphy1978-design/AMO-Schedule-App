@@ -1959,6 +1959,7 @@ function issueDialog(taskText, current) {
 
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
+const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"]];
 const LOCATION_INFO = { fridge: ["🧊", "locFridge"], freezer: ["❄️", "locFreezer"], backstore: ["📦", "locBackstore"], basement: ["🪜", "locBasement"] };
 async function renderChecklist() {
   const { test, shifts, restock } = await api("/my-checklist");
@@ -2003,7 +2004,10 @@ async function renderRestock(box, restaurantIds) {
       fetchBy.length ? h("div", { class: "restock-places" }, fetchBy.map(([loc, list]) => h("div", { class: "restock-place" }, h("h4", {}, `${LOCATION_INFO[loc][0]} ${t(LOCATION_INFO[loc][1])} (${list.length})`),
         list.map((e) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded(all.filter((i) => e.ids.includes(i.id)), false) }), h("span", {}, e.name), h("small", { class: "meta" }, ` · ${[...new Set(e.groups)].join(", ")}`)))))) : h("p", { class: "meta" }, t("restockNothing")));
     const groups = data.groups.length ? data.groups.map((g) => h("section", { class: "card restock-group" }, h("h3", {}, gn(g), g.items.some((i) => i.needed) ? h("small", { class: "meta" }, ` · ${g.items.filter((i) => i.needed).length}`) : null),
-      h("div", { class: "cl-posts", role: "group", "aria-label": gn(g) }, g.items.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.name}`))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
+      // the ingredients of the post, under their category (those without one at the end)
+      [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, g.items.filter((i) => (i.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === i.category)))]).filter(([, list]) => list.length).map(([label, list]) =>
+        h("div", { class: "restock-cat" }, g.items.some((i) => i.category) ? h("h4", {}, label) : null,
+          h("div", { class: "cl-posts", role: "group", "aria-label": `${gn(g)} · ${label}` }, list.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.name}`))))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
     holder.replaceChildren(h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups), toFetch);
   };
   box.append(h("p", { class: "meta" }, t("restockHelp")),
@@ -3187,24 +3191,32 @@ function ingredientsPanel() {
     const same = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
     const cols = st.groups.filter((g) => g.name_fr.trim());
     const rows = [];
-    for (const g of st.groups) for (const i of g.items) if (i.name.trim() && !rows.some((r) => same(r.name, i.name))) rows.push({ name: i.name.trim(), location: i.location });
+    for (const g of st.groups) for (const i of g.items) if (i.name.trim() && !rows.some((r) => same(r.name, i.name))) rows.push({ name: i.name.trim(), location: i.location, category: i.category ?? null });
     for (const e of st.extra) if (!rows.some((r) => same(r.name, e.name))) rows.push(e);
     const bfOf = (g) => { const code = st.posts.find((p) => p.id === g.post_id)?.code, bf = st.posts.find((p) => p.code === (code === "subs" ? "bf_eggs" : code === "pizza" ? "bf_back" : "")); return bf ? nm(bf) : ""; };
     const add = h("input", { placeholder: t("ingNewName"), "aria-label": t("ingNewName"), maxLength: 80 });
-    const addRow = () => { const n = add.value.trim(); if (!n || rows.some((r) => same(r.name, n))) return; st.extra.push({ name: n, location: "fridge" }); draw(); };
+    const addRow = () => { const n = add.value.trim(); if (!n || rows.some((r) => same(r.name, n))) return; st.extra.push({ name: n, location: "fridge", category: null }); draw(); };
     return h("div", {}, h("p", { class: "meta" }, t("ingMatrixHelp")),
-      h("div", { class: "ing-add" }, add, h("button", { class: "btn", type: "button", onClick: addRow }, `+ ${t("ingAdd")}`)),
+      h("div", { class: "ing-add" }, add, h("button", { class: "btn", type: "button", onClick: addRow }, `+ ${t("ingAdd")}`),
+        h("select", { "aria-label": t("ingCategory"), onChange: (e) => { st.catFilter = e.target.value; draw(); } }, h("option", { value: "" }, t("ingAllCategories")), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: st.catFilter === v }, t(key))), h("option", { value: "none", selected: st.catFilter === "none" }, t("ingNoCategory")))),
       h("div", { class: "ing-matrix-wrap" }, h("table", { class: "ing-matrix" },
-        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map((g) => h("th", { class: "ing-col" }, h("b", {}, nm({ name_fr: g.name_fr, name_en: g.name_en })), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
-        h("tbody", {}, rows.map((r) => h("tr", {},
-          h("th", { scope: "row" }, r.name),
+        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingCategory")), h("th", {}, t("ingLocation")), ...cols.map((g) => h("th", { class: "ing-col" }, h("b", {}, nm({ name_fr: g.name_fr, name_en: g.name_en })), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
+        h("tbody", {}, rows.filter((r) => !st.catFilter || (st.catFilter === "none" ? !r.category : r.category === st.catFilter)).map((r) => h("tr", {},
+          // the name can be edited: it changes in every post that has the ingredient
+          h("th", { scope: "row" }, h("input", { class: "ing-name", value: r.name, maxLength: 80, title: t("ingEditName"), "aria-label": t("ingEditName"), onChange: (e) => {
+            const n = e.target.value.trim(); if (!n || same(n, r.name)) { e.target.value = r.name; return; }
+            for (const g of st.groups) { for (const i of g.items) if (same(i.name, r.name)) i.name = n; const seen = new Set(); g.items = g.items.filter((i) => { const k = i.name.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }); }
+            for (const x of st.extra) if (same(x.name, r.name)) x.name = n;
+            draw(); } })),
+          h("td", {}, catSelect(r, (v) => { for (const g of st.groups) for (const i of g.items) if (same(i.name, r.name)) i.category = v; for (const x of st.extra) if (same(x.name, r.name)) x.category = v; })),
           h("td", {}, h("select", { "aria-label": `${r.name} · ${t("ingLocation")}`, onChange: (e) => { for (const g of st.groups) for (const i of g.items) if (same(i.name, r.name)) i.location = e.target.value; for (const x of st.extra) if (same(x.name, r.name)) x.location = e.target.value; r.location = e.target.value; } },
             Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: r.location === v }, `${ic} ${t(key)}`)))),
           ...cols.map((g) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: g.items.some((i) => same(i.name, r.name)), "aria-label": `${r.name} · ${nm({ name_fr: g.name_fr, name_en: g.name_en })}`, onChange: (e) => {
-            if (e.target.checked) g.items.push({ name: r.name, location: r.location }); else g.items = g.items.filter((i) => !same(i.name, r.name));
+            if (e.target.checked) g.items.push({ name: r.name, location: r.location, category: r.category }); else g.items = g.items.filter((i) => !same(i.name, r.name));
           } }))),
           h("td", {}, h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: () => { for (const g of st.groups) g.items = g.items.filter((i) => !same(i.name, r.name)); st.extra = st.extra.filter((x) => !same(x.name, r.name)); draw(); } }, "✕"))))))));
   }
+  const catSelect = (item, onPick) => h("select", { "aria-label": t("ingCategory"), onChange: (e) => { item.category = e.target.value || null; onPick?.(e.target.value || null); } }, h("option", { value: "" }, `— ${t("ingNoCategory")}`), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: item.category === v }, t(key))));
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
     const copySel = h("select", { "aria-label": t("ingCopyFrom") }, others.map((r) => h("option", { value: r.id }, r.name)));
@@ -3214,14 +3226,14 @@ function ingredientsPanel() {
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location })) })); draw(); toast(t("ingCopied"));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null })) })); draw(); toast(t("ingCopied"));
         } }, t("editWord"))) ) : null),
       h("div", { class: "subtabs", role: "tablist" }, [["post", t("ingViewByPost")], ["table", t("ingViewTable")]].map(([id, label]) =>
         h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
       ...(st.view === "table" ? [matrixView()] : st.groups.map((g, gi) => {
         const list = h("div", { class: "ing-items" });
         const drawItems = () => list.replaceChildren(...g.items.map((i, ii) => h("div", { class: "ing-row" },
-          h("input", { value: i.name, maxLength: 80, "aria-label": t("ingName"), onInput: (e) => { i.name = e.target.value; } }), locSelect(i),
+          h("input", { value: i.name, maxLength: 80, "aria-label": t("ingName"), onInput: (e) => { i.name = e.target.value; } }), catSelect(i), locSelect(i),
           h("button", { class: "icon-btn", type: "button", "aria-label": t("postsRemove"), onClick: () => { g.items.splice(ii, 1); drawItems(); } }, "✕"))));
         drawItems();
         const bulk = h("input", { placeholder: t("ingBulk"), "aria-label": t("ingBulk") });

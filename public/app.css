@@ -981,10 +981,10 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .restock .chip-btn.need{background:#fff3cd;border-color:#e0a800;color:#5c4400}
 .ing-top{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin:.4rem 0 .8rem}.ing-copy{display:flex;gap:.4rem}
 .ing-group{margin:.8rem 0}.ing-group-head{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:.4rem;margin-bottom:.5rem}
-.ing-items{display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));gap:.3rem .8rem}.ing-row{display:grid;grid-template-columns:1fr 11rem auto;gap:.3rem;align-items:center}
+.ing-items{display:grid;grid-template-columns:repeat(auto-fit,minmax(27rem,1fr));gap:.3rem .8rem}.ing-row{display:grid;grid-template-columns:1fr 9rem 9.5rem auto;gap:.3rem;align-items:center}
 .ing-add{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.6rem}.ing-add input{flex:1 1 12rem}
 .period-row{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.4rem 0}.period-row input{flex:1 1 9rem}
-@media (max-width:700px){.ing-group-head{grid-template-columns:1fr}.ing-row{grid-template-columns:1fr 8.5rem auto}}
+@media (max-width:700px){.ing-group-head{grid-template-columns:1fr}.ing-row{grid-template-columns:1fr 1fr auto}.ing-row input{grid-column:1/-1}}
 .restock-group .cl-posts{align-content:flex-start}
 .restock-place .check{flex-wrap:wrap}.restock-place .check small{flex-basis:100%;margin-left:1.9rem}
 
@@ -995,3 +995,6 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .ing-matrix tbody th{position:sticky;left:0;z-index:1;font-weight:600;min-width:11rem}
 .ing-matrix .ing-col,.ing-matrix .ing-check{text-align:center}.ing-matrix .ing-check input{width:1.2rem;height:1.2rem}
 .ing-matrix select{min-width:9.5rem}
+.ing-matrix .ing-name{border:1px solid transparent;background:transparent;font-weight:600;width:100%;min-width:10rem}.ing-matrix .ing-name:hover,.ing-matrix .ing-name:focus{border-color:var(--line);background:#fff}
+.restock-cat h4{margin:.7rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
+.restock-group{display:block !important}.restock-group .restock-cat .cl-posts{margin:0}
