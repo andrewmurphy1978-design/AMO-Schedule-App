@@ -1766,13 +1766,12 @@ function reminderControls() {
     });
     box.replaceChildren(h("p", { class: "meta" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
       h("div", { class: "actions push-actions" },
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push" }); draw(); } }, `+ ${t("addReminder")}`) : null,
-        h("button", { class: "btn primary", type: "button", onClick: async () => {
-          try { await api("/account/reminders", { method: "PUT", body: { items } }); toast(t("saved")); }
-          catch (e) { toast(e.body?.error === "duplicate" ? t("reminderDuplicate") : errorText(e)); }
-        } }, t("saveReminders"))));
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push" }); draw(); } }, `+ ${t("addReminder")}`) : null));
   };
-  api("/account/reminders").then((rows) => { items = rows; draw(); }).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  // saved together with the rest of the form (the main Enregistrer button)
+  box.save = async () => { if (loaded) await api("/account/reminders", { method: "PUT", body: { items } }); };
+  let loaded = false;
+  api("/account/reminders").then((rows) => { items = rows; loaded = true; draw(); }).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
   return box;
 }
 
@@ -1816,10 +1815,11 @@ async function renderAccount() {
   phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
   const lang = radioGroup("acc-lang", [["fr", "Français"], ["en", "English"]], acc.lang);
   const channel = radioGroup("acc-chan", [["sms", t("sms")], ["email", t("emailCh")]], acc.notify_channel);
+  const reminders = reminderControls();
   const save = async (e) => {
     e.preventDefault();
-    try { await api("/account", { method: "PUT", body: { phone: phone.value, lang: lang.value, notify_channel: channel.value } }); toast(t("saved")); }
-    catch (err) { toast(err.body?.error === "invalid_phone" ? t("invalidPhone") : errorText(err)); }
+    try { await api("/account", { method: "PUT", body: { phone: phone.value, lang: lang.value, notify_channel: channel.value } }); await reminders.save(); toast(t("saved")); }
+    catch (err) { toast(err.body?.error === "invalid_phone" ? t("invalidPhone") : err.body?.error === "duplicate" ? t("reminderDuplicate") : errorText(err)); }
   };
   const calBox = h("div", {});
   const drawCal = (url) => {
@@ -1846,7 +1846,7 @@ async function renderAccount() {
     h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
     h("div", { class: "field push-field" }, h("span", {}, t("installTitle")), installControls()),
     h("div", { class: "field push-field" }, h("span", {}, t("pushTitle")), pushControls()),
-    h("div", { class: "field push-field" }, h("span", {}, t("remindersTitle")), reminderControls()),
+    h("div", { class: "field push-field" }, h("span", {}, t("remindersTitle")), reminders),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
   const tabs = [
