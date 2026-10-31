@@ -2321,7 +2321,7 @@ app.put("/api/shifts/:id/checklist/items", async (c) => {
   if (!ctx || !b.item_id || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
   // the item has to be on one of this shift's lists
   const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
-  if (!lists.some((l) => l.kind !== "prep" && l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
+  if (!lists.some((l) => (l.kind === "post" || l.kind === "role") && l.items.some((i) => i.id === b.item_id))) return c.json({ error: "not_found" }, 404);
   await (b.done
     ? ctx.db.batch([ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_done (shift_id, item_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, b.item_id, ctx.me.id, Date.now()),
         ctx.db.prepare("DELETE FROM shift_checklist_issues WHERE shift_id = ? AND item_id = ?").bind(ctx.sh.id, b.item_id)])
@@ -2344,7 +2344,7 @@ app.put("/api/shifts/:id/checklist/issues", async (c) => {
   const note = (b.note ?? "").trim();
   if ((b.reason !== "missing_ingredient" && b.reason !== "other") || !note || note.length > 200) return c.json({ error: "invalid_issue" }, 400);
   const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
-  const item = lists.filter((l) => l.kind !== "prep").flatMap((l) => l.items.map((i) => ({ ...i, list: l }))).find((i) => i.id === b.item_id);
+  const item = lists.filter((l) => l.kind === "post" || l.kind === "role").flatMap((l) => l.items.map((i) => ({ ...i, list: l }))).find((i) => i.id === b.item_id);
   if (!item) return c.json({ error: "not_found" }, 404);
   const wasNew = !item.issue;
   await ctx.db.batch([
@@ -2415,13 +2415,13 @@ async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
      JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
   ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
 }
-type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; needed?: boolean }[] };
+type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; homemade: boolean; components: string[]; prep_note: string | null; needed?: boolean }[] };
 async function ingredientGroups(db: D1Database, restaurantId: number, needs = false): Promise<IngGroup[]> {
   const groups = (await db.prepare("SELECT id, name_fr, name_en, post_id, position FROM ingredient_groups WHERE restaurant_id = ? ORDER BY position, id").bind(restaurantId).all<Omit<IngGroup, "items">>()).results;
   if (!groups.length) return [];
-  const items = (await db.prepare(`SELECT id, group_id, name, location, category FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null }>()).results;
+  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, homemade, components, prep_note FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; homemade: number; components: string | null; prep_note: string | null }>()).results;
   const need = needs ? new Set((await db.prepare("SELECT ingredient_id FROM restock_needs WHERE restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number }>()).results.map((r) => r.ingredient_id)) : null;
-  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, ...(need ? { needed: need.has(i.id) } : {}) })) }));
+  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), prep_note: i.prep_note, ...(need ? { needed: need.has(i.id) } : {}) })) }));
 }
 app.get("/api/restock", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
@@ -2449,13 +2449,15 @@ app.get("/api/admin/ingredients", requireAdmin, async (c) => {
   const posts = (await db.prepare("SELECT id, code, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
   return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
 });
+type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; homemade?: boolean; components?: string[]; prep_note?: string | null };
 app.put("/api/admin/ingredients", requireAdmin, async (c) => {
   const db = c.env.DB;
-  const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: { id?: number; name?: string; location?: string; category?: string | null }[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: { id?: number; name?: string; location?: string; category?: string | null }[] }[] }));
+  const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }));
   if (!b.restaurant_id || !Array.isArray(b.groups) || b.groups.length > 30) return c.json({ error: "invalid_ingredients" }, 400);
   const groups = b.groups.map((g) => ({ id: g.id, fr: (g.name_fr ?? "").trim(), en: (g.name_en ?? "").trim(), post: g.post_id || null,
-    items: (Array.isArray(g.items) ? g.items : []).map((i) => ({ id: i.id, name: (i.name ?? "").trim(), loc: LOCATIONS.includes(i.location as never) ? i.location! : "fridge", cat: CATEGORIES.includes(i.category as never) ? i.category! : null })).filter((i) => i.name) })).filter((g) => g.fr);
-  if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80))) return c.json({ error: "invalid_ingredients" }, 400);
+    items: (Array.isArray(g.items) ? g.items : []).map((i) => ({ id: i.id, name: (i.name ?? "").trim(), loc: LOCATIONS.includes(i.location as never) ? i.location! : "fridge", cat: CATEGORIES.includes(i.category as never) ? i.category! : null,
+      thaw: i.thaw && i.location === "freezer" ? 1 : 0, home: i.homemade ? 1 : 0, comps: i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : [], note: i.homemade ? (i.prep_note ?? "").trim().slice(0, 200) || null : null })).filter((i) => i.name) })).filter((g) => g.fr);
+  if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80 || i.comps.some((x) => x.length > 80)))) return c.json({ error: "invalid_ingredients" }, 400);
   const rid = b.restaurant_id;
   const curGroups = (await db.prepare("SELECT id FROM ingredient_groups WHERE restaurant_id = ?").bind(rid).all<{ id: number }>()).results.map((r) => r.id);
   const curItems = curGroups.length ? (await db.prepare(`SELECT id FROM ingredients WHERE group_id IN (${curGroups.map(() => "?").join(",")})`).bind(...curGroups).all<{ id: number }>()).results.map((r) => r.id) : [];
@@ -2471,8 +2473,8 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
     let gid = g.id && keepG.has(g.id) ? g.id : 0;
     if (!gid) gid = (await db.prepare("INSERT INTO ingredient_groups (restaurant_id, name_fr, name_en, post_id, position) VALUES (?, ?, ?, ?, ?)").bind(rid, g.fr, g.en || g.fr, g.post, gi + 1).run()).meta.last_row_id as number;
     await db.batch(g.items.map((i, pos) => i.id && keepI.has(i.id)
-      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, pos + 1, i.id)
-      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, position) VALUES (?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, pos + 1)));
+      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, homemade = ?, components = ?, prep_note = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, pos + 1, i.id)
+      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, homemade, components, prep_note, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, pos + 1)));
   }
   return c.json({ ok: true });
 });
@@ -2502,6 +2504,19 @@ app.put("/api/admin/post-periods", requireAdmin, async (c) => {
   const periods = b.periods.map((p) => ({ fr: (p.fr ?? "").trim(), en: (p.en ?? "").trim() || (p.fr ?? "").trim(), start: p.start, end: p.end }));
   if (periods.some((p) => !p.fr || p.fr.length > 30 || p.en.length > 30 || !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.end) || p.start >= p.end)) return c.json({ error: "invalid_periods" }, 400);
   await putSettingStmt(db, cid, key, JSON.stringify(periods)).run();
+  return c.json({ ok: true });
+});
+
+// Thawing: the last cook out ticks the frozen ingredients he took out of the freezer for tomorrow.
+app.put("/api/shifts/:id/thaw/:ingredientId", async (c) => {
+  const id = intParam(c.req.param("id")), ingId = intParam(c.req.param("ingredientId"));
+  const b = await c.req.json<{ done?: boolean }>().catch(() => ({} as { done?: boolean }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !ingId || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
+  const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
+  if (!lists.some((l) => l.kind === "thaw" && l.items.some((i) => i.id === ingId))) return c.json({ error: "not_found" }, 404);
+  await (b.done ? ctx.db.prepare("INSERT OR IGNORE INTO shift_thaw_done (shift_id, ingredient_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, ingId, ctx.me.id, Date.now())
+    : ctx.db.prepare("DELETE FROM shift_thaw_done WHERE shift_id = ? AND ingredient_id = ?").bind(ctx.sh.id, ingId)).run();
   return c.json({ ok: true });
 });
 
