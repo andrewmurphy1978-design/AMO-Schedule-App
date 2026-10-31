@@ -62,6 +62,7 @@ import m0059 from "../migrations/0059_ingredient_prep_thaw.sql";
 import m0060 from "../migrations/0060_example_preparations.sql";
 import m0061 from "../migrations/0061_portion_weight.sql";
 import m0062 from "../migrations/0062_fridge_once_open.sql";
+import m0063 from "../migrations/0063_portion_units.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -126,6 +127,7 @@ const MIGRATIONS: [string, string][] = [
   ["0060_example_preparations", m0060],
   ["0061_portion_weight", m0061],
   ["0062_fridge_once_open", m0062],
+  ["0063_portion_units", m0063],
 ];
 
 const statements = (sql: string) =>

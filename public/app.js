@@ -1983,7 +1983,7 @@ function issueDialog(taskText, current) {
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
 const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"]];
-const portionText = (g) => `${Math.round(g * 10) / 10} g / ${Math.round((g / 28.3495) * 10) / 10} oz`;
+const portionText = (e) => [e.portion_qty && e.portion_unit ? `${Math.round(e.portion_qty * 100) / 100} ${e.portion_unit}` : null, e.portion_g ? `${Math.round(e.portion_g * 10) / 10} g / ${Math.round((e.portion_g / 28.3495) * 10) / 10} oz` : null].filter(Boolean).join(" · ");
 // Alphabetical order, with each home-made ingredient right under the ingredient it is made from (indented one level more).
 function ingredientTree(list) {
   const key = (e) => e.name.trim().toLowerCase(), cmp = (a, b) => a.name.localeCompare(b.name, getLang());
@@ -2050,7 +2050,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
       const todo = home.filter((i) => i.needed), rest = home.filter((i) => !i.needed);
       const task = (i) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded([i], false) }),
         h("span", {}, h("b", {}, `${t("prepVerb")} : ${i.name}`), i.components?.length ? h("small", { class: "meta" }, ` · ${t("prepWith")} ${i.components.join(", ")}`) : null,
-          i.prep_note ? h("small", { class: "meta", style: "display:block" }, i.prep_note) : null, i.portion_g ? h("small", { class: "meta", style: "display:block" }, `⚖ ${portionText(i.portion_g)}`) : null, h("small", { class: "meta", style: "display:block" }, i.group)));
+          i.prep_note ? h("small", { class: "meta", style: "display:block" }, i.prep_note) : null, portionText(i) ? h("small", { class: "meta", style: "display:block" }, `⚖ ${portionText(i)}`) : null, h("small", { class: "meta", style: "display:block" }, i.group)));
       holder.replaceChildren(h("section", { class: "card" }, h("h3", {}, `📝 ${t("prepListTitle")}`, todo.length ? h("small", { class: "meta" }, ` · ${todo.length}`) : null), h("p", { class: "meta" }, t("prepListHelp")),
           todo.length ? todo.map(task) : h("p", { class: "meta" }, home.length ? t("prepNoneNow") : t("prepNoHomemade"))),
         rest.length ? h("section", { class: "card" }, h("h3", {}, t("prepAllTitle")), h("div", { class: "cl-posts" }, rest.map((i) => h("button", { type: "button", class: "chip-btn", title: i.group, onClick: () => setNeeded([i], true) }, `🏠 ${i.name}`)))) : null,
@@ -3265,7 +3265,7 @@ function ingredientsPanel() {
     e.thaw ? h("span", { class: "ing-badge thaw", title: t("ingThaw") }, `❄ ${t("ingThawShort")}`) : null,
     e.fridge_open ? h("span", { class: "ing-badge thaw", title: t("ingFridgeOpen") }, `🧊 ${t("ingFridgeOpenShort")}`) : null,
     e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null,
-    e.portion_g ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e.portion_g)}`) : null);
+    portionText(e) ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e)}`) : null);
 
   // ---- ingredient dialog (also used to add one) ----
   function ingredientDialog(entry, presetGroup) {
@@ -3303,7 +3303,12 @@ function ingredientsPanel() {
     const grams = h("input", { type: "number", min: "0", step: "0.1", inputmode: "decimal", value: cur.portion_g ? r1(cur.portion_g) : "", "aria-label": `${t("ingPortion")} (g)`, onInput: () => { ounces.value = grams.value ? r1(Number(grams.value) / OZ) : ""; } });
     const ounces = h("input", { type: "number", min: "0", step: "0.1", inputmode: "decimal", value: cur.portion_g ? r1(cur.portion_g / OZ) : "", "aria-label": `${t("ingPortion")} (oz)`, onInput: () => { grams.value = ounces.value ? r1(Number(ounces.value) * OZ) : ""; } });
     const portion = h("div", { class: "ing-portion" }, h("span", {}, `⚖ ${t("ingPortion")}`), grams, h("span", {}, "g"), h("span", {}, "="), ounces, h("span", {}, "oz"));
-    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion);
+    // or a count of something: 2 slices, 3 pieces…
+    const qty = h("input", { type: "number", min: "0", step: "0.5", inputmode: "decimal", value: cur.portion_qty ? String(cur.portion_qty) : "", "aria-label": t("ingPortionCount") });
+    const unit = h("input", { value: cur.portion_unit ?? "", maxLength: 30, list: "ing-units", placeholder: t("ingPortionUnitPh"), "aria-label": t("ingPortionUnitPh") });
+    const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer"].map((u) => h("option", { value: u })));
+    const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
+    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion, portionCount);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
@@ -3318,7 +3323,8 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null };
+        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
+          portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
           if (idx >= 0 && want) Object.assign(g.items[idx], fields);
@@ -3387,7 +3393,7 @@ function ingredientsPanel() {
     return [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, all.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))])
       .filter(([, list]) => list.length).map(([label, list]) => h("div", { class: "card ing-group" }, h("div", { class: "ing-group-head" }, h("h3", {}, label, h("small", { class: "meta" }, ` · ${list.length}`))),
         h("div", { class: "ing-lines tree" }, ingredientTree(list).map(({ item: e, depth }) => h("div", { class: `ing-line ${depth ? "ing-sub" : ""}`, style: depth ? `margin-left:${depth * 1.4}rem` : "" }, h("b", {}, depth ? `↳ ${e.name}` : e.name), h("span", { class: "ing-badges" }, e.groups.map((gi) => h("span", { class: "ing-badge" }, gname(st.groups[gi]))), h("span", { class: "ing-badge" }, place(e.location)),
-          e.thaw ? h("span", { class: "ing-badge thaw" }, `❄ ${t("ingThawShort")}`) : null, e.fridge_open ? h("span", { class: "ing-badge thaw" }, `🧊 ${t("ingFridgeOpenShort")}`) : null, e.homemade ? h("span", { class: "ing-badge home" }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null), editBtn(e))))));
+          e.thaw ? h("span", { class: "ing-badge thaw" }, `❄ ${t("ingThawShort")}`) : null, e.fridge_open ? h("span", { class: "ing-badge thaw" }, `🧊 ${t("ingFridgeOpenShort")}`) : null, e.homemade ? h("span", { class: "ing-badge home" }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null, portionText(e) ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e)}`) : null), editBtn(e))))));
   }
   function viewTable() {
     const cols = st.groups.map((g, gi) => ({ g, gi })).filter(({ g }) => g.name_fr.trim());
@@ -3419,7 +3425,7 @@ function ingredientsPanel() {
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null })) }));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null, portion_qty: i.portion_qty ?? null, portion_unit: i.portion_unit ?? null })) }));
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),

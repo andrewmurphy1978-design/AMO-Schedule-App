@@ -1017,3 +1017,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .ing-portion{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem}.ing-portion input{width:6rem}
 .btn.small{white-space:nowrap}
 .ing-portion{flex-wrap:nowrap;gap:.3rem}.ing-portion>span:first-child{flex:1 1 auto;min-width:0;font-size:.85rem}.ing-portion input{width:4.4rem;min-width:0;flex:0 0 auto;padding:0 .4rem;text-align:right}.ing-portion>span:not(:first-child){flex:0 0 auto}
+.ing-portion.count input:first-of-type{width:4.4rem}.ing-portion.count input:nth-of-type(2){flex:1 1 auto;width:auto;text-align:left}
