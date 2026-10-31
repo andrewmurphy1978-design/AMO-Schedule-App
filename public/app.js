@@ -1983,6 +1983,20 @@ function issueDialog(taskText, current) {
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
 const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"]];
+// Alphabetical order, with each home-made ingredient right under the ingredient it is made from (indented one level more).
+function ingredientTree(list) {
+  const key = (e) => e.name.trim().toLowerCase(), cmp = (a, b) => a.name.localeCompare(b.name, getLang());
+  const byName = new Map(list.map((e) => [key(e), e]));
+  const parentOf = (e) => (e.homemade ? (e.components ?? []).map((c) => byName.get(c.trim().toLowerCase())).find((p) => p && p !== e) : null);
+  const kids = new Map();
+  const tops = [];
+  for (const e of list) { const p = parentOf(e); if (p) kids.set(p, [...(kids.get(p) ?? []), e]); else tops.push(e); }
+  const out = [], seen = new Set();
+  const walk = (e, depth) => { if (seen.has(e)) return; seen.add(e); out.push({ item: e, depth }); for (const k of (kids.get(e) ?? []).sort(cmp)) walk(k, depth + 1); };
+  for (const e of tops.sort(cmp)) walk(e, 0);
+  for (const e of list) walk(e, 0); // a loop of home-made ingredients (A from B, B from A): nothing is lost
+  return out;
+}
 const LOCATION_INFO = { fridge: ["🧊", "locFridge"], freezer: ["❄️", "locFreezer"], backstore: ["📦", "locBackstore"], basement: ["🪜", "locBasement"] };
 async function renderChecklist() {
   const { test, shifts, restock } = await api("/my-checklist");
@@ -2044,7 +2058,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
     }
     const groups = data.groups.length ? data.groups.map((g) => h("section", { class: "card restock-group" }, h("h3", {}, gn(g), g.items.some((i) => i.needed) ? h("small", { class: "meta" }, ` · ${g.items.filter((i) => i.needed).length}`) : null),
       // the ingredients of the post, under their category (those without one at the end)
-      [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, g.items.filter((i) => (i.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === i.category)))]).filter(([, list]) => list.length).map(([label, list]) =>
+      [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, g.items.filter((i) => (i.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === i.category)))]).filter(([, list]) => list.length).map(([label, list0]) => [label, ingredientTree(list0).map((x) => x.item)]).map(([label, list]) =>
         h("div", { class: "restock-cat" }, g.items.some((i) => i.category) ? h("h4", {}, label) : null,
           h("div", { class: "cl-posts", role: "group", "aria-label": `${gn(g)} · ${label}` }, list.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.homemade ? "🏠 " : ""}${i.name}`))))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
     holder.replaceChildren(h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups), toFetch);
@@ -3340,7 +3354,7 @@ function ingredientsPanel() {
     const all = unique();
     return [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, all.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))])
       .filter(([, list]) => list.length).map(([label, list]) => h("div", { class: "card ing-group" }, h("div", { class: "ing-group-head" }, h("h3", {}, label, h("small", { class: "meta" }, ` · ${list.length}`))),
-        h("div", { class: "ing-lines" }, list.map((e) => h("div", { class: "ing-line" }, h("b", {}, e.name), h("span", { class: "ing-badges" }, e.groups.map((gi) => h("span", { class: "ing-badge" }, gname(st.groups[gi]))), h("span", { class: "ing-badge" }, place(e.location)),
+        h("div", { class: "ing-lines tree" }, ingredientTree(list).map(({ item: e, depth }) => h("div", { class: `ing-line ${depth ? "ing-sub" : ""}`, style: depth ? `margin-left:${depth * 1.4}rem` : "" }, h("b", {}, depth ? `↳ ${e.name}` : e.name), h("span", { class: "ing-badges" }, e.groups.map((gi) => h("span", { class: "ing-badge" }, gname(st.groups[gi]))), h("span", { class: "ing-badge" }, place(e.location)),
           e.thaw ? h("span", { class: "ing-badge thaw" }, `❄ ${t("ingThawShort")}`) : null, e.homemade ? h("span", { class: "ing-badge home" }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null), editBtn(e))))));
   }
   function viewTable() {
@@ -3356,7 +3370,7 @@ function ingredientsPanel() {
         h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
         h("tbody", {}, byCat.flatMap(([label, list]) => [
           h("tr", { class: "ing-cat-row" }, h("th", { colSpan: 3 + cols.length, scope: "colgroup" }, label, h("small", { class: "meta" }, ` · ${list.length}`))),
-          ...list.map((r) => h("tr", {}, h("th", { scope: "row" }, r.name, r.thaw ? " ❄" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
+          ...ingredientTree(list).map(({ item: r, depth }) => h("tr", {}, h("th", { scope: "row", style: depth ? `padding-left:${0.5 + depth * 1.4}rem` : "" }, depth ? "↳ " : "", r.name, r.thaw ? " ❄" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
             ...cols.map(({ g, gi }) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: r.groups.includes(gi), "aria-label": `${r.name} · ${gname(g)}`, onChange: async (e) => {
               if (e.target.checked) g.items.push({ ...r, id: undefined, components: [...(r.components ?? [])] }); else g.items = g.items.filter((i) => !same(i.name, r.name));
               await persist();
