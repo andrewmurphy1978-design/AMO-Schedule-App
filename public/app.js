@@ -2036,9 +2036,9 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
     const byName = new Map(all.map((i) => [i.name.trim().toLowerCase(), i]));
     // what to fetch: the missing ingredients, and the basics needed to prepare the missing home-made ones
     const need = new Map();
-    const addNeed = (name, location, id, why) => { const k = `${location}|${name.trim().toLowerCase()}`; const e = need.get(k) ?? { key: k, name, location, ids: [], why: [] }; if (id) e.ids.push(id); if (why && !e.why.includes(why)) e.why.push(why); need.set(k, e); };
+    const addNeed = (name, location, id, why, hint) => { const k = `${location}|${name.trim().toLowerCase()}`; const e = need.get(k) ?? { key: k, name, location, ids: [], why: [] }; if (id) e.ids.push(id); if (why && !e.why.includes(why)) e.why.push(why); if (hint && !e.why.includes(hint)) e.why.push(hint); need.set(k, e); };
     for (const i of missing) {
-      if (!i.homemade) addNeed(i.name, i.location, i.id, i.group);
+      if (!i.homemade) addNeed(i.name, i.location, i.id, i.group, i.fridge_open ? `🧊 ${t("ingFridgeOpen").toLowerCase()}` : null);
       else for (const c of i.components ?? []) { const ref = byName.get(c.trim().toLowerCase()); addNeed(c, ref?.location ?? "fridge", null, `${t("forWord")} ${i.name}`); }
     }
     const fetchBy = Object.keys(LOCATION_INFO).map((loc) => [loc, [...need.values()].filter((e) => e.location === loc)]).filter(([, list]) => list.length);
@@ -3263,6 +3263,7 @@ function ingredientsPanel() {
   const badges = (e) => h("span", { class: "ing-badges" },
     e.category ? h("span", { class: "ing-badge" }, catLabel(e.category)) : null, h("span", { class: "ing-badge" }, place(e.location)),
     e.thaw ? h("span", { class: "ing-badge thaw", title: t("ingThaw") }, `❄ ${t("ingThawShort")}`) : null,
+    e.fridge_open ? h("span", { class: "ing-badge thaw", title: t("ingFridgeOpen") }, `🧊 ${t("ingFridgeOpenShort")}`) : null,
     e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null,
     e.portion_g ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e.portion_g)}`) : null);
 
@@ -3278,6 +3279,8 @@ function ingredientsPanel() {
     const loc = h("select", { "aria-label": t("ingLocation"), onChange: () => sync() }, Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: cur.location === v }, `${ic} ${t(key)}`)));
     const thaw = h("input", { type: "checkbox", checked: !!cur.thaw });
     const thawRow = h("label", { class: "check" }, thaw, h("span", {}, `❄ ${t("ingThaw")}`));
+    const fopen = h("input", { type: "checkbox", checked: !!cur.fridge_open });
+    const fopenRow = h("label", { class: "check" }, fopen, h("span", {}, `🧊 ${t("ingFridgeOpen")}`));
     const home = h("input", { type: "checkbox", checked: !!cur.homemade, onChange: () => sync() });
     const note = h("input", { value: cur.prep_note ?? "", maxLength: 200, placeholder: t("ingPrepNote"), "aria-label": t("ingPrepNote") });
     const comps = new Set(cur.components ?? []);
@@ -3302,7 +3305,7 @@ function ingredientsPanel() {
     const portion = h("div", { class: "ing-portion" }, h("span", {}, `⚖ ${t("ingPortion")}`), grams, h("span", {}, "g"), h("span", {}, "="), ounces, h("span", {}, "oz"));
     const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
-    const sync = () => { thawRow.hidden = loc.value !== "freezer"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
+    const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
         e.preventDefault();
@@ -3315,7 +3318,7 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null };
+        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
           if (idx >= 0 && want) Object.assign(g.items[idx], fields);
@@ -3331,7 +3334,7 @@ function ingredientsPanel() {
       h("h2", {}, entry ? t("ingEditTitle") : t("ingAdd")),
       h("label", { class: "field" }, h("span", {}, t("ingName")), name),
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCategory")), cat), h("label", { class: "field" }, h("span", {}, t("ingLocation")), loc)),
-      thawRow,
+      thawRow, fopenRow,
       h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
       h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
       err,
@@ -3384,7 +3387,7 @@ function ingredientsPanel() {
     return [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, all.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))])
       .filter(([, list]) => list.length).map(([label, list]) => h("div", { class: "card ing-group" }, h("div", { class: "ing-group-head" }, h("h3", {}, label, h("small", { class: "meta" }, ` · ${list.length}`))),
         h("div", { class: "ing-lines tree" }, ingredientTree(list).map(({ item: e, depth }) => h("div", { class: `ing-line ${depth ? "ing-sub" : ""}`, style: depth ? `margin-left:${depth * 1.4}rem` : "" }, h("b", {}, depth ? `↳ ${e.name}` : e.name), h("span", { class: "ing-badges" }, e.groups.map((gi) => h("span", { class: "ing-badge" }, gname(st.groups[gi]))), h("span", { class: "ing-badge" }, place(e.location)),
-          e.thaw ? h("span", { class: "ing-badge thaw" }, `❄ ${t("ingThawShort")}`) : null, e.homemade ? h("span", { class: "ing-badge home" }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null), editBtn(e))))));
+          e.thaw ? h("span", { class: "ing-badge thaw" }, `❄ ${t("ingThawShort")}`) : null, e.fridge_open ? h("span", { class: "ing-badge thaw" }, `🧊 ${t("ingFridgeOpenShort")}`) : null, e.homemade ? h("span", { class: "ing-badge home" }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null), editBtn(e))))));
   }
   function viewTable() {
     const cols = st.groups.map((g, gi) => ({ g, gi })).filter(({ g }) => g.name_fr.trim());
@@ -3399,7 +3402,7 @@ function ingredientsPanel() {
         h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
         h("tbody", {}, byCat.flatMap(([label, list]) => [
           h("tr", { class: "ing-cat-row" }, h("th", { colSpan: 3 + cols.length, scope: "colgroup" }, label, h("small", { class: "meta" }, ` · ${list.length}`))),
-          ...ingredientTree(list).map(({ item: r, depth }) => h("tr", {}, h("th", { scope: "row", style: depth ? `padding-left:${0.5 + depth * 1.4}rem` : "" }, depth ? "↳ " : "", r.name, r.thaw ? " ❄" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
+          ...ingredientTree(list).map(({ item: r, depth }) => h("tr", {}, h("th", { scope: "row", style: depth ? `padding-left:${0.5 + depth * 1.4}rem` : "" }, depth ? "↳ " : "", r.name, r.thaw ? " ❄" : "", r.fridge_open ? " 🧊" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
             ...cols.map(({ g, gi }) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: r.groups.includes(gi), "aria-label": `${r.name} · ${gname(g)}`, onChange: async (e) => {
               if (e.target.checked) g.items.push({ ...r, id: undefined, components: [...(r.components ?? [])] }); else g.items = g.items.filter((i) => !same(i.name, r.name));
               await persist();
@@ -3416,7 +3419,7 @@ function ingredientsPanel() {
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null })) }));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null })) }));
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
