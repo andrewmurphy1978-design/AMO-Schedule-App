@@ -2246,7 +2246,25 @@ app.get("/api/my-shifts", async (c) => {
   for (const x of payRows) { const b = bestRate.get(x.id); if (b != null && (x.rate_cents == null || b > x.rate_cents)) x.rate_cents = b; }
   const weekDays = Array.from({ length: 8 }, (_, i) => new Date(Date.parse(`${bounds.start.slice(0, 10)}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
   const pay = computeCosts(payRows, weekDays);
-  return c.json({ week: c.req.query("week"), shifts: r.results, total_hours, gross_cents: pay.total_cents, unrated_hours: pay.unrated_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
+  // Who else works during each of my shifts (same restaurant and department, published shifts). Names only: this does not depend on which schedules I may open.
+  const mineRows = r.results as { id: number; restaurant_id: number; department_id: string; start_at: string; end_at: string; status: string }[];
+  const colleaguesOf = new Map<number, unknown[]>();
+  if (mineRows.length) {
+    const rids = [...new Set(mineRows.map((x) => x.restaurant_id))];
+    const dayBefore = new Date(Date.parse(`${bounds.start.slice(0, 10)}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    const others = (await c.env.DB.prepare(
+      `SELECT o.staff_id, s.name, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v, o.restaurant_id, ro.department_id, o.start_at, o.end_at, o.until_close
+       FROM shifts o JOIN staff s ON s.id = o.staff_id JOIN roles ro ON ro.id = o.role_id
+       WHERE o.status = 'ok' AND s.active = 1 AND s.client_id = ? AND o.staff_id != ? AND o.restaurant_id IN (${rids.map(() => "?").join(",")}) AND o.start_at >= ? AND o.start_at < ? AND ${shiftVisible(me, "o")}
+       ORDER BY o.start_at, s.name`,
+    ).bind(cid, me.id, ...rids, dayBefore, bounds.end).all<{ staff_id: number; name: string; first_name: string | null; color: string | null; photo_v: number | null; restaurant_id: number; department_id: string; start_at: string; end_at: string; until_close: number }>()).results;
+    for (const m of mineRows) {
+      if (m.status !== "ok") continue;
+      colleaguesOf.set(m.id, others.filter((o) => o.restaurant_id === m.restaurant_id && o.department_id === m.department_id && o.start_at < m.end_at && o.end_at > m.start_at).slice(0, 40)
+        .map((o) => ({ staff_id: o.staff_id, name: o.name, first_name: o.first_name, color: o.color, photo_v: o.photo_v, start_at: o.start_at, end_at: o.end_at, until_close: o.until_close })));
+    }
+  }
+  return c.json({ week: c.req.query("week"), shifts: (r.results as { id: number }[]).map((x) => ({ ...x, colleagues: colleaguesOf.get(x.id) ?? [] })), total_hours, gross_cents: pay.total_cents, unrated_hours: pay.unrated_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });
 });
 
 // SQL sorts "Édouard" after "Zack" (byte order). Names are sorted here instead, accents ignored, French rules.

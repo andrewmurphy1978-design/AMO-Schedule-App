@@ -2404,7 +2404,10 @@ async function renderMine() {
           h("div", { class: "card mine-card" },
             h("div", { class: "mine-info" }, h("span", { class: "time" }, range(s)),
               h("span", { class: "who" }, `${s.restaurant} · ${t(`dept.${s.department_id}`)}`),
-              h("span", { class: "meta" }, [`${roleIcon(s)} ${roleName(s)}`, s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null),
+              h("span", { class: "meta" }, [`${roleIcon(s)} ${roleName(s)}`, s.notes].filter(Boolean).join(" · ")), s.status === "sick_open" ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
+              // the people working with me during this shift
+              s.colleagues?.length ? h("div", { class: "mine-with" }, h("span", { class: "meta" }, `👥 ${t("workingWith")}`),
+                h("div", { class: "mine-people" }, s.colleagues.map((c) => h("span", { class: "mine-person", title: `${c.name} · ${hhmm(c.start_at)}–${c.until_close ? "F" : hhmm(c.end_at)}` }, avatar(c.staff_id, c.name, c.color, c.photo_v, 20), h("b", {}, c.first_name || c.name), h("small", {}, `${hhmm(c.start_at)}–${c.until_close ? "F" : hhmm(c.end_at)}`))))) : null),
             s.status === "ok" && s.end_at > nowLocal() ? h("button", { class: "btn sick-btn", type: "button", onClick: async () => {
               const why = await absenceDialog();
               if (!why) return;
