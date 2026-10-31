@@ -64,6 +64,7 @@ import m0061 from "../migrations/0061_portion_weight.sql";
 import m0062 from "../migrations/0062_fridge_once_open.sql";
 import m0063 from "../migrations/0063_portion_units.sql";
 import m0064 from "../migrations/0064_fruits_category.sql";
+import m0065 from "../migrations/0065_checklist_submitted.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -130,6 +131,7 @@ const MIGRATIONS: [string, string][] = [
   ["0062_fridge_once_open", m0062],
   ["0063_portion_units", m0063],
   ["0064_fruits_category", m0064],
+  ["0065_checklist_submitted", m0065],
 ];
 
 const statements = (sql: string) =>

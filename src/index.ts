@@ -2282,7 +2282,8 @@ app.get("/api/shifts/:id/checklist", async (c) => {
   const picked = new Set(lists.filter((l) => l.kind === "post").map((l) => l.target_id));
   const bfOk = kitchen && (await breakfastRelevant(ctx.db, ctx.sh.restaurant_id, ctx.sh.start_at, ctx.sh.end_at));
   const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string; kind: string }>()).results.filter((p) => p.kind !== "breakfast" || picked.has(p.id) || bfOk).map((p) => ({ id: p.id, name_fr: p.name_fr, name_en: p.name_en, picked: picked.has(p.id) })) : [];
-  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts });
+  const submitted = !!(await ctx.db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(ctx.sh.id).first());
+  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts, submitted });
 });
 app.post("/api/shifts/:id/checklist/posts", async (c) => {
   const id = intParam(c.req.param("id"));
@@ -2360,6 +2361,22 @@ app.put("/api/shifts/:id/checklist/issues", async (c) => {
         await pushToStaff(ctx.db, m.id, { title: `${m.lang === "en" ? "Missing ingredient" : "Ingrédient manquant"} · ${rest}`, body: `${ctx.sh.staff_name.split(" ")[0]} : ${note}`.slice(0, 160), url: "/?view=admin&section=checklists", tag: `missing-${ctx.sh.restaurant_id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
     } catch { /* notifications never block */ }
   })());
+  return c.json({ ok: true });
+});
+
+// "Terminé": close the list even if some tasks are not ticked (they show as left undone in the day's report).
+app.post("/api/shifts/:id/checklist/done", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx) return c.json({ error: "not_found" }, 404);
+  await ctx.db.prepare("INSERT OR IGNORE INTO shift_checklist_submitted (shift_id, submitted_by, submitted_at) VALUES (?, ?, ?)").bind(ctx.sh.id, ctx.me.id, Date.now()).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/shifts/:id/checklist/done", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx) return c.json({ error: "not_found" }, 404);
+  await ctx.db.prepare("DELETE FROM shift_checklist_submitted WHERE shift_id = ?").bind(ctx.sh.id).run();
   return c.json({ ok: true });
 });
 
@@ -2567,7 +2584,8 @@ app.get("/api/my-checklist", async (c) => {
     const p = await checklistProgress(db, sh, me.client_id);
     const kitchen = sh.department_id === "kitchen";
     if (!p.total && !kitchen) continue; // nothing to do for this role
-    if (!test && p.total && p.done === p.total) continue; // finished: the tab goes away
+    const submitted = !!(await db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(sh.id).first());
+    if (!test && ((p.total && p.done === p.total) || submitted)) continue; // finished: the tab goes away
     out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post"),
       next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null });
   }
@@ -2624,7 +2642,7 @@ app.get("/api/admin/checklist-report", requireAdmin, async (c) => {
   for (const sh of shifts) {
     const p = await checklistProgress(db, sh, cid);
     if (!p.total && !(await db.prepare("SELECT 1 FROM roles WHERE id = ? AND department_id = 'kitchen'").bind(sh.role_id).first())) continue;
-    rows.push({ shift_id: sh.id, staff_name: sh.staff_name, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done,
+    rows.push({ shift_id: sh.id, submitted: !!(await db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(sh.id).first()), staff_name: sh.staff_name, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done,
       missing: p.lists.flatMap((l) => l.items.filter((i) => !i.done && !i.issue).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en }))),
       issues: p.lists.flatMap((l) => l.items.filter((i) => i.issue).map((i) => ({ text_fr: i.text_fr, text_en: i.text_en, reason: i.issue!.reason, note: i.issue!.note }))) });
   }

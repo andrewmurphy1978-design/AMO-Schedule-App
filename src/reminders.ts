@@ -44,7 +44,8 @@ export async function sendShiftReminders(env: Env, db: D1Database, nowLocalStr =
       const atEnd = r.anchor === "end";
       // "ends soon" points: the end of the shift, and the handover of every post someone leaves before the end of the shift (list still to do)
       let points: { ref: number; slot: string; what: string[] }[] = [{ ref: asMs(sh.start_at), slot: "", what: [] }];
-      if (atEnd) {
+      if (atEnd && (await db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(sh.id).first())) points = []; // closed with "Terminé"
+      else if (atEnd) {
         const p = await checklistProgress(db, { id: sh.id, staff_id: sh.staff_id, restaurant_id: sh.restaurant_id, role_id: sh.role_id, start_at: sh.start_at, end_at: sh.end_at }, r.client_id);
         const pending = p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue));
         const kitchen = sh.department_id === "kitchen";
