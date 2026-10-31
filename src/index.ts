@@ -2415,13 +2415,13 @@ async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
      JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
   ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
 }
-type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; homemade: boolean; components: string[]; prep_note: string | null; needed?: boolean }[] };
+type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; homemade: boolean; components: string[]; prep_note: string | null; portion_g: number | null; needed?: boolean }[] };
 async function ingredientGroups(db: D1Database, restaurantId: number, needs = false): Promise<IngGroup[]> {
   const groups = (await db.prepare("SELECT id, name_fr, name_en, post_id, position FROM ingredient_groups WHERE restaurant_id = ? ORDER BY position, id").bind(restaurantId).all<Omit<IngGroup, "items">>()).results;
   if (!groups.length) return [];
-  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, homemade, components, prep_note FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; homemade: number; components: string | null; prep_note: string | null }>()).results;
+  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, homemade, components, prep_note, portion_g FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; homemade: number; components: string | null; prep_note: string | null; portion_g: number | null }>()).results;
   const need = needs ? new Set((await db.prepare("SELECT ingredient_id FROM restock_needs WHERE restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number }>()).results.map((r) => r.ingredient_id)) : null;
-  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), prep_note: i.prep_note, ...(need ? { needed: need.has(i.id) } : {}) })) }));
+  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), prep_note: i.prep_note, portion_g: i.portion_g, ...(need ? { needed: need.has(i.id) } : {}) })) }));
 }
 app.get("/api/restock", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
@@ -2449,14 +2449,15 @@ app.get("/api/admin/ingredients", requireAdmin, async (c) => {
   const posts = (await db.prepare("SELECT id, code, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
   return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
 });
-type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; homemade?: boolean; components?: string[]; prep_note?: string | null };
+type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; homemade?: boolean; components?: string[]; prep_note?: string | null; portion_g?: number | null };
 app.put("/api/admin/ingredients", requireAdmin, async (c) => {
   const db = c.env.DB;
   const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }));
   if (!b.restaurant_id || !Array.isArray(b.groups) || b.groups.length > 30) return c.json({ error: "invalid_ingredients" }, 400);
   const groups = b.groups.map((g) => ({ id: g.id, fr: (g.name_fr ?? "").trim(), en: (g.name_en ?? "").trim(), post: g.post_id || null,
     items: (Array.isArray(g.items) ? g.items : []).map((i) => ({ id: i.id, name: (i.name ?? "").trim(), loc: LOCATIONS.includes(i.location as never) ? i.location! : "fridge", cat: CATEGORIES.includes(i.category as never) ? i.category! : null,
-      thaw: i.thaw && i.location === "freezer" ? 1 : 0, home: i.homemade ? 1 : 0, comps: i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : [], note: i.homemade ? (i.prep_note ?? "").trim().slice(0, 200) || null : null })).filter((i) => i.name) })).filter((g) => g.fr);
+      thaw: i.thaw && i.location === "freezer" ? 1 : 0, home: i.homemade ? 1 : 0, comps: i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : [], note: i.homemade ? (i.prep_note ?? "").trim().slice(0, 200) || null : null,
+      portion: i.homemade && typeof i.portion_g === "number" && i.portion_g > 0 && i.portion_g <= 100000 ? Math.round(i.portion_g * 10) / 10 : null })).filter((i) => i.name) })).filter((g) => g.fr);
   if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80 || i.comps.some((x) => x.length > 80)))) return c.json({ error: "invalid_ingredients" }, 400);
   const rid = b.restaurant_id;
   const curGroups = (await db.prepare("SELECT id FROM ingredient_groups WHERE restaurant_id = ?").bind(rid).all<{ id: number }>()).results.map((r) => r.id);
@@ -2473,8 +2474,8 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
     let gid = g.id && keepG.has(g.id) ? g.id : 0;
     if (!gid) gid = (await db.prepare("INSERT INTO ingredient_groups (restaurant_id, name_fr, name_en, post_id, position) VALUES (?, ?, ?, ?, ?)").bind(rid, g.fr, g.en || g.fr, g.post, gi + 1).run()).meta.last_row_id as number;
     await db.batch(g.items.map((i, pos) => i.id && keepI.has(i.id)
-      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, homemade = ?, components = ?, prep_note = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, pos + 1, i.id)
-      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, homemade, components, prep_note, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, pos + 1)));
+      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, homemade = ?, components = ?, prep_note = ?, portion_g = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, i.portion, pos + 1, i.id)
+      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, homemade, components, prep_note, portion_g, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.home, i.comps.length ? JSON.stringify(i.comps) : null, i.note, i.portion, pos + 1)));
   }
   return c.json({ ok: true });
 });

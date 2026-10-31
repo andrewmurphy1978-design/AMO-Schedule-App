@@ -1983,6 +1983,7 @@ function issueDialog(taskText, current) {
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
 const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"]];
+const portionText = (g) => `${Math.round(g * 10) / 10} g / ${Math.round((g / 28.3495) * 10) / 10} oz`;
 // Alphabetical order, with each home-made ingredient right under the ingredient it is made from (indented one level more).
 function ingredientTree(list) {
   const key = (e) => e.name.trim().toLowerCase(), cmp = (a, b) => a.name.localeCompare(b.name, getLang());
@@ -2049,7 +2050,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
       const todo = home.filter((i) => i.needed), rest = home.filter((i) => !i.needed);
       const task = (i) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded([i], false) }),
         h("span", {}, h("b", {}, `${t("prepVerb")} : ${i.name}`), i.components?.length ? h("small", { class: "meta" }, ` · ${t("prepWith")} ${i.components.join(", ")}`) : null,
-          i.prep_note ? h("small", { class: "meta", style: "display:block" }, i.prep_note) : null, h("small", { class: "meta", style: "display:block" }, i.group)));
+          i.prep_note ? h("small", { class: "meta", style: "display:block" }, i.prep_note) : null, i.portion_g ? h("small", { class: "meta", style: "display:block" }, `⚖ ${portionText(i.portion_g)}`) : null, h("small", { class: "meta", style: "display:block" }, i.group)));
       holder.replaceChildren(h("section", { class: "card" }, h("h3", {}, `📝 ${t("prepListTitle")}`, todo.length ? h("small", { class: "meta" }, ` · ${todo.length}`) : null), h("p", { class: "meta" }, t("prepListHelp")),
           todo.length ? todo.map(task) : h("p", { class: "meta" }, home.length ? t("prepNoneNow") : t("prepNoHomemade"))),
         rest.length ? h("section", { class: "card" }, h("h3", {}, t("prepAllTitle")), h("div", { class: "cl-posts" }, rest.map((i) => h("button", { type: "button", class: "chip-btn", title: i.group, onClick: () => setNeeded([i], true) }, `🏠 ${i.name}`)))) : null,
@@ -3249,25 +3250,31 @@ function ingredientsPanel() {
     st.groups.forEach((g, gi) => g.items.forEach((i) => { const k = i.name.trim().toLowerCase(); if (!k) return; const e = m.get(k) ?? { ...i, groups: [] }; e.groups.push(gi); m.set(k, e); }));
     return [...m.values()];
   };
-  async function persist() {
+  // saves everything; with `report`, a failure is handed back (to show it in the open dialog) instead of a toast
+  async function persist(report) {
     const scroll = box.querySelector(".ing-matrix-wrap")?.scrollTop ?? 0;
     try {
       await api("/admin/ingredients", { method: "PUT", body: { restaurant_id: st.restaurant, groups: st.groups } }); toast(t("saved"));
       await load(); const w = box.querySelector(".ing-matrix-wrap"); if (w) w.scrollTop = scroll;
-    } catch (e) { toast(errorText(e)); load(); }
+    } catch (e) { await load(); if (report) return errorText(e); toast(errorText(e)); }
+    return null;
   }
   const dialog = (id) => { let dlg = document.getElementById(id); if (!dlg) { dlg = h("dialog", { id }); document.body.append(dlg); } return dlg; };
   const badges = (e) => h("span", { class: "ing-badges" },
     e.category ? h("span", { class: "ing-badge" }, catLabel(e.category)) : null, h("span", { class: "ing-badge" }, place(e.location)),
     e.thaw ? h("span", { class: "ing-badge thaw", title: t("ingThaw") }, `❄ ${t("ingThawShort")}`) : null,
-    e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null);
+    e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null,
+    e.portion_g ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e.portion_g)}`) : null);
 
   // ---- ingredient dialog (also used to add one) ----
   function ingredientDialog(entry, presetGroup) {
     const dlg = dialog("ing-modal");
     const cur = entry ?? { name: "", category: null, location: "fridge", thaw: false, homemade: false, components: [], prep_note: "", groups: presetGroup !== undefined ? [presetGroup] : [] };
-    const name = h("input", { value: cur.name, maxLength: 80, "aria-label": t("ingName"), required: true });
-    const cat = h("select", { "aria-label": t("ingCategory") }, h("option", { value: "" }, `— ${t("ingNoCategory")}`), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: cur.category === v }, t(key))));
+    const name = h("input", { value: cur.name, maxLength: 80, "aria-label": t("ingName") });
+    const err = h("p", { class: "form-error", role: "alert", hidden: true });
+    const fail = (msg) => { err.textContent = `⚠ ${msg}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); };
+    let catTouched = !!entry;
+    const cat = h("select", { "aria-label": t("ingCategory"), onChange: () => { catTouched = true; } }, h("option", { value: "" }, `— ${t("ingNoCategory")}`), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: cur.category === v }, t(key))));
     const loc = h("select", { "aria-label": t("ingLocation"), onChange: () => sync() }, Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: cur.location === v }, `${ic} ${t(key)}`)));
     const thaw = h("input", { type: "checkbox", checked: !!cur.thaw });
     const thawRow = h("label", { class: "check" }, thaw, h("span", {}, `❄ ${t("ingThaw")}`));
@@ -3277,25 +3284,38 @@ function ingredientsPanel() {
     const search = h("input", { type: "search", placeholder: t("ingSearch"), "aria-label": t("ingSearch"), onInput: () => drawComps() });
     const compList = h("div", { class: "ing-comps" });
     const others = () => unique().map((e) => e.name).filter((n) => !same(n, cur.name) && !same(n, name.value)).sort((a, b) => a.localeCompare(b, lang));
+    // a new home-made ingredient takes the category of the ingredient it is made from, until a category is chosen by hand
+    const autoCat = () => {
+      if (catTouched) return;
+      const base = [...comps].map((c) => unique().find((e) => same(e.name, c))).find((e) => e?.category);
+      cat.value = base?.category ?? "";
+    };
     const drawComps = () => {
       const q = search.value.trim().toLowerCase();
       compList.replaceChildren(...[...new Set([...comps, ...others()])].filter((n) => comps.has(n) || !q || n.toLowerCase().includes(q)).filter((n) => !q || n.toLowerCase().includes(q) || comps.has(n))
-        .map((n) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: comps.has(n), onChange: (e) => { if (e.target.checked) comps.add(n); else comps.delete(n); } }), h("span", {}, n))));
+        .map((n) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: comps.has(n), onChange: (e) => { if (e.target.checked) comps.add(n); else comps.delete(n); autoCat(); } }), h("span", {}, n))));
     };
-    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note);
+    // weight of one portion, in grams and ounces (each follows the other)
+    const OZ = 28.3495, r1 = (x) => String(Math.round(x * 10) / 10);
+    const grams = h("input", { type: "number", min: "0", step: "0.1", inputmode: "decimal", value: cur.portion_g ? r1(cur.portion_g) : "", "aria-label": `${t("ingPortion")} (g)`, onInput: () => { ounces.value = grams.value ? r1(Number(grams.value) / OZ) : ""; } });
+    const ounces = h("input", { type: "number", min: "0", step: "0.1", inputmode: "decimal", value: cur.portion_g ? r1(cur.portion_g / OZ) : "", "aria-label": `${t("ingPortion")} (oz)`, onInput: () => { grams.value = ounces.value ? r1(Number(ounces.value) * OZ) : ""; } });
+    const portion = h("div", { class: "ing-portion" }, h("span", {}, `⚖ ${t("ingPortion")}`), grams, h("span", {}, "g"), h("span", {}, "="), ounces, h("span", {}, "oz"));
+    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
         e.preventDefault();
-        const nn = name.value.trim(); if (!nn) return;
+        err.hidden = true;
+        const nn = name.value.trim(); if (!nn) { fail(t("ingNameRequired")); name.focus(); return; }
         const old = entry?.name;
+        if ((!entry || !same(entry.name, nn)) && unique().some((x) => same(x.name, nn))) { fail(t("ingNameTaken")); name.focus(); return; }
         // an ingredient lives in the posts it is ticked for: with none it would silently disappear
         if (!gboxes.some((x) => x.checked)) {
-          if (!entry) { toast(t("ingPickPost")); return; }
+          if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null };
+        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
           if (idx >= 0 && want) Object.assign(g.items[idx], fields);
@@ -3304,7 +3324,9 @@ function ingredientsPanel() {
         });
         // renamed: the home-made ingredients made from it follow
         if (old && !same(old, nn)) for (const g of st.groups) for (const i of g.items) i.components = i.components.map((x) => (same(x, old) ? nn : x));
-        close(); await persist();
+        const problem = await persist(true);
+        if (problem) { fail(problem); return; }
+        close();
       } },
       h("h2", {}, entry ? t("ingEditTitle") : t("ingAdd")),
       h("label", { class: "field" }, h("span", {}, t("ingName")), name),
@@ -3312,6 +3334,7 @@ function ingredientsPanel() {
       thawRow,
       h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
       h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
+      err,
       h("div", { class: "actions" },
         entry ? h("button", { class: "btn danger", type: "button", onClick: async () => {
           if (!(await ask(`${t("ingConfirmDeleteOne")} « ${entry.name} » ?`))) return;
@@ -3328,16 +3351,17 @@ function ingredientsPanel() {
   // ---- group dialog ----
   function groupDialog(g) {
     const dlg = dialog("ing-group-modal");
-    const fr = h("input", { value: g?.name_fr ?? "", maxLength: 60, required: true, "aria-label": t("ingGroupName") }), en = h("input", { value: g?.name_en ?? "", maxLength: 60, "aria-label": t("ingGroupNameEn") });
+    const gerr = h("p", { class: "form-error", role: "alert", hidden: true });
+    const fr = h("input", { value: g?.name_fr ?? "", maxLength: 60, "aria-label": t("ingGroupName") }), en = h("input", { value: g?.name_en ?? "", maxLength: 60, "aria-label": t("ingGroupNameEn") });
     const post = h("select", { "aria-label": t("ingLinkedPost") }, h("option", { value: "" }, t("ingNoPost")), st.posts.map((p) => h("option", { value: p.id, selected: g?.post_id === p.id }, nm(p))));
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
-        e.preventDefault(); if (!fr.value.trim()) return;
+        e.preventDefault(); if (!fr.value.trim()) { gerr.textContent = `⚠ ${t("ingGroupNameRequired")}`; gerr.hidden = false; fr.focus(); return; }
         if (g) Object.assign(g, { name_fr: fr.value.trim(), name_en: en.value.trim(), post_id: Number(post.value) || null });
         else st.groups.push({ name_fr: fr.value.trim(), name_en: en.value.trim(), post_id: Number(post.value) || null, items: [] });
         dlg.close(); await persist();
       } },
       h("h2", {}, g ? t("ingEditGroup") : t("ingAddGroup")),
-      h("label", { class: "field" }, h("span", {}, t("ingGroupName")), fr), h("label", { class: "field" }, h("span", {}, t("ingGroupNameEn")), en), h("label", { class: "field" }, h("span", {}, t("ingLinkedPost")), post),
+      h("label", { class: "field" }, h("span", {}, t("ingGroupName")), fr), h("label", { class: "field" }, h("span", {}, t("ingGroupNameEn")), en), h("label", { class: "field" }, h("span", {}, t("ingLinkedPost")), post), gerr,
       h("div", { class: "actions" },
         g ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("ingConfirmDeleteGroup")))) return; st.groups.splice(st.groups.indexOf(g), 1); dlg.close(); await persist(); } }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
@@ -3392,7 +3416,7 @@ function ingredientsPanel() {
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note })) }));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null })) }));
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
