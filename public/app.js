@@ -3347,17 +3347,21 @@ function ingredientsPanel() {
     const cols = st.groups.map((g, gi) => ({ g, gi })).filter(({ g }) => g.name_fr.trim());
     const rows = unique().filter((r) => !st.catFilter || (st.catFilter === "none" ? !r.category : r.category === st.catFilter));
     const bfOf = (g) => { const code = st.posts.find((p) => p.id === g.post_id)?.code, bf = st.posts.find((p) => p.code === (code === "subs" ? "bf_eggs" : code === "pizza" ? "bf_back" : "")); return bf ? nm(bf) : ""; };
+    // rows under their category (those without one at the end)
+    const byCat = [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, rows.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))]).filter(([, list]) => list.length);
     return [h("p", { class: "meta" }, t("ingMatrixHelp")),
       h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`),
         h("select", { "aria-label": t("ingCategory"), onChange: (e) => { st.catFilter = e.target.value; draw(); } }, h("option", { value: "" }, t("ingAllCategories")), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: st.catFilter === v }, t(key))), h("option", { value: "none", selected: st.catFilter === "none" }, t("ingNoCategory")))),
       h("div", { class: "ing-matrix-wrap" }, h("table", { class: "ing-matrix" },
-        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingCategory")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
-        h("tbody", {}, rows.map((r) => h("tr", {}, h("th", { scope: "row" }, r.name, r.thaw ? " ❄" : "", r.homemade ? " 🏠" : ""), h("td", {}, r.category ? catLabel(r.category) : "—"), h("td", {}, place(r.location)),
-          ...cols.map(({ g, gi }) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: r.groups.includes(gi), "aria-label": `${r.name} · ${gname(g)}`, onChange: async (e) => {
-            if (e.target.checked) g.items.push({ ...r, id: undefined, components: [...(r.components ?? [])] }); else g.items = g.items.filter((i) => !same(i.name, r.name));
-            await persist();
-          } }))),
-          h("td", {}, editBtn(r))))))) ];
+        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
+        h("tbody", {}, byCat.flatMap(([label, list]) => [
+          h("tr", { class: "ing-cat-row" }, h("th", { colSpan: 3 + cols.length, scope: "colgroup" }, label, h("small", { class: "meta" }, ` · ${list.length}`))),
+          ...list.map((r) => h("tr", {}, h("th", { scope: "row" }, r.name, r.thaw ? " ❄" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
+            ...cols.map(({ g, gi }) => h("td", { class: "ing-check" }, h("input", { type: "checkbox", checked: r.groups.includes(gi), "aria-label": `${r.name} · ${gname(g)}`, onChange: async (e) => {
+              if (e.target.checked) g.items.push({ ...r, id: undefined, components: [...(r.components ?? [])] }); else g.items = g.items.filter((i) => !same(i.name, r.name));
+              await persist();
+            } }))),
+            h("td", {}, editBtn(r))))])))) ];
   }
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
