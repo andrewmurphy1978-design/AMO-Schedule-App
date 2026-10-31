@@ -3290,6 +3290,11 @@ function ingredientsPanel() {
         e.preventDefault();
         const nn = name.value.trim(); if (!nn) return;
         const old = entry?.name;
+        // an ingredient lives in the posts it is ticked for: with none it would silently disappear
+        if (!gboxes.some((x) => x.checked)) {
+          if (!entry) { toast(t("ingPickPost")); return; }
+          if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
+        }
         const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
