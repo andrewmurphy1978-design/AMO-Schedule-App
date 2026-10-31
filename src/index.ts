@@ -2246,7 +2246,7 @@ app.get("/api/my-shifts", async (c) => {
   for (const x of payRows) { const b = bestRate.get(x.id); if (b != null && (x.rate_cents == null || b > x.rate_cents)) x.rate_cents = b; }
   const weekDays = Array.from({ length: 8 }, (_, i) => new Date(Date.parse(`${bounds.start.slice(0, 10)}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10));
   const pay = computeCosts(payRows, weekDays);
-  // Who else works during each of my shifts (same restaurant and department, published shifts). Names only: this does not depend on which schedules I may open.
+  // Who else works during each of my shifts (same restaurant, every department, published shifts). Names only: this does not depend on which schedules I may open.
   const mineRows = r.results as { id: number; restaurant_id: number; department_id: string; start_at: string; end_at: string; status: string }[];
   const colleaguesOf = new Map<number, unknown[]>();
   if (mineRows.length) {
@@ -2260,8 +2260,8 @@ app.get("/api/my-shifts", async (c) => {
     ).bind(cid, me.id, ...rids, dayBefore, bounds.end).all<{ staff_id: number; name: string; first_name: string | null; color: string | null; photo_v: number | null; restaurant_id: number; department_id: string; start_at: string; end_at: string; until_close: number }>()).results;
     for (const m of mineRows) {
       if (m.status !== "ok") continue;
-      colleaguesOf.set(m.id, others.filter((o) => o.restaurant_id === m.restaurant_id && o.department_id === m.department_id && o.start_at < m.end_at && o.end_at > m.start_at).slice(0, 40)
-        .map((o) => ({ staff_id: o.staff_id, name: o.name, first_name: o.first_name, color: o.color, photo_v: o.photo_v, start_at: o.start_at, end_at: o.end_at, until_close: o.until_close })));
+      colleaguesOf.set(m.id, others.filter((o) => o.restaurant_id === m.restaurant_id && o.start_at < m.end_at && o.end_at > m.start_at).slice(0, 80)
+        .map((o) => ({ department_id: o.department_id, staff_id: o.staff_id, name: o.name, first_name: o.first_name, color: o.color, photo_v: o.photo_v, start_at: o.start_at, end_at: o.end_at, until_close: o.until_close })));
     }
   }
   return c.json({ week: c.req.query("week"), shifts: (r.results as { id: number }[]).map((x) => ({ ...x, colleagues: colleaguesOf.get(x.id) ?? [] })), total_hours, gross_cents: pay.total_cents, unrated_hours: pay.unrated_hours, limits: { overtime_hours: mine ? Math.min(general, mine.max_weekly_hours) : general, personal_max: mine?.max_weekly_hours ?? null } });

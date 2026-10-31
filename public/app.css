@@ -1019,3 +1019,5 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .ing-portion{flex-wrap:nowrap;gap:.3rem}.ing-portion>span:first-child{flex:1 1 auto;min-width:0;font-size:.85rem}.ing-portion input{width:4.4rem;min-width:0;flex:0 0 auto;padding:0 .4rem;text-align:right}.ing-portion>span:not(:first-child){flex:0 0 auto}
 .ing-portion.count input:first-of-type{width:4.4rem}.ing-portion.count input:nth-of-type(2){flex:1 1 auto;width:auto;text-align:left}
 .mine-with{margin-top:.35rem;display:grid;gap:.2rem}.mine-people{display:flex;flex-wrap:wrap;gap:.3rem .5rem}.mine-person{display:inline-flex;align-items:center;gap:.3rem;padding:.1rem .5rem .1rem .15rem;border:1px solid var(--line);border-radius:999px;background:var(--bg);font-size:.8rem}.mine-person small{color:var(--muted)}
+.mine-dept{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem .5rem}.mine-dept-name{min-width:5.5rem;color:var(--muted);font-weight:700;text-transform:uppercase;font-size:.7rem;letter-spacing:.03em}
+.mine-dept-name{font-size:.78rem;color:var(--muted);font-weight:700;text-transform:none;letter-spacing:0;min-width:9rem}.mine-dept-name.team{color:var(--fg,inherit)}
