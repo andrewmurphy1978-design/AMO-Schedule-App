@@ -67,6 +67,9 @@ import m0064 from "../migrations/0064_fruits_category.sql";
 import m0065 from "../migrations/0065_checklist_submitted.sql";
 import m0066 from "../migrations/0066_voice_assist.sql";
 import m0067 from "../migrations/0067_deaf_mute_transcripts.sql";
+import m0068 from "../migrations/0068_delivery_start.sql";
+import m0069 from "../migrations/0069_suppliers_orders.sql";
+import m0070 from "../migrations/0070_default_suppliers.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -136,6 +139,9 @@ const MIGRATIONS: [string, string][] = [
   ["0065_checklist_submitted", m0065],
   ["0066_voice_assist", m0066],
   ["0067_deaf_mute_transcripts", m0067],
+  ["0068_delivery_start", m0068],
+  ["0069_suppliers_orders", m0069],
+  ["0070_default_suppliers", m0070],
 ];
 
 const statements = (sql: string) =>

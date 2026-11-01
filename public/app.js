@@ -56,6 +56,11 @@ function h(tag, attrs = {}, ...kids) {
   Element.prototype.replaceChildren = function (...nodes) {
     return native.apply(this, nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false));
   };
+  // the same for append()
+  const nativeAppend = Element.prototype.append;
+  Element.prototype.append = function (...nodes) {
+    return nativeAppend.apply(this, nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false));
+  };
 }
 
 function timeField(value = "00:00") {
@@ -127,9 +132,12 @@ const closeOf = (restaurantId, dow) => { const r = state.restaurants.find((x) =>
 const dowOf = (ymdStr) => (parseYmd(ymdStr).getDay() + 6) % 7;
 // Opening time for a weekday (0 = Monday ... 6 = Sunday).
 // Hours of one date: the weekly hours unless the day is closed or has special hours.
-const hoursOn = (restaurantId, day) => {
+// With a department, the hours of that department: delivery starts later (and ends at closing time).
+const hoursOn = (restaurantId, day, dept = null) => {
   const r = state.restaurants.find((x) => x.id === restaurantId), dow = dowOf(day);
-  return hoursFor(r?.special_hours, day, openOf(restaurantId, dow), closeOf(restaurantId, dow));
+  const h0 = hoursFor(r?.special_hours, day, openOf(restaurantId, dow), closeOf(restaurantId, dow));
+  if (dept === "delivery" && !h0.closed) { const d = r?.delivery_by_dow?.[dow]; if (d && d > h0.open && d < h0.close) return { ...h0, open: d }; }
+  return h0;
 };
 const openOf = (restaurantId, dow) => { const r = state.restaurants.find((x) => x.id === restaurantId); return r?.open_by_dow?.[dow] ?? r?.open_time ?? "07:00"; };
 const range = (s) => `${hhmm(s.start_at)} – ${s.until_close ? "F" : hhmm(s.end_at)}`;
@@ -940,7 +948,7 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
       for (const [slot, n] of Object.entries(r.targets)) dayTargets[slot] = (dayTargets[slot] ?? 0) + n;
       labels = r.labels;
     }
-    const hrs = hoursOn(sel.restaurant, day);
+    const hrs = hoursOn(sel.restaurant, day, sel.departments.length === 1 ? sel.departments[0] : null);
     const openMin = toMin(hrs.open), closeMin = toMin(hrs.close);
     const wins = hrs.closed ? [] : targetWindows(dayTargets, openMin, closeMin, boundsOf(sel.restaurant));
     const items = data.shifts.map((s) => ({ s, span: shiftSpan(s, day) })).filter((x) => x.span.s < 1440 && x.span.e > 0)
@@ -1219,7 +1227,7 @@ function openShiftModal({ shift, prefill = {}, roster, data }) {
     const role = state.roles.find((r) => r.id === Number(roleSel.value));
     if (!role?.pre_open_minutes) return;
     const dow = (parseYmd(date.value).getDay() + 6) % 7;
-    const m = toMin(hoursOn(sel.restaurant, date.value).open) - role.pre_open_minutes;
+    const m = toMin(hoursOn(sel.restaurant, date.value, role.department_id).open) - role.pre_open_minutes;
     if (m >= 0) start.value = fromMin(m);
   }
   roleSel.addEventListener("change", applyPreOpen); date.addEventListener("change", applyPreOpen);
@@ -2062,15 +2070,48 @@ async function renderChecklist() {
   const hasEnd = shifts.length > 0 || (test && state.me.me.is_admin);
   let sub = state.listsSub ?? (hasEnd ? "end" : "restock");
   if (sub === "end" && !hasEnd && restock.length) sub = "restock";
-  if ((sub === "restock" || sub === "prep") && !restock.length) sub = "end";
+  if ((sub === "restock" || sub === "prep" || sub === "orders") && !restock.length) sub = "end";
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
-  if (restock.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ["restock", t("listsRestock")], ["prep", t("listsPrep")]].map(([id, label]) =>
+  if (restock.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ["restock", t("listsRestock")], ["prep", t("listsPrep")], ["orders", t("listsOrders")]].map(([id, label]) =>
     h("button", { type: "button", role: "tab", "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, label))));
+  if (sub === "orders") { await renderOrders(box, restock); return; }
   if (sub === "restock" || sub === "prep") { await renderRestock(box, restock, sub); return; }
   if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
   if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`), test ? h("p", { class: "meta" }, t("checklistTestNoShift")) : null); return; }
   for (const sh of shifts) box.append(await checklistCard(sh.id, sh, test));
+}
+// "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.
+async function renderOrders(box, restaurantIds) {
+  const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
+  if (!restos.some((r) => r.id === state.restockRestaurant)) state.restockRestaurant = (restos.find((r) => r.id === state.sel.restaurant) ?? restos[0])?.id ?? null;
+  const rid = state.restockRestaurant;
+  if (!rid) { box.append(h("div", { class: "empty" }, t("noSchedules"))); return; }
+  const d = await api(`/orders?restaurant=${rid}`);
+  const reload = () => render();
+  const input = h("input", { list: "order-ingredients", maxLength: 80, placeholder: t("orderSearch"), "aria-label": t("orderSearch") });
+  const note = h("input", { maxLength: 200, placeholder: t("orderNote"), "aria-label": t("orderNote") });
+  const report = async () => {
+    if (!input.value.trim()) return;
+    try { await api("/orders", { method: "POST", body: { restaurant_id: rid, name: input.value, note: note.value } }); toast(t("orderReported")); reload(); } catch (e) { toast(errorText(e)); }
+  };
+  const when = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const supName = (id) => d.suppliers.find((x) => x.id === id)?.name;
+  const row = (o, supplierId) => h("div", { class: "order-row" },
+    h("div", {}, h("b", {}, o.name), o.note ? h("small", { class: "meta" }, ` · ${o.note}`) : null,
+      h("small", { class: "meta", style: "display:block" }, `${t("orderBy")} ${o.reported_by ?? "—"} · ${when(o.reported_at)}${o.supplier_ids.filter((s) => s !== supplierId).length ? ` · ${t("orderAlso")} ${o.supplier_ids.filter((s) => s !== supplierId).map(supName).join(", ")}` : ""}`)),
+    d.can_order ? h("button", { class: "btn small primary", type: "button", onClick: async () => { try { await api(`/orders/${o.id}/ordered`, { method: "PUT", body: { supplier_id: supplierId } }); reload(); } catch (e) { toast(errorText(e)); } } }, t("orderDone")) : null,
+    h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), onClick: async () => { if (!(await ask(t("orderCancelConfirm")))) return; try { await api(`/orders/${o.id}`, { method: "DELETE" }); reload(); } catch (e) { toast(errorText(e)); } } }, "✕"));
+  const groups = [...d.suppliers.map((sp) => ({ sp, items: d.open.filter((o) => o.supplier_ids.includes(sp.id)) })), { sp: null, items: d.open.filter((o) => !o.supplier_ids.length) }].filter((g) => g.items.length);
+  box.append(h("p", { class: "meta" }, t("orderHelp")),
+    restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null,
+    h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("datalist", { id: "order-ingredients" }, d.ingredients.map((n) => h("option", { value: n }))),
+      h("div", { class: "order-form" }, input, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
+    h("h3", { class: "restock-title" }, `${t("orderOpen")}${d.open.length ? ` · ${d.open.length}` : ""}`),
+    ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone")),
+      g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
+      g.items.map((o) => row(o, g.sp?.id ?? null)))) : [h("p", { class: "meta" }, t("orderEmpty"))]),
+    d.done.length ? h("details", { class: "order-done" }, h("summary", {}, t("orderRecent")), d.done.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${t("orderOrderedAt")} ${when(o.ordered_at)}${o.supplier ? ` · ${o.supplier}` : ""}`)))) : null);
 }
 // Restocking: tick what is missing at each post; the list to fetch is sorted by the place where things are kept.
 state.restockRestaurant = null;
@@ -2101,7 +2142,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
     const fetchBy = Object.keys(LOCATION_INFO).map((loc) => [loc, [...need.values()].filter((e) => e.location === loc)]).filter(([, list]) => list.length);
     const toFetch = h("section", { class: "card restock-fetch" }, h("h3", {}, `🛒 ${t("restockToFetch")}`, need.size ? h("small", { class: "meta" }, ` · ${need.size} ${t("restockCount")}`) : null),
       fetchBy.length ? h("div", { class: "restock-places" }, fetchBy.map(([loc, list]) => h("div", { class: "restock-place" }, h("h4", {}, `${LOCATION_INFO[loc][0]} ${t(LOCATION_INFO[loc][1])} (${list.length})`),
-        list.map((e) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", checked: fetched.has(e.key), onChange: (ev) => { if (e.ids.length) setNeeded(all.filter((i) => e.ids.includes(i.id)), false); else { if (ev.target.checked) fetched.add(e.key); else fetched.delete(e.key); } } }), h("span", {}, e.name), h("small", { class: "meta" }, ` · ${e.why.join(", ")}`)))))) : h("p", { class: "meta" }, t("restockNothing")));
+        list.map((e) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", checked: fetched.has(e.key), onChange: (ev) => { if (e.ids.length) setNeeded(all.filter((i) => e.ids.includes(i.id)), false); else { if (ev.target.checked) fetched.add(e.key); else fetched.delete(e.key); } } }), h("span", {}, e.name), h("small", { class: "meta" }, ` · ${e.why.join(", ")}`), e.ids.length ? h("button", { type: "button", class: "btn small rupture", title: t("orderRupture"), onClick: async (ev) => { ev.preventDefault(); try { await api("/orders", { method: "POST", body: { restaurant_id: rid, name: e.name } }); all.filter((i) => e.ids.includes(i.id)).forEach((i) => { i.needed = false; }); toast(t("orderReported")); paint(); } catch (err) { toast(errorText(err)); } } }, `🚫 ${t("orderRupture")}`) : null))))) : h("p", { class: "meta" }, t("restockNothing")));
     if (mode === "prep") {
       const home = all.filter((i) => i.homemade);
       const todo = home.filter((i) => i.needed), rest = home.filter((i) => !i.needed);
@@ -3392,14 +3433,15 @@ function previewChecklist(title, items, role) {
 // the day before (freezer) or is home-made from other ingredients. Everything is edited in dialogs and saved at once.
 function ingredientsPanel() {
   const box = h("section", { class: "panel ing-panel" });
-  const st = { restaurant: state.restaurants[0]?.id ?? null, groups: [], posts: [], view: "post", catFilter: "" };
+  const st = { restaurant: state.restaurants[0]?.id ?? null, groups: [], posts: [], suppliers: [], view: "post", catFilter: "" };
   const lang = getLang(), nm = (o) => (lang === "en" ? o.name_en : o.name_fr), gname = (g) => (lang === "en" ? g.name_en || g.name_fr : g.name_fr);
   const same = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
   const catLabel = (v) => { const c = INGREDIENT_CATEGORIES.find(([x]) => x === v); return c ? t(c[1]) : t("ingNoCategory"); };
   const place = (v) => `${LOCATION_INFO[v]?.[0] ?? ""} ${t(LOCATION_INFO[v]?.[1] ?? "locFridge")}`;
   async function load() {
-    const d = await api(`/admin/ingredients?restaurant=${st.restaurant}`);
-    st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i, components: [...(i.components ?? [])] })) })); st.posts = d.posts; draw();
+    const [d, sup] = await Promise.all([api(`/admin/ingredients?restaurant=${st.restaurant}`), api("/admin/suppliers")]);
+    st.suppliers = sup;
+    st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i, components: [...(i.components ?? [])], supplier_ids: [...(i.supplier_ids ?? [])] })) })); st.posts = d.posts; draw();
   }
   // one entry per ingredient name (the same ingredient can be in several posts)
   const unique = () => {
@@ -3422,7 +3464,8 @@ function ingredientsPanel() {
     e.thaw ? h("span", { class: "ing-badge thaw", title: t("ingThaw") }, `❄ ${t("ingThawShort")}`) : null,
     e.fridge_open ? h("span", { class: "ing-badge thaw", title: t("ingFridgeOpen") }, `🧊 ${t("ingFridgeOpenShort")}`) : null,
     e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null,
-    portionText(e) ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e)}`) : null);
+    portionText(e) ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e)}`) : null,
+    e.supplier_ids?.length ? h("span", { class: "ing-badge sup" }, `🚚 ${e.supplier_ids.map((id) => st.suppliers.find((x) => x.id === id)?.name).filter(Boolean).join(", ")}`) : null);
 
   // ---- ingredient dialog (also used to add one) ----
   function ingredientDialog(entry, presetGroup) {
@@ -3467,6 +3510,7 @@ function ingredientsPanel() {
     const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
     const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion, portionCount);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
+    const supSel = new Set(cur.supplier_ids ?? []);
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
@@ -3480,7 +3524,7 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
+        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
           portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
@@ -3499,6 +3543,7 @@ function ingredientsPanel() {
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCategory")), cat), h("label", { class: "field" }, h("span", {}, t("ingLocation")), loc)),
       thawRow, fopenRow,
       h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
+      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
       h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
       err,
       h("div", { class: "actions" },
@@ -3536,6 +3581,35 @@ function ingredientsPanel() {
   const editBtn = (e) => h("button", { class: "btn small", type: "button", onClick: () => ingredientDialog(e) }, `✎ ${t("editWord")}`);
   const row = (e) => h("div", { class: "ing-line" }, h("b", {}, e.name), badges(e), editBtn(e));
 
+  // ---- suppliers ----
+  function supplierDialog(sp) {
+    const dlg = dialog("ing-supplier-modal");
+    const err = h("p", { class: "form-error", role: "alert", hidden: true });
+    const name = h("input", { value: sp?.name ?? "", maxLength: 80, "aria-label": t("supName") }), phone = h("input", { type: "tel", value: sp?.phone ?? "", maxLength: 40, "aria-label": t("supPhone") });
+    const email = h("input", { type: "email", value: sp?.email ?? "", maxLength: 120, "aria-label": t("supEmail") }), notes = h("textarea", { rows: 3, maxLength: 300, "aria-label": t("supNotes") }, sp?.notes ?? "");
+    const save = async (list) => { try { await api("/admin/suppliers", { method: "PUT", body: { suppliers: list } }); toast(t("saved")); dlg.close(); await load(); } catch (e) { err.textContent = `⚠ ${e.body?.error === "invalid_suppliers" ? t("supInvalid") : errorText(e)}`; err.hidden = false; } };
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
+        e.preventDefault(); err.hidden = true;
+        if (!name.value.trim()) { err.textContent = `⚠ ${t("supNameRequired")}`; err.hidden = false; name.focus(); return; }
+        const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value };
+        await save(sp ? st.suppliers.map((x) => (x.id === sp.id ? one : x)) : [...st.suppliers, one]);
+      } },
+      h("h2", {}, sp ? t("supEdit") : t("supAdd")),
+      h("label", { class: "field" }, h("span", {}, t("supName")), name),
+      h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supPhone")), phone), h("label", { class: "field" }, h("span", {}, t("supEmail")), email)),
+      h("label", { class: "field" }, h("span", {}, t("supNotes")), notes), err,
+      h("div", { class: "actions" },
+        sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("postsRemove")) : null,
+        h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.showModal();
+  }
+  function viewSuppliers() {
+    const count = (id) => unique().filter((e) => e.supplier_ids?.includes(id)).length;
+    return [h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
+      st.suppliers.length ? h("div", { class: "ing-lines tree" }, st.suppliers.map((sp) => h("div", { class: "ing-line" }, h("b", {}, sp.name),
+        h("span", { class: "ing-badges" }, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
+        sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];
+  }
   function viewByPost() {
     const uniq = unique();
     return st.groups.map((g, gi) => h("div", { class: "card ing-group" },
@@ -3575,19 +3649,19 @@ function ingredientsPanel() {
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
     const copySel = h("select", { "aria-label": t("ingCopyFrom") }, others.map((r) => h("option", { value: r.id }, r.name)));
-    const views = [["post", t("ingViewByPost")], ["category", t("ingViewByCategory")], ["table", t("ingViewTable")]];
+    const views = [["post", t("ingViewByPost")], ["category", t("ingViewByCategory")], ["table", t("ingViewTable")], ["suppliers", t("ingViewSuppliers")]];
     box.replaceChildren(h("h2", {}, t("adminIngredients")), h("p", { class: "meta" }, t("ingredientsHelp")),
       h("div", { class: "ing-top" },
         h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: state.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; load(); } })),
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null, portion_qty: i.portion_qty ?? null, portion_unit: i.portion_unit ?? null })) }));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null, portion_qty: i.portion_qty ?? null, portion_unit: i.portion_unit ?? null, supplier_ids: [...(i.supplier_ids ?? [])] })) }));
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
-      ...(st.view === "table" ? viewTable() : st.view === "category" ? viewByCategory() : viewByPost()),
-      st.view === "table" ? null : h("div", { class: "actions" }, st.view === "post" ? h("button", { class: "btn", type: "button", onClick: () => groupDialog(null) }, `+ ${t("ingAddGroup")}`) : h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`)));
+      ...(st.view === "table" ? viewTable() : st.view === "suppliers" ? viewSuppliers() : st.view === "category" ? viewByCategory() : viewByPost()),
+      st.view === "table" || st.view === "suppliers" ? null : h("div", { class: "actions" }, st.view === "post" ? h("button", { class: "btn", type: "button", onClick: () => groupDialog(null) }, `+ ${t("ingAddGroup")}`) : h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`)));
   }
   load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
   return box;
@@ -3724,16 +3798,17 @@ function hoursPanel(ov) {
     const resto = ov.restaurants.find((r) => r.id === st.restaurant);
     if (!resto) { box.replaceChildren(h("h2", {}, t("hoursTitle")), h("div", { class: "empty" }, t("noSchedules"))); return; }
     const rows = Array.from({ length: 7 }, (_, i) => {
-      const bf = resto.breakfast_by_dow?.[i], dn = resto.dinner_by_dow?.[i];
+      const bf = resto.breakfast_by_dow?.[i], dn = resto.dinner_by_dow?.[i], dv = resto.delivery_by_dow?.[i];
       const open = timeField(resto.open_by_dow?.[i] ?? resto.open_time), close = timeField(resto.close_by_dow?.[i] ?? resto.close_time);
       const bfOn = h("input", { type: "checkbox", checked: !!bf, "aria-label": `${mealWord()} — ${weekdayName(i)}` }), bfEnd = timeField(bf?.end ?? "11:00");
       const dnOn = h("input", { type: "checkbox", checked: !!dn, "aria-label": `${t("dinnerStarts")} — ${weekdayName(i)}` }), dnAt = timeField(dn ?? "17:00");
+      const delivery = timeField(dv ?? resto.open_by_dow?.[i] ?? resto.open_time);
       const sync = () => { bfEnd.hidden = !bfOn.checked; dnAt.hidden = !dnOn.checked; for (const [el, on] of [[bfEnd, bfOn.checked], [dnAt, dnOn.checked]]) if (el.parentElement) el.parentElement.style.visibility = on ? "" : "hidden"; };
       bfOn.addEventListener("change", sync); dnOn.addEventListener("change", sync); sync();
-      return { open, close, bfOn, bfEnd, dnOn, dnAt };
+      return { open, close, bfOn, bfEnd, dnOn, dnAt, delivery };
     });
     const copyMonday = () => rows.slice(1).forEach((r) => {
-      const m = rows[0]; r.open.value = m.open.value; r.close.value = m.close.value; r.bfOn.checked = m.bfOn.checked; r.bfEnd.value = m.bfEnd.value; r.dnOn.checked = m.dnOn.checked; r.dnAt.value = m.dnAt.value;
+      const m = rows[0]; r.open.value = m.open.value; r.close.value = m.close.value; r.bfOn.checked = m.bfOn.checked; r.bfEnd.value = m.bfEnd.value; r.dnOn.checked = m.dnOn.checked; r.dnAt.value = m.dnAt.value; r.delivery.value = m.delivery.value;
       r.bfOn.dispatchEvent(new Event("change")); r.dnOn.dispatchEvent(new Event("change"));
     });
     box.replaceChildren(
@@ -3741,19 +3816,20 @@ function hoursPanel(ov) {
       h("p", { class: "meta" }, `${t("hoursHelp")} ${mealText(t("breakfastHelpShort"))}`),
       h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: ov.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; draw(); } })),
       h("div", { class: "hrs-table" },
-        h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerWord")), h("span", {}, t("startsAt"))),
+        h("div", { class: "hrs-head" }, h("span"), h("span", {}, t("openTime")), h("span", {}, t("closeTime")), h("span", {}, mealWord()), h("span", {}, t("breakfastUntil")), h("span", {}, t("dinnerWord")), h("span", {}, t("startsAt")), h("span", {}, t("deliveryStarts"))),
         rows.map((r, i) => h("div", { class: "hrs-row" }, h("strong", {}, weekdayName(i)),
           h("label", { class: "mini" }, h("span", {}, t("openTime")), r.open),
           h("label", { class: "mini" }, h("span", {}, t("closeTime")), r.close),
           h("label", { class: "check hrs-bf" }, r.bfOn, h("span", { class: "hrs-until" }, mealWord())),
           h("div", { class: "mini" }, h("span", {}, t("breakfastUntil")), r.bfEnd),
           h("label", { class: "check hrs-bf" }, r.dnOn, h("span", { class: "hrs-until" }, t("dinnerWord"))),
-          h("div", { class: "mini" }, h("span", {}, t("startsAt")), r.dnAt)))),
+          h("div", { class: "mini" }, h("span", {}, t("startsAt")), r.dnAt),
+          h("label", { class: "mini" }, h("span", {}, t("deliveryStarts")), r.delivery)))),
       h("div", { class: "actions" },
         h("button", { class: "btn", type: "button", onClick: copyMonday }, t("copyMonday")),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try {
-            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: rows.map((r) => r.open.value), close_times: rows.map((r) => r.close.value), dinner_times: rows.map((r) => (r.dnOn.checked ? r.dnAt.value : null)) } });
+            await api(`/restaurants/${st.restaurant}/hours`, { method: "PUT", body: { open_times: rows.map((r) => r.open.value), close_times: rows.map((r) => r.close.value), dinner_times: rows.map((r) => (r.dnOn.checked ? r.dnAt.value : null)), delivery_times: rows.map((r) => r.delivery.value) } });
             // breakfast runs from opening time until the chosen time
             await api(`/restaurants/${st.restaurant}/breakfast`, { method: "PUT", body: { days: rows.map((r) => (r.bfOn.checked ? { start: r.open.value, end: r.bfEnd.value } : null)) } });
             state.restaurants = await api("/restaurants"); ov.restaurants = await api("/restaurants"); toast(t("saved")); draw();
@@ -4136,6 +4212,7 @@ function openFromLink() {
   if (view && ["mine", "schedule", "posts", "checklist", "voice", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
     state.view = view;
     if (q.get("c")) state.communityId = Number(q.get("c"));
+    if (q.get("sub")) state.listsSub = q.get("sub");
     if (q.get("tab")) state.accountTab = q.get("tab");
     if (q.get("section")) state.adminSection = q.get("section");
   }
