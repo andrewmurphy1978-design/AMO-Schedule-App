@@ -1985,6 +1985,13 @@ async function renderPostBoard() {
           open.length ? h("small", { class: "pb-ho-open" }, `⚠ ${open.map(nm).join(", ")} ${t("postsUncovered")}`) : h("small", {}, "✓"));
       }));
   };
+  // the closing task of the day (mop…) and who has it; a manager can give it to someone else who works that day
+  const closingBar = () => (data.closing ?? []).map((ct) => {
+    const people = [...new Map(data.shifts.map((x) => [x.staff_id, x.first_name || x.staff_name])).entries()];
+    const sel = h("select", { "aria-label": t("closingChange"), onChange: async (e) => { try { await api("/closing-assignments", { method: "PUT", body: { restaurant_id: pb.restaurant, date: pb.date, task_id: ct.task_id, staff_id: Number(e.target.value) } }); toast(t("saved")); render(); } catch (err) { toast(errorText(err)); } } },
+      people.map(([id, nm2]) => h("option", { value: id, selected: id === ct.staff_id }, nm2)));
+    return h("div", { class: "pb-closing" }, h("span", {}, `🧹 ${lang === "en" ? ct.text_en : ct.text_fr}`), ct.staff_id ? h("b", {}, ct.staff_name ?? "") : h("span", { class: "meta" }, t("closingNobody")), people.length ? h("label", { class: "pb-closing-change" }, h("small", {}, t("closingChange")), sel) : null);
+  });
   const holder = h("div", {});
   const paint = () => {
     const shown = data.shifts.filter(inPeriod);
@@ -2006,7 +2013,7 @@ async function renderPostBoard() {
       h("div", { class: "cl-posts" }, data.posts.filter((p) => p.kind !== "breakfast" || sh.breakfast || sh.posts.includes(p.id)).map((p) => { const on = onIn(sh, p); const b = h("button", { type: "button", class: `chip-btn ${on ? "on" : ""}`, "aria-pressed": String(on), onClick: () => toggle(sh, p, b) }, `${on ? "✓ " : sh.skills.includes(p.id) ? "★ " : ""}${nm(p)}${on && sh.ranges?.[p.id] ? ` ${hhmm(sh.ranges[p.id].start_at)}–${hhmm(sh.ranges[p.id].end_at)}` : ""}`); return b; })))));
     const chips = periods.length ? h("div", { class: "pb-periods", role: "group", "aria-label": t("postsTitle") }, [[-1, t("periodWholeDay")], ...periods.map((x, i) => [i, `${lang === "en" ? x.en : x.fr} ${x.start.replace(/^0/, "").replace(":00", "h")}–${x.end.replace(/^0/, "").replace(":00", "h")}`])].map(([i, label]) =>
       h("button", { type: "button", class: `chip-btn ${pb.period === i ? "on" : ""}`, "aria-pressed": String(pb.period === i), onClick: () => { pb.period = i; paint(); } }, label))) : null;
-    holder.replaceChildren(chips, table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? handovers() : null, data.shifts.length ? postTimeline() : null);
+    holder.replaceChildren(chips, ...closingBar(), table, ...(data.shifts.length ? [cards] : []), data.shifts.length ? h("p", { class: "meta" }, `★ ${t("postsSkilled")} · ${t("postsHelp")}`) : null, data.shifts.length ? handovers() : null, data.shifts.length ? postTimeline() : null);
   };
   const dayNav = h("div", { class: "weeknav" },
     h("button", { class: "icon-btn", type: "button", "aria-label": t("prevDay"), onClick: () => { pb.date = addDays(pb.date, -1); render(); } }, "‹"),
@@ -2212,9 +2219,9 @@ async function checklistCard(shiftId, info, test = false) {
           } else await api(`/shifts/${shiftId}/checklist/posts`, { method: "POST", body: { post_id: p.id } });
           await refresh();
         } }, `${p.picked ? "✓ " : ""}${nm(p)}`)))) : null,
-      ...d.lists.map((l) => h("div", { class: `cl-list ${l.kind === "prep" || l.kind === "thaw" ? "prep" : ""}` }, h("h3", {}, l.kind === "prep" ? `📝 ${t("prepTitle")}` : l.kind === "thaw" ? `❄️ ${t("thawTitle")}` : nm(l), l.start_at ? h("small", { class: "meta" }, ` · ${hhmm(l.start_at)}–${hhmm(l.end_at)}`) : null),
+      ...d.lists.map((l) => h("div", { class: `cl-list ${l.kind === "prep" || l.kind === "thaw" || l.kind === "closing" ? "prep" : ""}` }, h("h3", {}, l.kind === "prep" ? `📝 ${t("prepTitle")}` : l.kind === "thaw" ? `❄️ ${t("thawTitle")}` : l.kind === "closing" ? `🧹 ${t("closingTitle")}` : nm(l), l.start_at ? h("small", { class: "meta" }, ` · ${hhmm(l.start_at)}–${hhmm(l.end_at)}`) : null),
         // a post handed over before the end of the shift: its list is due at the handover
-        l.due_at < d.shift.end_at && l.kind !== "prep" && l.kind !== "thaw" ? h("div", { class: `cl-due ${dueSoon(l.due_at) ? "soon" : ""}` }, `⏰ ${t("checklistDueBy")} ${hhmm(l.due_at)}`) : null,
+        l.due_at < d.shift.end_at && l.kind !== "prep" && l.kind !== "thaw" && l.kind !== "closing" ? h("div", { class: `cl-due ${dueSoon(l.due_at) ? "soon" : ""}` }, `⏰ ${t("checklistDueBy")} ${hhmm(l.due_at)}`) : null,
         ...l.items.map((it) => h("div", { class: `cl-item-wrap ${it.issue ? "issue" : ""}` },
           h("label", { class: `check cl-item ${it.done ? "done" : ""}` },
             h("input", { type: "checkbox", checked: it.done, onChange: async (e) => {
@@ -2222,13 +2229,14 @@ async function checklistCard(shiftId, info, test = false) {
               try {
                 if (l.kind === "prep") await api(`/shifts/${shiftId}/prep/${it.id}`, { method: "PUT", body: { done: input.checked } });
                 else if (l.kind === "thaw") await api(`/shifts/${shiftId}/thaw/${it.id}`, { method: "PUT", body: { done: input.checked } });
+                else if (l.kind === "closing") await api(`/shifts/${shiftId}/closing/${it.id}`, { method: "PUT", body: { done: input.checked } });
                 else await api(`/shifts/${shiftId}/checklist/items`, { method: "PUT", body: { item_id: it.id, done: input.checked } });
                 await refresh();
               }
               catch (err) { input.checked = !input.checked; toast(errorText(err)); }
             } }), h("span", {}, txt(it)), l.kind === "prep" && it.due_at ? h("small", { class: "meta" }, ` · ${t("prepDueBy")} ${hhmm(it.due_at)}`) : null,
             // could not finish it: say why (missing ingredients…)
-            l.kind === "prep" || l.kind === "thaw" ? null : h("button", { type: "button", class: "cl-issue-btn", title: t("checklistCannot"), "aria-label": t("checklistCannot"), onClick: async (e) => {
+            l.kind === "prep" || l.kind === "thaw" || l.kind === "closing" ? null : h("button", { type: "button", class: "cl-issue-btn", title: t("checklistCannot"), "aria-label": t("checklistCannot"), onClick: async (e) => {
               e.preventDefault();
               const r = await issueDialog(txt(it), it.issue);
               if (!r) return;

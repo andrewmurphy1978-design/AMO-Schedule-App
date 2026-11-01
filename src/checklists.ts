@@ -1,3 +1,4 @@
+import { closingTasksOf, closingAssignee } from "./closing.ts";
 // End-of-shift checklists: what someone must do before leaving. A list belongs to a kitchen post (picked by the employee for the shift)
 // or to a role (applies by itself to everyone working that role). Items marked "last_out" only concern the last person of the
 // department to leave that day (e.g. the last delivery driver closes the day).
@@ -5,7 +6,7 @@
 export interface ShiftRef { id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string }
 export interface Issue { reason: string; note: string }
 export interface Item { id: number; text_fr: string; text_en: string | null; last_out: number; done: boolean; issue: Issue | null; due_at?: string }
-export interface ShiftList { checklist_id: number; kind: "post" | "role" | "prep" | "thaw"; target_id: number; name_fr: string; name_en: string; removable: boolean; start_at: string | null; end_at: string | null;
+export interface ShiftList { checklist_id: number; kind: "post" | "role" | "prep" | "thaw" | "closing"; target_id: number; name_fr: string; name_en: string; removable: boolean; start_at: string | null; end_at: string | null;
   /** when the list has to be finished: the end of the part of the shift spent on the post (the handover), else the end of the shift */
   due_at: string; items: Item[] }
 
@@ -59,6 +60,15 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
         items: thaw.map((r) => ({ id: r.id, text_fr: r.name, text_en: null, last_out: 0, done: tdone.has(r.id), issue: null })) });
     }
   }
+  // the closing task(s) of the day (the mop…), given in turn to someone of the closing crew
+  if (kitchenShift) {
+    for (const task of await closingTasksOf(db, clientId, "kitchen")) {
+      if ((await closingAssignee(db, task, shift.restaurant_id, shift.start_at.slice(0, 10))) !== shift.staff_id) continue;
+      const done = !!(await db.prepare("SELECT 1 FROM closing_task_done WHERE shift_id = ? AND task_id = ?").bind(shift.id, task.id).first());
+      out.push({ checklist_id: 0, kind: "closing", target_id: task.id, name_fr: "Fermeture : tâche du jour", name_en: "Closing: task of the day", removable: false, start_at: null, end_at: null, due_at: shift.end_at,
+        items: [{ id: task.id, text_fr: task.text_fr, text_en: task.text_en, last_out: 0, done, issue: null }] });
+    }
+  }
   for (const l of all) {
     const mine: Item[] = [];
     for (const it of items.filter((x) => x.checklist_id === l.id)) {
@@ -67,7 +77,7 @@ export async function listsForShift(db: D1Database, shift: ShiftRef, clientId: n
     }
     out.push({ checklist_id: l.id, kind: l.kind, target_id: l.target_id, name_fr: l.name_fr, name_en: l.name_en, removable: l.removable, start_at: l.start_at, end_at: l.end_at, due_at: l.end_at ?? shift.end_at, items: mine });
   }
-  return [...out.filter((l) => l.kind !== "thaw").sort((a, b) => a.due_at.localeCompare(b.due_at)), ...out.filter((l) => l.kind === "thaw"), ...prep];
+  return [...out.filter((l) => l.kind !== "thaw" && l.kind !== "closing").sort((a, b) => a.due_at.localeCompare(b.due_at)), ...out.filter((l) => l.kind === "thaw" || l.kind === "closing"), ...prep];
 }
 
 /** Done / total over every list of the shift. A task reported as not completable (missing ingredient…) counts as handled. */

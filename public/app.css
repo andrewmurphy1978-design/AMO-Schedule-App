@@ -1051,3 +1051,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .oc-search{width:100%;margin-bottom:.4rem}.oc-list{max-height:min(50vh,20rem);overflow:auto;display:grid;gap:1px}
 .oc-cat{position:sticky;top:0;background:var(--bg);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);padding:.3rem .5rem}
 .oc-opt{text-align:left;border:0;background:none;font:inherit;padding:.5rem .6rem;border-radius:6px;cursor:pointer}.oc-opt:hover,.oc-opt:focus{background:var(--bg)}.oc-opt.other{font-weight:700;color:var(--brand)}
+.pb-closing{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem .8rem;margin:.4rem 0;padding:.5rem .7rem;border:1px solid var(--line);border-left:4px solid var(--brand);border-radius:8px;background:var(--card,#fff)}.pb-closing-change{margin-left:auto;display:flex;align-items:center;gap:.4rem}.pb-closing-change small{color:var(--muted)}

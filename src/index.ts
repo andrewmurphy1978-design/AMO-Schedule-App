@@ -20,6 +20,7 @@ import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminder
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature, startTwilioCall, hangupTwilioCall } from "./twilio.ts";
 import { transcribe, type AiBinding } from "./transcribe.ts";
+import { closingTasksOf, closingAssignee } from "./closing.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
@@ -2664,6 +2665,32 @@ app.put("/api/shifts/:id/thaw/:ingredientId", async (c) => {
   return c.json({ ok: true });
 });
 
+// The closing task of the day (the mop…): the person it was given to ticks it.
+app.put("/api/shifts/:id/closing/:taskId", async (c) => {
+  const id = intParam(c.req.param("id")), taskId = intParam(c.req.param("taskId"));
+  const b = await c.req.json<{ done?: boolean }>().catch(() => ({} as { done?: boolean }));
+  const ctx = id ? await checklistShift(c, id) : null;
+  if (!ctx || !taskId || typeof b.done !== "boolean") return c.json({ error: "not_found" }, 404);
+  const lists = await listsForShift(ctx.db, ctx.sh, ctx.me.client_id);
+  if (!lists.some((l) => l.kind === "closing" && l.target_id === taskId)) return c.json({ error: "not_found" }, 404);
+  await (b.done ? ctx.db.prepare("INSERT OR IGNORE INTO closing_task_done (shift_id, task_id, done_by, done_at) VALUES (?, ?, ?, ?)").bind(ctx.sh.id, taskId, ctx.me.id, Date.now())
+    : ctx.db.prepare("DELETE FROM closing_task_done WHERE shift_id = ? AND task_id = ?").bind(ctx.sh.id, taskId)).run();
+  return c.json({ ok: true });
+});
+// A kitchen manager can give today's closing task to someone else (it stays on that person even if they do not close).
+app.put("/api/closing-assignments", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; date?: string; task_id?: number; staff_id?: number }>().catch(() => ({} as { restaurant_id?: number; date?: string; task_id?: number; staff_id?: number }));
+  if (!b.restaurant_id || !b.task_id || !b.staff_id || !/^\d{4}-\d{2}-\d{2}$/.test(b.date ?? "")) return c.json({ error: "bad_request" }, 400);
+  if (!(await canManage(db, me, b.restaurant_id, "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  const task = await db.prepare("SELECT id FROM closing_tasks WHERE id = ? AND client_id = ?").bind(b.task_id, me.client_id).first<{ id: number }>();
+  const works = await db.prepare("SELECT 1 FROM shifts WHERE staff_id = ? AND restaurant_id = ? AND status = 'ok' AND substr(start_at, 1, 10) = ?").bind(b.staff_id, b.restaurant_id, b.date).first();
+  if (!task || !works) return c.json({ error: "not_found" }, 404);
+  await db.prepare("INSERT INTO closing_task_assignments (task_id, restaurant_id, date, staff_id, assigned_by, assigned_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (task_id, restaurant_id, date) DO UPDATE SET staff_id = excluded.staff_id, assigned_by = excluded.assigned_by, assigned_at = excluded.assigned_at")
+    .bind(b.task_id, b.restaurant_id, b.date, b.staff_id, me.id, Date.now()).run();
+  return c.json({ ok: true });
+});
+
 // "Postes du jour": who is on which kitchen post, for the kitchen shifts of one day (managers of the kitchen).
 app.get("/api/post-board", async (c) => {
   const me = c.get("me"), db = c.env.DB;
@@ -2687,7 +2714,12 @@ app.get("/api/post-board", async (c) => {
   for (const x of shifts as { id: number; staff_id: number; start_at: string; end_at: string }[]) withBf.push({ ...x, breakfast: await breakfastRelevant(db, restaurantId, x.start_at, x.end_at) });
   // breakfast columns only exist on days when someone's shift overlaps breakfast
   const anyBf = withBf.some((x) => x.breakfast);
-  return c.json({ periods: (await postPeriods(db, me.client_id, restaurantId)).periods, posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, prep: prepN.get(x.id) ?? 0, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
+  const closing = [];
+  for (const task of await closingTasksOf(db, me.client_id, "kitchen")) {
+    const sid = await closingAssignee(db, task, restaurantId, date);
+    closing.push({ task_id: task.id, text_fr: task.text_fr, text_en: task.text_en, staff_id: sid, staff_name: sid ? (shifts as unknown as { staff_id: number; staff_name: string }[]).find((x) => x.staff_id === sid)?.staff_name ?? null : null });
+  }
+  return c.json({ closing, periods: (await postPeriods(db, me.client_id, restaurantId)).periods, posts: (posts as unknown as { kind: string }[]).filter((p) => p.kind !== "breakfast" || anyBf), shifts: withBf.map((x) => ({ ...x, prep: prepN.get(x.id) ?? 0, posts: assigned.filter((a) => a.shift_id === x.id).map((a) => a.post_id), ranges: Object.fromEntries(assigned.filter((a) => a.shift_id === x.id && a.start_at).map((a) => [a.post_id, { start_at: a.start_at, end_at: a.end_at }])), skills: skills.filter((k) => k.staff_id === x.staff_id).map((k) => k.post_id) })) });
 });
 
 // Shifts whose end-of-shift list the caller should be doing now: on shift, or up to an hour after it ended, until everything is ticked.
