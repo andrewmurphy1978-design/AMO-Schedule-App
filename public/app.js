@@ -3700,7 +3700,7 @@ function ingredientsPanel() {
   function viewTable() {
     const cols = st.groups.map((g, gi) => ({ g, gi })).filter(({ g }) => g.name_fr.trim());
     const rows = unique().filter((r) => !st.catFilter || (st.catFilter === "none" ? !r.category : r.category === st.catFilter));
-    const bfOf = (g) => { const code = st.posts.find((p) => p.id === g.post_id)?.code, bf = st.posts.find((p) => p.code === (code === "subs" ? "bf_eggs" : code === "pizza" ? "bf_back" : "")); return bf ? nm(bf) : ""; };
+    const bfOf = (g) => { const code = st.posts.find((p) => p.id === g.post_id)?.code, bf = st.posts.find((p) => p.code === (code === "subs" ? "bf_eggs" : code === "pizza" ? "bf_back" : "")); return bf ? nm(bf) : code === "starters" ? t("bfBreads") : ""; };
     // rows under their category (those without one at the end)
     const byCat = [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, rows.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))]).filter(([, list]) => list.length);
     return [h("p", { class: "meta" }, t("ingMatrixHelp")),
