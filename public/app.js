@@ -2054,7 +2054,7 @@ function issueDialog(taskText, current) {
 
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
-const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["fruits", "catFruits"], ["dairy", "catDairy"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"], ["beers", "catBeers"], ["wines", "catWines"], ["spirits", "catSpirits"]];
+const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["fruits", "catFruits"], ["dairy", "catDairy"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"], ["boxes", "catBoxes"], ["beers", "catBeers"], ["wines", "catWines"], ["spirits", "catSpirits"]];
 const portionText = (e) => [e.portion_qty && e.portion_unit ? `${Math.round(e.portion_qty * 100) / 100} ${e.portion_unit}` : null, e.portion_g ? `${Math.round(e.portion_g * 10) / 10} g / ${Math.round((e.portion_g / 28.3495) * 10) / 10} oz` : null].filter(Boolean).join(" · ");
 // Alphabetical order, with each home-made ingredient right under the ingredient it is made from (indented one level more).
 function ingredientTree(list) {

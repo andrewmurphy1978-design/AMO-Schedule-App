@@ -2469,14 +2469,14 @@ app.put("/api/shifts/:id/prep/:taskId", async (c) => {
 
 // ---------- Ingredients and restocking ("Remplissage") ----------
 const LOCATIONS = ["fridge", "freezer", "backstore", "basement", "cellar"] as const;
-const CATEGORIES = ["pasta", "meats", "vegetables", "fruits", "dairy", "sauces", "cheeses", "breads", "pizza_dough", "salads", "mixes", "beers", "wines", "spirits"] as const;
+const CATEGORIES = ["pasta", "meats", "vegetables", "fruits", "dairy", "sauces", "cheeses", "breads", "pizza_dough", "salads", "mixes", "boxes", "beers", "wines", "spirits"] as const;
 /** Who may see and fill the restock list of a restaurant: administrators, its managers, and people with a kitchen or prep role there. */
 async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
   if (me.is_admin) return (await db.prepare("SELECT id FROM restaurants WHERE client_id = ? ORDER BY id").bind(me.client_id).all<{ id: number }>()).results.map((r) => r.id);
   return (await db.prepare(
     `SELECT DISTINCT x.restaurant_id AS id FROM (
-       SELECT sr.restaurant_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1 AND ro.department_id IN ('kitchen', 'prep')
-       UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1 AND department_id IN ('kitchen', 'prep')) x
+       SELECT sr.restaurant_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1 AND ro.department_id IN ('kitchen', 'prep', 'delivery')
+       UNION SELECT restaurant_id FROM managers WHERE staff_id = ?1 AND department_id IN ('kitchen', 'prep', 'delivery')) x
      JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
   ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
 }
