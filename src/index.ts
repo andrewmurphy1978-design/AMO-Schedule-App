@@ -2597,16 +2597,16 @@ app.get("/api/my-checklist", async (c) => {
      FROM shifts sh JOIN restaurants rs ON rs.id = sh.restaurant_id JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.staff_id = ? AND sh.status = 'ok' AND sh.start_at <= ? AND sh.end_at >= ? AND ${shiftVisible(me)} ORDER BY sh.start_at LIMIT 12`,
   ).bind(me.id, until, since).all<ShiftRefFull>()).results;
-  const out = [];
-  for (const sh of shifts) {
-    const p = await checklistProgress(db, sh, me.client_id);
+  // every shift is looked at at the same time (each one needs several queries)
+  const entries = await Promise.all(shifts.map(async (sh) => {
+    const [p, sub] = await Promise.all([checklistProgress(db, sh, me.client_id), db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(sh.id).first()]);
     const kitchen = sh.department_id === "kitchen";
-    if (!p.total && !kitchen) continue; // nothing to do for this role
-    const submitted = !!(await db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(sh.id).first());
-    if (!test && ((p.total && p.done === p.total) || submitted)) continue; // finished: the tab goes away
-    out.push({ id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post"),
-      next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null });
-  }
+    if (!p.total && !kitchen) return null; // nothing to do for this role
+    if (!test && ((p.total && p.done === p.total) || sub)) return null; // finished: the tab goes away
+    return { id: sh.id, restaurant: sh.restaurant, role_fr: sh.name_fr, role_en: sh.name_en, start_at: sh.start_at, end_at: sh.end_at, total: p.total, done: p.done, needs_post: kitchen && !p.lists.some((l) => l.kind === "post"),
+      next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null };
+  }));
+  const out = entries.filter((x) => x !== null);
   return c.json({ test, shifts: out, restock: await restockRestaurants(db, me) });
 });
 

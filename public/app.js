@@ -215,22 +215,36 @@ function renderChrome() {
   );
 }
 
+// Everything the header needs (tabs, badges) and the shared lists. It is fetched in parallel; screens do not wait for it once
+// a copy exists, so changing tab is immediate and the header catches up a moment later.
+let prevView = null;
+async function loadChromeData() {
+  const [me, restaurants, comm, cl, order] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => ({ test: false, shifts: [] })), api("/staff-order").catch(() => [])]);
+  const changed = JSON.stringify([state.me, state.restaurants]) !== JSON.stringify([me, restaurants]);
+  state.me = me; state.restaurants = restaurants; setStaffOrder(order);
+  state.checklistShifts = cl.shifts; state.checklistTest = cl.test; state.restock = cl.restock ?? [];
+  // the tab is hidden outside a shift, except in test mode (administrators always see it then)
+  if (cl.test && me.me.is_admin && !cl.shifts.length) state.checklistShifts = [{ id: 0, total: 0, done: 0, preview: true }];
+  state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
+  return changed;
+}
 async function render() {
   renderChrome();
   try {
-    setStaffOrder(await api("/staff-order").catch(() => []));
-    // Roles and manager scopes can change in Administration at any time, so never trust the copy loaded at start-up.
+    // Roles and manager scopes can change in Administration at any time: after leaving it (or on the first screen) wait for fresh data;
+    // otherwise show the screen at once with the copy we have and update it in the background.
     if (state.view !== "admin") {
-      let comm;
-      let cl;
-      [state.me, state.restaurants, comm, cl] = await Promise.all([api("/me"), api("/restaurants"), api("/communities").catch(() => []), api("/my-checklist").catch(() => ({ test: false, shifts: [] }))]);
-      state.checklistShifts = cl.shifts; state.checklistTest = cl.test; state.restock = cl.restock ?? [];
-      // the tab is hidden outside a shift, except in test mode (administrators always see it then)
-      if (cl.test && state.me.me.is_admin && !cl.shifts.length) state.checklistShifts = [{ id: 0, total: 0, done: 0, preview: true }];
-      if (state.view === "checklist" && !state.checklistShifts.length && !state.restock.length) state.view = "mine";
-      state.communityUnread = comm.reduce((n, x) => n + (x.unread || 0), 0);
+      const wait = !state.me || !state.restaurants || prevView === "admin";
+      const loading = loadChromeData();
+      if (wait) await loading;
+      else loading.then((changed) => {
+        if (state.view === "checklist" && !state.checklistShifts.length && !state.restock.length) { state.view = "mine"; render(); return; }
+        if (changed) render(); else renderChrome();
+      }).catch((e) => { if (e.status === 401) { state.me = null; renderLogin(); } });
+      if (state.view === "checklist" && wait && !state.checklistShifts.length && !state.restock.length) state.view = "mine";
       renderChrome();
     }
+    prevView = state.view;
     if (state.view === "schedule") await renderSchedule();
     else if (state.view === "mine") await renderMine();
     else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
@@ -2349,9 +2363,10 @@ async function renderAccount() {
   };
   drawCal(acc.calendar_url);
   const slipsBox = h("div", {}, h("p", { class: "meta" }, t("loading")));
-  api("/payslips").then((rows) => slipsBox.replaceChildren(rows.length ? h("div", { class: "log" }, rows.map((r) =>
+  let slipsLoaded = false;
+  const loadSlips = () => { if (slipsLoaded) return; slipsLoaded = true; api("/payslips").then((rows) => slipsBox.replaceChildren(rows.length ? h("div", { class: "log" }, rows.map((r) =>
     h("a", { class: "log-row slip-link", href: `/api/payslips/${r.id}/pdf`, target: "_blank", rel: "noopener" }, h("span", {}, r.pay_date ?? r.filename), h("span", { class: "meta" }, `${r.period_label ?? ""} · PDF`)))) : h("p", { class: "meta" }, t("noPayslips"))))
-    .catch(() => slipsBox.replaceChildren(h("p", { class: "meta" }, t("genericError"))));
+    .catch(() => { slipsLoaded = false; slipsBox.replaceChildren(h("p", { class: "meta" }, t("genericError"))); }); };
   // Mobile-first, tab-based screen (same tabs as the employee dialog, limited to what the employee may change).
   const profile = h("form", { class: "acc-form", onSubmit: save },
     h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
@@ -2369,7 +2384,7 @@ async function renderAccount() {
     ["availability", t("tabAvailability"), () => [availabilityEditor(state.me.me.id, "times")]],
     ["timeoff", t("timeOff"), () => { const box = h("div", { class: "acc-content" }, h("p", { class: "meta" }, t("loading"))); timeOffNodes().then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; }],
     ["calendar", t("tabCalendar"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
-    ["payslips", t("tabPayslips"), () => [slipsBox]],
+    ["payslips", t("tabPayslips"), () => { loadSlips(); return [slipsBox]; }],
   ];
   state.accountTab = tabs.some(([id]) => id === state.accountTab) ? state.accountTab : "profile";
   const bar = h("div", { class: "dlg-tabs acc-tabs", role: "tablist" });
