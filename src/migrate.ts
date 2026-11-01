@@ -80,6 +80,7 @@ import m0077 from "../migrations/0077_service_group.sql";
 import m0078 from "../migrations/0078_oven_group.sql";
 import m0079 from "../migrations/0079_boxes.sql";
 import m0080 from "../migrations/0080_boxes_supplier.sql";
+import m0081 from "../migrations/0081_component_quantities_seafood.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -162,6 +163,7 @@ const MIGRATIONS: [string, string][] = [
   ["0078_oven_group", m0078],
   ["0079_boxes", m0079],
   ["0080_boxes_supplier", m0080],
+  ["0081_component_quantities_seafood", m0081],
 ];
 
 const statements = (sql: string) =>

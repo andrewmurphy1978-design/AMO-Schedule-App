@@ -2054,7 +2054,9 @@ function issueDialog(taskText, current) {
 
 // ---------- End-of-shift checklist ----------
 // The tab exists while the person is on a shift (and up to an hour after it) and their lists are not all ticked.
-const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["fruits", "catFruits"], ["dairy", "catDairy"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"], ["boxes", "catBoxes"], ["beers", "catBeers"], ["wines", "catWines"], ["spirits", "catSpirits"]];
+const INGREDIENT_CATEGORIES = [["pasta", "catPasta"], ["meats", "catMeats"], ["vegetables", "catVegetables"], ["fruits", "catFruits"], ["dairy", "catDairy"], ["sauces", "catSauces"], ["cheeses", "catCheeses"], ["breads", "catBreads"], ["pizza_dough", "catPizzaDough"], ["salads", "catSalads"], ["mixes", "catMixes"], ["boxes", "catBoxes"], ["seafood", "catSeafood"], ["beers", "catBeers"], ["wines", "catWines"], ["spirits", "catSpirits"]];
+// "5 kg Oignons": a component with its quantity when one is given
+const compText = (item) => (item.components ?? []).map((c) => { const q = item.component_qty?.[c]; return q?.qty ? `${q.qty} ${q.unit ?? ""} ${c}`.replace(/\s+/g, " ").trim() : c; });
 const portionText = (e) => [e.portion_qty && e.portion_unit ? `${Math.round(e.portion_qty * 100) / 100} ${e.portion_unit}` : null, e.portion_g ? `${Math.round(e.portion_g * 10) / 10} g / ${Math.round((e.portion_g / 28.3495) * 10) / 10} oz` : null].filter(Boolean).join(" · ");
 // Alphabetical order, with each home-made ingredient right under the ingredient it is made from (indented one level more).
 function ingredientTree(list) {
@@ -2168,7 +2170,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
     const addNeed = (name, location, id, why, hint) => { const k = `${location}|${name.trim().toLowerCase()}`; const e = need.get(k) ?? { key: k, name, location, ids: [], why: [] }; if (id) e.ids.push(id); if (why && !e.why.includes(why)) e.why.push(why); if (hint && !e.why.includes(hint)) e.why.push(hint); need.set(k, e); };
     for (const i of missing) {
       if (!i.homemade) addNeed(i.name, i.location, i.id, i.group, i.fridge_open ? `🧊 ${t("ingFridgeOpen").toLowerCase()}` : null);
-      else for (const c of i.components ?? []) { const ref = byName.get(c.trim().toLowerCase()); addNeed(c, ref?.location ?? "fridge", null, `${t("forWord")} ${i.name}`); }
+      else for (const c of i.components ?? []) { const ref = byName.get(c.trim().toLowerCase()), q = i.component_qty?.[c]; addNeed(c, ref?.location ?? "fridge", null, `${t("forWord")} ${i.name}${q?.qty ? ` (${q.qty} ${q.unit ?? ""})`.replace(" )", ")") : ""}`); }
     }
     const fetchBy = Object.keys(LOCATION_INFO).map((loc) => [loc, [...need.values()].filter((e) => e.location === loc)]).filter(([, list]) => list.length);
     const toFetch = h("section", { class: "card restock-fetch" }, h("h3", {}, `🛒 ${t("restockToFetch")}`, need.size ? h("small", { class: "meta" }, ` · ${need.size} ${t("restockCount")}`) : null),
@@ -2178,7 +2180,7 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
       const home = all.filter((i) => i.homemade);
       const todo = home.filter((i) => i.needed), rest = home.filter((i) => !i.needed);
       const task = (i) => h("label", { class: "check cl-item" }, h("input", { type: "checkbox", onChange: () => setNeeded([i], false) }),
-        h("span", {}, h("b", {}, `${t("prepVerb")} : ${i.name}`), i.components?.length ? h("small", { class: "meta" }, ` · ${t("prepWith")} ${i.components.join(", ")}`) : null,
+        h("span", {}, h("b", {}, `${t("prepVerb")} : ${i.name}`), i.components?.length ? h("small", { class: "meta" }, ` · ${t("prepWith")} ${compText(i).join(", ")}`) : null,
           i.prep_note ? h("small", { class: "meta", style: "display:block" }, i.prep_note) : null, portionText(i) ? h("small", { class: "meta", style: "display:block" }, `⚖ ${portionText(i)}`) : null, h("small", { class: "meta", style: "display:block" }, i.group)));
       holder.replaceChildren(h("section", { class: "card" }, h("h3", {}, `📝 ${t("prepListTitle")}`, todo.length ? h("small", { class: "meta" }, ` · ${todo.length}`) : null), h("p", { class: "meta" }, t("prepListHelp")),
           todo.length ? todo.map(task) : h("p", { class: "meta" }, home.length ? t("prepNoneNow") : t("prepNoHomemade"))),
@@ -2994,8 +2996,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -3049,12 +3051,13 @@ async function renderAdmin() {
     communities: () => [communitiesPanel(ov)],
     checklists: () => [checklistsPanel(), postPeriodsPanel()],
     ingredients: () => [ingredientsPanel()],
+    products: () => [h("section", { class: "panel" }, h("h2", {}, `🛍️ ${t("adminProducts")}`), h("p", { class: "meta" }, t("productsSoon")))],
     usage: () => [usagePanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];
@@ -3537,7 +3540,7 @@ function ingredientsPanel() {
     e.category ? h("span", { class: "ing-badge" }, catLabel(e.category)) : null, h("span", { class: "ing-badge" }, place(e.location)),
     e.thaw ? h("span", { class: "ing-badge thaw", title: t("ingThaw") }, `❄ ${t("ingThawShort")}`) : null,
     e.fridge_open ? h("span", { class: "ing-badge thaw", title: t("ingFridgeOpen") }, `🧊 ${t("ingFridgeOpenShort")}`) : null,
-    e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${e.components.join(", ")}` : ""}`) : null,
+    e.homemade ? h("span", { class: "ing-badge home", title: t("ingHomemade") }, `🏠 ${t("ingHomemadeShort")}${e.components?.length ? ` · ${compText(e).join(", ")}` : ""}`) : null,
     portionText(e) ? h("span", { class: "ing-badge" }, `⚖ ${portionText(e)}`) : null,
     e.supplier_ids?.length ? h("span", { class: "ing-badge sup" }, `🚚 ${e.supplier_ids.map((id) => st.suppliers.find((x) => x.id === id)?.name).filter(Boolean).join(", ")}`) : null);
 
@@ -3558,6 +3561,13 @@ function ingredientsPanel() {
     const home = h("input", { type: "checkbox", checked: !!cur.homemade, onChange: () => sync() });
     const note = h("input", { value: cur.prep_note ?? "", maxLength: 200, placeholder: t("ingPrepNote"), "aria-label": t("ingPrepNote") });
     const comps = new Set(cur.components ?? []);
+    // how much of each component goes into the home-made product
+    const qtys = {};
+    for (const n of cur.components ?? []) { const q = cur.component_qty?.[n]; if (q) qtys[n] = { qty: q.qty, unit: q.unit ?? "" }; }
+    const qtyBox = h("div", { class: "ing-qtys" });
+    const drawQty = () => qtyBox.replaceChildren(...(comps.size ? [h("p", { class: "meta" }, t("compQtyTitle"))] : []), ...[...comps].map((n) => h("div", { class: "ing-qty-row" }, h("span", {}, n),
+      h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", value: qtys[n]?.qty ?? "", "aria-label": `${n} · ${t("compQty")}`, onInput: (e) => { (qtys[n] ??= { qty: "", unit: "" }).qty = e.target.value; } }),
+      h("input", { list: "ing-qty-units", maxLength: 20, value: qtys[n]?.unit ?? "", placeholder: t("compUnit"), "aria-label": `${n} · ${t("compUnit")}`, onInput: (e) => { (qtys[n] ??= { qty: "", unit: "" }).unit = e.target.value; } }))));
     const search = h("input", { type: "search", placeholder: t("ingSearch"), "aria-label": t("ingSearch"), onInput: () => drawComps() });
     const compList = h("div", { class: "ing-comps" });
     const others = () => unique().map((e) => e.name).filter((n) => !same(n, cur.name) && !same(n, name.value)).sort((a, b) => a.localeCompare(b, lang));
@@ -3570,7 +3580,7 @@ function ingredientsPanel() {
     const drawComps = () => {
       const q = search.value.trim().toLowerCase();
       compList.replaceChildren(...[...new Set([...comps, ...others()])].filter((n) => comps.has(n) || !q || n.toLowerCase().includes(q)).filter((n) => !q || n.toLowerCase().includes(q) || comps.has(n))
-        .map((n) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: comps.has(n), onChange: (e) => { if (e.target.checked) comps.add(n); else comps.delete(n); autoCat(); } }), h("span", {}, n))));
+        .map((n) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: comps.has(n), onChange: (e) => { if (e.target.checked) comps.add(n); else comps.delete(n); autoCat(); drawQty(); } }), h("span", {}, n))));
     };
     // weight of one portion, in grams and ounces (each follows the other)
     const OZ = 28.3495, r1 = (x) => String(Math.round(x * 10) / 10);
@@ -3582,10 +3592,10 @@ function ingredientsPanel() {
     const unit = h("input", { value: cur.portion_unit ?? "", maxLength: 30, list: "ing-units", placeholder: t("ingPortionUnitPh"), "aria-label": t("ingPortionUnitPh") });
     const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer"].map((u) => h("option", { value: u })));
     const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
-    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, note, portion, portionCount);
+    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, qtyBox, h("datalist", { id: "ing-qty-units" }, ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé", "unité", "tranche"].map((u) => h("option", { value: u }))), note, portion, portionCount);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
-    const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); };
+    const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); drawQty(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
         e.preventDefault();
@@ -3598,16 +3608,16 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
+        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
           portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
           if (idx >= 0 && want) Object.assign(g.items[idx], fields);
           else if (idx >= 0) g.items.splice(idx, 1);
-          else if (want) g.items.push({ ...fields, components: [...fields.components] });
+          else if (want) g.items.push({ ...fields, components: [...fields.components], component_qty: { ...fields.component_qty } });
         });
         // renamed: the home-made ingredients made from it follow
-        if (old && !same(old, nn)) for (const g of st.groups) for (const i of g.items) i.components = i.components.map((x) => (same(x, old) ? nn : x));
+        if (old && !same(old, nn)) for (const g of st.groups) for (const i of g.items) { i.components = i.components.map((x) => (same(x, old) ? nn : x)); if (i.component_qty) i.component_qty = Object.fromEntries(Object.entries(i.component_qty).map(([k, v]) => [same(k, old) ? nn : k, v])); }
         const problem = await persist(true);
         if (problem) { fail(problem); return; }
         close();
@@ -3624,7 +3634,7 @@ function ingredientsPanel() {
         entry ? h("button", { class: "btn danger", type: "button", onClick: async () => {
           if (!(await ask(`${t("ingConfirmDeleteOne")} « ${entry.name} » ?`))) return;
           for (const g of st.groups) g.items = g.items.filter((i) => !same(i.name, entry.name));
-          for (const g of st.groups) for (const i of g.items) i.components = i.components.filter((x) => !same(x, entry.name));
+          for (const g of st.groups) for (const i of g.items) { i.components = i.components.filter((x) => !same(x, entry.name)); if (i.component_qty) i.component_qty = Object.fromEntries(Object.entries(i.component_qty).filter(([k]) => !same(k, entry.name))); }
           close(); await persist();
         } }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: close }, t("cancel")),
@@ -3740,7 +3750,7 @@ function ingredientsPanel() {
         others.length ? h("div", { class: "field" }, h("span", {}, t("ingCopyFrom")), h("div", { class: "ing-copy" }, copySel, h("button", { class: "btn", type: "button", onClick: async () => {
           if (st.groups.length && !(await ask(t("ingCopyFrom") + " ?"))) return;
           const d = await api(`/admin/ingredients?restaurant=${copySel.value}`);
-          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], prep_note: i.prep_note, portion_g: i.portion_g ?? null, portion_qty: i.portion_qty ?? null, portion_unit: i.portion_unit ?? null, supplier_ids: [...(i.supplier_ids ?? [])] })) }));
+          st.groups = d.groups.map((g) => ({ name_fr: g.name_fr, name_en: g.name_en, post_id: g.post_id, items: g.items.map((i) => ({ name: i.name, location: i.location, category: i.category ?? null, thaw: i.thaw, fridge_open: i.fridge_open, homemade: i.homemade, components: [...(i.components ?? [])], component_qty: { ...(i.component_qty ?? {}) }, prep_note: i.prep_note, portion_g: i.portion_g ?? null, portion_qty: i.portion_qty ?? null, portion_unit: i.portion_unit ?? null, supplier_ids: [...(i.supplier_ids ?? [])] })) }));
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
