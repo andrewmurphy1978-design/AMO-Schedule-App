@@ -1083,3 +1083,11 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
   .admin-group-title{padding:0 .2rem .15rem;font-size:.62rem}
   .admin-group-items{display:grid;grid-template-columns:repeat(7,1fr);gap:.3rem}
 }
+
+/* the groups open and close (one open at a time) */
+.admin-nav .admin-group-title{display:flex;min-height:0;flex:none;align-items:center;justify-content:space-between;width:100%;border:0;background:none;font:inherit;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:.45rem .6rem;cursor:pointer;border-radius:8px}
+.admin-nav .admin-group-title:hover{background:var(--bg)}
+.admin-chevron{transition:transform .15s}.admin-group:not(.open) .admin-chevron{transform:rotate(-90deg)}
+.admin-group:not(.open) .admin-group-items{display:none}
+.admin-group+.admin-group{margin-top:.3rem}
+@media (max-width:899px){.admin-nav .admin-group-title{padding:.3rem .4rem;font-size:.7rem;text-align:left}.admin-group+.admin-group{margin-top:.1rem}}

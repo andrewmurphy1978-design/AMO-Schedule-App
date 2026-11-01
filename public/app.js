@@ -2070,6 +2070,8 @@ function ingredientTree(list) {
   for (const e of list) walk(e, 0); // a loop of home-made ingredients (A from B, B from A): nothing is lost
   return out;
 }
+// the categories in alphabetical order of their names (for the drop-down lists)
+const categoriesAlpha = () => [...INGREDIENT_CATEGORIES].sort((a, b) => t(a[1]).localeCompare(t(b[1]), getLang()));
 const LOCATION_INFO = { fridge: ["🧊", "locFridge"], freezer: ["❄️", "locFreezer"], backstore: ["📦", "locBackstore"], basement: ["🪜", "locBasement"], cellar: ["🍷", "locCellar"] };
 async function renderChecklist() {
   const { test, shifts, restock } = await api("/my-checklist");
@@ -3050,14 +3052,20 @@ async function renderAdmin() {
     usage: () => [usagePanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
-  // the menu in two groups: Personnel (people) and Restaurants (the places and what they use)
+  // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets"]], ["adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "checklists", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["adminGroupPlatform", ["clients"]]] : [])];
-  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, groups.map(([title, ids]) => h("div", { class: "admin-group", role: "group", "aria-label": t(title) },
-    h("div", { class: "admin-group-title" }, t(title)),
-    h("div", { class: "admin-group-items" }, ids.map((id) => { const label = labelOf[id] ?? "adminClients";
-      return h("button", { type: "button", "aria-label": t(label), title: t(label), "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } },
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const current = adminSectionOf();
+  // first time (or when the open group does not hold the section being shown): open the group of the current section
+  if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];
+  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") });
+  const paintGroups = () => nav.querySelectorAll(".admin-group").forEach((el) => { const open = el.dataset.group === state.adminGroup; el.classList.toggle("open", open); el.querySelector(".admin-group-title").setAttribute("aria-expanded", String(open)); });
+  nav.append(...groups.map(([gid, title, ids]) => h("div", { class: "admin-group", "data-group": gid },
+    h("button", { type: "button", class: "admin-group-title", "aria-expanded": "false", onClick: () => { state.adminGroup = state.adminGroup === gid ? null : gid; paintGroups(); } }, h("span", {}, t(title)), h("span", { class: "admin-chevron", "aria-hidden": "true" }, "▾")),
+    h("div", { class: "admin-group-items", role: "group", "aria-label": t(title) }, ids.map((id) => { const label = labelOf[id] ?? "adminClients";
+      return h("button", { type: "button", "aria-label": t(label), title: t(label), "aria-current": current === id ? "page" : false, onClick: () => { state.adminGroup = gid; state.adminSection = id; render(); } },
         h("span", { class: "tab-ic", "aria-hidden": "true" }, ADMIN_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, t(label))); })))));
+  paintGroups();
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
 }
 
@@ -3541,7 +3549,7 @@ function ingredientsPanel() {
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
     const fail = (msg) => { err.textContent = `⚠ ${msg}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); };
     let catTouched = !!entry;
-    const cat = h("select", { "aria-label": t("ingCategory"), onChange: () => { catTouched = true; } }, h("option", { value: "" }, `— ${t("ingNoCategory")}`), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: cur.category === v }, t(key))));
+    const cat = h("select", { "aria-label": t("ingCategory"), onChange: () => { catTouched = true; } }, h("option", { value: "" }, `— ${t("ingNoCategory")}`), categoriesAlpha().map(([v, key]) => h("option", { value: v, selected: cur.category === v }, t(key))));
     const loc = h("select", { "aria-label": t("ingLocation"), onChange: () => sync() }, Object.entries(LOCATION_INFO).map(([v, [ic, key]]) => h("option", { value: v, selected: cur.location === v }, `${ic} ${t(key)}`)));
     const thaw = h("input", { type: "checkbox", checked: !!cur.thaw });
     const thawRow = h("label", { class: "check" }, thaw, h("span", {}, `❄ ${t("ingThaw")}`));
@@ -3710,7 +3718,7 @@ function ingredientsPanel() {
     const byCat = [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, rows.filter((e) => (e.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === e.category)))]).filter(([, list]) => list.length);
     return [h("p", { class: "meta" }, t("ingMatrixHelp")),
       h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`),
-        h("select", { "aria-label": t("ingCategory"), onChange: (e) => { st.catFilter = e.target.value; draw(); } }, h("option", { value: "" }, t("ingAllCategories")), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: st.catFilter === v }, t(key))), h("option", { value: "none", selected: st.catFilter === "none" }, t("ingNoCategory")))),
+        h("select", { "aria-label": t("ingCategory"), onChange: (e) => { st.catFilter = e.target.value; draw(); } }, h("option", { value: "" }, t("ingAllCategories")), categoriesAlpha().map(([v, key]) => h("option", { value: v, selected: st.catFilter === v }, t(key))), h("option", { value: "none", selected: st.catFilter === "none" }, t("ingNoCategory")))),
       h("div", { class: "ing-matrix-wrap" }, h("table", { class: "ing-matrix" },
         h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", { class: "ing-edit-cell", "aria-label": t("editWord") }))),
         h("tbody", {}, byCat.flatMap(([label, list]) => [
