@@ -2089,7 +2089,30 @@ async function renderOrders(box, restaurantIds) {
   if (!rid) { box.append(h("div", { class: "empty" }, t("noSchedules"))); return; }
   const d = await api(`/orders?restaurant=${rid}`);
   const reload = () => render();
-  const input = h("input", { list: "order-ingredients", maxLength: 80, placeholder: t("orderSearch"), "aria-label": t("orderSearch") });
+  // a drop-down with a search box: the ingredients by category (not the home-made ones), or any other item typed in the box
+  let chosen = "";
+  const label = h("span", { class: "oc-label" }, t("orderSearch"));
+  const panel = h("div", { class: "oc-panel", hidden: true });
+  const search = h("input", { type: "search", class: "oc-search", placeholder: t("orderSearchBox"), "aria-label": t("orderSearchBox"), autocomplete: "off" });
+  const listBox = h("div", { class: "oc-list", role: "listbox" });
+  const pick = (name) => { chosen = name; label.textContent = name; label.classList.toggle("set", !!name); closePanel(); };
+  const drawList = () => {
+    const norm = (x) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); // accents do not matter when searching
+    const q = norm(search.value.trim());
+    const hits = d.ingredients.filter((x) => !q || norm(x.name).includes(q));
+    const cats = [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]];
+    const rows = cats.flatMap(([cat, name]) => { const g = hits.filter((x) => (x.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === x.category))); return g.length ? [h("div", { class: "oc-cat" }, name), ...g.map((x) => h("button", { type: "button", role: "option", class: "oc-opt", onClick: () => pick(x.name) }, x.name))] : []; });
+    const exact = d.ingredients.some((x) => norm(x.name) === q);
+    listBox.replaceChildren(...rows, q && !exact ? h("button", { type: "button", role: "option", class: "oc-opt other", onClick: () => pick(search.value.trim()) }, `+ « ${search.value.trim()} » (${t("orderOther")})`) : null, !rows.length && !q ? h("p", { class: "meta" }, t("orderEmpty")) : null);
+  };
+  const outside = (ev) => { if (!combo.contains(ev.target)) closePanel(); };
+  function closePanel() { panel.hidden = true; document.removeEventListener("pointerdown", outside, true); }
+  const toggle = () => { if (!panel.hidden) { closePanel(); return; } panel.hidden = false; search.value = ""; drawList(); search.focus(); document.addEventListener("pointerdown", outside, true); };
+  search.addEventListener("input", drawList);
+  search.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); if (e.key === "Enter") { e.preventDefault(); const first = listBox.querySelector(".oc-opt"); if (first) first.click(); } });
+  const combo = h("div", { class: "oc-combo" }, h("button", { type: "button", class: "oc-btn", "aria-haspopup": "listbox", onClick: toggle }, label, h("span", { "aria-hidden": "true" }, "▾")), h("div", { class: "oc-panel-wrap" }, panel));
+  panel.replaceChildren(search, listBox);
+  const input = { get value() { return chosen; }, set value(v) { if (!v) pick(""); } };
   const note = h("input", { maxLength: 200, placeholder: t("orderNote"), "aria-label": t("orderNote") });
   const report = async () => {
     if (!input.value.trim()) return;
@@ -2105,8 +2128,7 @@ async function renderOrders(box, restaurantIds) {
   const groups = [...d.suppliers.map((sp) => ({ sp, items: d.open.filter((o) => o.supplier_ids.includes(sp.id)) })), { sp: null, items: d.open.filter((o) => !o.supplier_ids.length) }].filter((g) => g.items.length);
   box.append(h("p", { class: "meta" }, t("orderHelp")),
     restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null,
-    h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("datalist", { id: "order-ingredients" }, d.ingredients.map((n) => h("option", { value: n }))),
-      h("div", { class: "order-form" }, input, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
+    h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("div", { class: "order-form" }, combo, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
     h("h3", { class: "restock-title" }, `${t("orderOpen")}${d.open.length ? ` · ${d.open.length}` : ""}`),
     ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone")),
       g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,

@@ -1045,3 +1045,9 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .order-form{display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;align-items:center}.order-group,.order-report{margin:.6rem 0}
 .order-row{display:flex;align-items:center;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--line)}.order-row>div{flex:1}.order-row.done{border:0;padding:.15rem 0}.order-done summary{cursor:pointer;font-weight:600;margin:.8rem 0 .3rem}
 @media (max-width:700px){.order-form{grid-template-columns:1fr}}
+
+.oc-combo{position:relative}.oc-btn{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:44px;padding:0 .8rem;border:1px solid var(--line);border-radius:10px;background:var(--card,#fff);font:inherit;cursor:pointer;text-align:left}.oc-label{color:var(--muted)}.oc-label.set{color:inherit;font-weight:600}
+.oc-panel-wrap{position:absolute;left:0;right:0;top:100%;z-index:30}.oc-panel{margin-top:4px;background:var(--card,#fff);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:.5rem}
+.oc-search{width:100%;margin-bottom:.4rem}.oc-list{max-height:min(50vh,20rem);overflow:auto;display:grid;gap:1px}
+.oc-cat{position:sticky;top:0;background:var(--bg);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);padding:.3rem .5rem}
+.oc-opt{text-align:left;border:0;background:none;font:inherit;padding:.5rem .6rem;border-radius:6px;cursor:pointer}.oc-opt:hover,.oc-opt:focus{background:var(--bg)}.oc-opt.other{font-weight:700;color:var(--brand)}

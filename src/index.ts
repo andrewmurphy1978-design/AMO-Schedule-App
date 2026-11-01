@@ -2576,7 +2576,8 @@ app.get("/api/orders", async (c) => {
   const done = (await db.prepare("SELECT o.id, o.name, o.ordered_at, sp.name AS supplier FROM order_requests o LEFT JOIN suppliers sp ON sp.id = o.supplier_id WHERE o.restaurant_id = ? AND o.ordered_at IS NOT NULL AND o.ordered_at > ? ORDER BY o.ordered_at DESC LIMIT 30").bind(rid, Date.now() - 7 * 86_400_000).all()).results;
   const suppliers = (await db.prepare("SELECT id, name, phone, email FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null }>()).results;
   const links = (await db.prepare("SELECT lower(i.name) AS k, l.supplier_id FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?").bind(rid).all<{ k: string; supplier_id: number }>()).results;
-  const names = (await db.prepare("SELECT DISTINCT i.name FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? ORDER BY i.name").bind(rid).all<{ name: string }>()).results.map((r) => r.name);
+  // what can be ordered: the ingredients that are not made in the kitchen
+  const names = (await db.prepare("SELECT i.name, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND i.homemade = 0 GROUP BY lower(i.name) ORDER BY i.name").bind(rid).all<{ name: string; category: string | null }>()).results;
   return c.json({ open: open.map((o) => ({ ...o, supplier_ids: [...new Set(links.filter((l) => l.k === o.name.toLowerCase()).map((l) => l.supplier_id))] })), done, suppliers, ingredients: names, can_order: await canManage(db, me, rid, "kitchen") });
 });
 app.post("/api/orders", async (c) => {
