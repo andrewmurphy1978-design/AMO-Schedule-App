@@ -2550,20 +2550,25 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
 });
 
 // Suppliers of the company (administrators edit them; an ingredient can come from several).
-app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all()).results));
+app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes, order_method, customer_number, api_url, api_user, api_key IS NOT NULL AND api_key != '' AS api_key_set FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all<Record<string, unknown>>()).results.map((r) => ({ ...r, api_key_set: r.api_key_set === 1 }))));
 app.put("/api/admin/suppliers", requireAdmin, async (c) => {
   const cid = c.get("me").client_id, db = c.env.DB;
-  const b = await c.req.json<{ suppliers?: { id?: number; name?: string; phone?: string; email?: string; notes?: string }[] }>().catch(() => ({} as { suppliers?: { id?: number; name?: string; phone?: string; email?: string; notes?: string }[] }));
+  type SupIn = { id?: number; name?: string; phone?: string; email?: string; notes?: string; order_method?: string | null; customer_number?: string; api_url?: string; api_user?: string; api_key?: string; clear_api_key?: boolean };
+  const b = await c.req.json<{ suppliers?: SupIn[] }>().catch(() => ({} as { suppliers?: SupIn[] }));
   if (!Array.isArray(b.suppliers) || b.suppliers.length > 60) return c.json({ error: "invalid_suppliers" }, 400);
-  const list = b.suppliers.map((x) => ({ id: x.id, name: (x.name ?? "").trim(), phone: (x.phone ?? "").trim() || null, email: (x.email ?? "").trim() || null, notes: (x.notes ?? "").trim() || null })).filter((x) => x.name);
-  if (list.some((x) => x.name.length > 80 || (x.phone?.length ?? 0) > 40 || (x.email?.length ?? 0) > 120 || (x.notes?.length ?? 0) > 300 || (x.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x.email)))) return c.json({ error: "invalid_suppliers" }, 400);
+  const list = b.suppliers.map((x) => ({ id: x.id, name: (x.name ?? "").trim(), phone: (x.phone ?? "").trim() || null, email: (x.email ?? "").trim() || null, notes: (x.notes ?? "").trim() || null,
+    method: x.order_method === "call" || x.order_method === "email" || x.order_method === "api" ? x.order_method : null, customer: (x.customer_number ?? "").trim() || null,
+    apiUrl: (x.api_url ?? "").trim() || null, apiUser: (x.api_user ?? "").trim() || null, apiKey: typeof x.api_key === "string" && x.api_key.trim() ? x.api_key.trim() : null, clearKey: !!x.clear_api_key })).filter((x) => x.name);
+  if (list.some((x) => x.name.length > 80 || (x.phone?.length ?? 0) > 40 || (x.email?.length ?? 0) > 120 || (x.notes?.length ?? 0) > 300 || (x.customer?.length ?? 0) > 60 || (x.apiUser?.length ?? 0) > 120 || (x.apiKey?.length ?? 0) > 400
+    || (x.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x.email)) || (x.apiUrl && validateUrl(x.apiUrl) !== null))) return c.json({ error: "invalid_suppliers" }, 400);
   const cur = (await db.prepare("SELECT id FROM suppliers WHERE client_id = ?").bind(cid).all<{ id: number }>()).results.map((r) => r.id);
   const keep = new Set(list.filter((x) => x.id && cur.includes(x.id)).map((x) => x.id!));
   await db.batch([
     ...cur.filter((i) => !keep.has(i)).map((i) => db.prepare("DELETE FROM suppliers WHERE id = ?").bind(i)),
+    // the API key is only replaced (or cleared) when asked: it is never sent to the browser, so an edit without it keeps the saved one
     ...list.map((x, pos) => x.id && keep.has(x.id)
-      ? db.prepare("UPDATE suppliers SET name = ?, phone = ?, email = ?, notes = ?, position = ? WHERE id = ? AND client_id = ?").bind(x.name, x.phone, x.email, x.notes, pos + 1, x.id, cid)
-      : db.prepare("INSERT INTO suppliers (client_id, name, phone, email, notes, position) VALUES (?, ?, ?, ?, ?, ?)").bind(cid, x.name, x.phone, x.email, x.notes, pos + 1)),
+      ? db.prepare("UPDATE suppliers SET name = ?, phone = ?, email = ?, notes = ?, order_method = ?, customer_number = ?, api_url = ?, api_user = ?, api_key = CASE WHEN ? = 1 THEN NULL WHEN ?10 IS NOT NULL THEN ?10 ELSE api_key END, position = ? WHERE id = ? AND client_id = ?").bind(x.name, x.phone, x.email, x.notes, x.method, x.customer, x.apiUrl, x.apiUser, x.clearKey ? 1 : 0, x.apiKey, pos + 1, x.id, cid)
+      : db.prepare("INSERT INTO suppliers (client_id, name, phone, email, notes, order_method, customer_number, api_url, api_user, api_key, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, x.name, x.phone, x.email, x.notes, x.method, x.customer, x.apiUrl, x.apiUser, x.apiKey, pos + 1)),
   ]);
   return c.json({ ok: true });
 });
@@ -2574,7 +2579,7 @@ app.get("/api/orders", async (c) => {
   if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
   const open = (await db.prepare("SELECT o.id, o.name, o.note, o.reported_at, s.name AS reported_by FROM order_requests o LEFT JOIN staff s ON s.id = o.reported_by WHERE o.restaurant_id = ? AND o.ordered_at IS NULL ORDER BY o.reported_at").bind(rid).all<{ id: number; name: string; note: string | null; reported_at: number; reported_by: string | null }>()).results;
   const done = (await db.prepare("SELECT o.id, o.name, o.ordered_at, sp.name AS supplier FROM order_requests o LEFT JOIN suppliers sp ON sp.id = o.supplier_id WHERE o.restaurant_id = ? AND o.ordered_at IS NOT NULL AND o.ordered_at > ? ORDER BY o.ordered_at DESC LIMIT 30").bind(rid, Date.now() - 7 * 86_400_000).all()).results;
-  const suppliers = (await db.prepare("SELECT id, name, phone, email FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null }>()).results;
+  const suppliers = (await db.prepare("SELECT id, name, phone, email, order_method, customer_number FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null; order_method: string | null; customer_number: string | null }>()).results;
   const links = (await db.prepare("SELECT lower(i.name) AS k, l.supplier_id FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?").bind(rid).all<{ k: string; supplier_id: number }>()).results;
   // what can be ordered: the ingredients that are not made in the kitchen
   const names = (await db.prepare("SELECT i.name, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND i.homemade = 0 GROUP BY lower(i.name) ORDER BY i.name").bind(rid).all<{ name: string; category: string | null }>()).results;

@@ -2130,7 +2130,7 @@ async function renderOrders(box, restaurantIds) {
     restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null,
     h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("div", { class: "order-form" }, combo, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
     h("h3", { class: "restock-title" }, `${t("orderOpen")}${d.open.length ? ` · ${d.open.length}` : ""}`),
-    ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone")),
+    ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone"), g.sp?.order_method ? h("small", { class: "meta" }, ` · ${{ call: "📞", email: "✉️", api: "🔌" }[g.sp.order_method]} ${t({ call: "supMethodCall", email: "supMethodEmail", api: "supMethodApi" }[g.sp.order_method])}`) : null, g.sp?.customer_number ? h("small", { class: "meta" }, ` · ${t("supClientShort")} ${g.sp.customer_number}`) : null),
       g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
       g.items.map((o) => row(o, g.sp?.id ?? null)))) : [h("p", { class: "meta" }, t("orderEmpty"))]),
     d.done.length ? h("details", { class: "order-done" }, h("summary", {}, t("orderRecent")), d.done.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${t("orderOrderedAt")} ${when(o.ordered_at)}${o.supplier ? ` · ${o.supplier}` : ""}`)))) : null);
@@ -3609,19 +3609,29 @@ function ingredientsPanel() {
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
     const name = h("input", { value: sp?.name ?? "", maxLength: 80, "aria-label": t("supName") }), phone = h("input", { type: "tel", value: sp?.phone ?? "", maxLength: 40, "aria-label": t("supPhone") });
     const email = h("input", { type: "email", value: sp?.email ?? "", maxLength: 120, "aria-label": t("supEmail") }), notes = h("textarea", { rows: 3, maxLength: 300, "aria-label": t("supNotes") }, sp?.notes ?? "");
+    const method = h("select", { "aria-label": t("supMethod"), onChange: () => { apiBox.hidden = method.value !== "api"; } }, [["", t("supMethodNone")], ["call", `📞 ${t("supMethodCall")}`], ["email", `✉️ ${t("supMethodEmail")}`], ["api", `🔌 ${t("supMethodApi")}`]].map(([v, l]) => h("option", { value: v, selected: (sp?.order_method ?? "") === v }, l)));
+    const customer = h("input", { value: sp?.customer_number ?? "", maxLength: 60, "aria-label": t("supCustomer") });
+    const apiUrl = h("input", { type: "url", value: sp?.api_url ?? "", maxLength: 300, placeholder: "https://", "aria-label": t("supApiUrl") }), apiUser = h("input", { value: sp?.api_user ?? "", maxLength: 120, autocomplete: "off", "aria-label": t("supApiUser") });
+    const apiKey = h("input", { type: "password", value: "", maxLength: 400, autocomplete: "new-password", placeholder: sp?.api_key_set ? t("supApiKeySaved") : "", "aria-label": t("supApiKey") });
+    const clearKey = h("input", { type: "checkbox" });
+    const apiBox = h("div", { class: "sup-api", hidden: (sp?.order_method ?? "") !== "api" }, h("p", { class: "meta" }, t("supApiHelp")),
+      h("label", { class: "field" }, h("span", {}, t("supApiUrl")), apiUrl), h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supApiUser")), apiUser), h("label", { class: "field" }, h("span", {}, t("supApiKey")), apiKey)),
+      sp?.api_key_set ? h("label", { class: "check" }, clearKey, h("span", {}, t("supApiKeyClear"))) : null);
     const save = async (list) => { try { await api("/admin/suppliers", { method: "PUT", body: { suppliers: list } }); toast(t("saved")); dlg.close(); await load(); } catch (e) { err.textContent = `⚠ ${e.body?.error === "invalid_suppliers" ? t("supInvalid") : errorText(e)}`; err.hidden = false; } };
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
         e.preventDefault(); err.hidden = true;
         if (!name.value.trim()) { err.textContent = `⚠ ${t("supNameRequired")}`; err.hidden = false; name.focus(); return; }
-        const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value };
+        const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value, order_method: method.value || null, customer_number: customer.value, api_url: method.value === "api" ? apiUrl.value : "", api_user: method.value === "api" ? apiUser.value : "", ...(apiKey.value ? { api_key: apiKey.value } : {}), clear_api_key: clearKey.checked || undefined };
         await save(sp ? st.suppliers.map((x) => (x.id === sp.id ? one : x)) : [...st.suppliers, one]);
       } },
       h("h2", {}, sp ? t("supEdit") : t("supAdd")),
       h("label", { class: "field" }, h("span", {}, t("supName")), name),
+      h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supMethod")), method), h("label", { class: "field" }, h("span", {}, t("supCustomer")), customer)),
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supPhone")), phone), h("label", { class: "field" }, h("span", {}, t("supEmail")), email)),
+      apiBox,
       h("label", { class: "field" }, h("span", {}, t("supNotes")), notes), err,
       h("div", { class: "actions" },
-        sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("postsRemove")) : null,
+        sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("delete")) : null,
         h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
     dlg.showModal();
   }
@@ -3629,7 +3639,7 @@ function ingredientsPanel() {
     const count = (id) => unique().filter((e) => e.supplier_ids?.includes(id)).length;
     return [h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
       st.suppliers.length ? h("div", { class: "ing-lines tree" }, st.suppliers.map((sp) => h("div", { class: "ing-line" }, h("b", {}, sp.name),
-        h("span", { class: "ing-badges" }, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
+        h("span", { class: "ing-badges" }, sp.order_method ? h("span", { class: "ing-badge sup" }, `${{ call: "📞", email: "✉️", api: "🔌" }[sp.order_method]} ${t({ call: "supMethodCall", email: "supMethodEmail", api: "supMethodApi" }[sp.order_method])}`) : null, sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
         sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];
   }
   function viewByPost() {
