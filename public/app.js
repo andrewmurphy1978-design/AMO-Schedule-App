@@ -192,7 +192,7 @@ function renderClientBanner() {
 }
 
 // Icons of the main tabs (shown alone on a phone so that every tab fits).
-const TAB_ICONS = { schedule: "📋", mine: "🕐", posts: "📍", checklist: "✅", community: "💬", account: "👤", admin: "⚙️" };
+const TAB_ICONS = { schedule: "📋", mine: "🕐", posts: "📍", checklist: "✅", voice: "📞", community: "💬", account: "👤", admin: "⚙️" };
 function renderChrome() {
   renderClientBanner();
   fsLabel();
@@ -204,6 +204,8 @@ function renderChrome() {
     : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("community")], ["account", t("account")]];
   // the kitchen managers (and administrators) get the screen where posts are put on the day's shifts
   if (state.me?.me.is_admin || state.me?.managed.some((m) => m.department_id === "kitchen")) tabs.splice(tabs.findIndex(([id]) => id === "community"), 0, ["posts", t("postsTab")]);
+  // assisted phone calls (the person types, the other hears it read aloud)
+  if (state.me?.voice) tabs.splice(tabs.findIndex(([id]) => id === "account"), 0, ["voice", t("voiceTab")]);
   if (state.me?.me.is_admin) tabs.push(["admin", t("admin")]);
   const nav = document.getElementById("main-tabs");
   nav.replaceChildren(
@@ -250,6 +252,7 @@ async function render() {
     else if (state.view === "timeoff") { state.view = "account"; state.accountTab = "timeoff"; await renderAccount(); }
     else if (state.view === "posts") await renderPostBoard();
     else if (state.view === "checklist") await renderChecklist();
+    else if (state.view === "voice") await renderVoice();
     else if (state.view === "community") await renderCommunity();
     else if (state.view === "account") await renderAccount();
     else await renderAdmin();
@@ -2155,6 +2158,81 @@ async function checklistCard(shiftId, info, test = false) {
   return card;
 }
 
+// ---------- Assisted phone calls ----------
+// Written message read aloud on the phone; the person's spoken answer comes back as text.
+async function renderVoice() {
+  if (state.voicePoll) { clearInterval(state.voicePoll); state.voicePoll = null; }
+  const [info, calls] = await Promise.all([api("/voice/contacts"), api("/voice/calls")]);
+  const box = h("div", { class: "account voice-view" }, h("h2", {}, `📞 ${t("voiceTitle")}`));
+  $app.replaceChildren(box);
+  const lang = getLang();
+  const errMsg = (e) => { const k = `voiceErr_${e.body?.error}`; const base = t(k) !== k ? t(k) : errorText(e); return e.body?.detail ? `${base} : ${e.body.detail}` : base; };
+  const quick = [["voiceYes"], ["voiceNo"], ["voiceThanks"], ["voiceOk"], ["voiceCallMe"]].map(([k]) => t(k));
+  const statusText = (call, last) => {
+    if (!call.active) return { queued: t("voiceRinging"), completed: t("voiceEnded"), no_answer: t("voiceNoAnswer"), busy: t("voiceBusy"), failed: t("voiceFailed") }[call.status] ?? t("voiceEnded");
+    return call.status === "queued" ? t("voiceRinging") : last?.direction === "out" && last.delivered ? t("voiceListening") : t("voiceOnline");
+  };
+  const bubble = (m, toName) => {
+    if (m.direction === "sys") { const txt = { no_answer: t("voiceNoAnswer"), busy: t("voiceBusy"), failed: t("voiceFailed"), completed: t("voiceEnded"), idle: t("voiceIdle") }[m.text] ?? (m.text.startsWith("call_failed") ? `${t("voiceErr_call_failed")} · ${m.text.slice(13)}` : m.text); return h("div", { class: "vc-sys" }, txt); }
+    const mine = m.direction === "out";
+    return h("div", { class: `vc-row ${mine ? "mine" : "theirs"}` }, h("div", { class: "vc-bubble" }, h("small", {}, mine ? t("voiceWho") : toName), h("p", {}, m.text),
+      mine ? h("small", { class: "vc-state" }, m.delivered ? `🔊 ${t("voiceSpoken")}` : `⏳ ${t("voiceWaiting")}`) : null),
+      h("time", {}, new Date(m.created_at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" })));
+  };
+  const phrases = (target) => h("div", { class: "vc-quick", role: "group", "aria-label": t("voiceQuick") }, quick.map((q) => h("button", { type: "button", class: "chip-btn", onClick: () => { target.value = target.value ? `${target.value} ${q}` : q; target.focus(); } }, q)));
+
+  // ---- the conversation of a call ----
+  function conversation(id, startActive) {
+    const thread = h("div", { class: "vc-thread", "aria-live": "polite" });
+    const head = h("div", { class: "vc-head" });
+    const composer = h("div", { class: "vc-composer" });
+    let call = null, count = -1;
+    const text = h("textarea", { rows: 2, maxLength: 500, placeholder: t("voiceMessage"), "aria-label": t("voiceMessage"), onKeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } } });
+    async function send() {
+      const v = text.value.trim(); if (!v) return;
+      try { await api(`/voice/calls/${id}/say`, { method: "POST", body: { text: v } }); text.value = ""; poll(); } catch (e) { toast(errMsg(e)); }
+    }
+    const hang = h("button", { class: "btn danger", type: "button", onClick: async () => { try { await api(`/voice/calls/${id}/hangup`, { method: "POST" }); } catch (e) { toast(errMsg(e)); } poll(); } }, `📵 ${t("voiceHangup")}`);
+    composer.replaceChildren(text, h("div", { class: "vc-actions" }, h("button", { class: "btn primary", type: "button", onClick: send }, t("voiceSend")), hang), phrases(text));
+    async function poll() {
+      let d; try { d = await api(`/voice/calls/${id}`); } catch { return; }
+      call = d.call;
+      const last = [...d.messages].reverse().find((m) => m.direction !== "sys");
+      head.replaceChildren(h("h3", {}, `📞 ${call.to_name}`), h("span", { class: `vc-status ${call.active ? "live" : ""}` }, statusText(call, last)));
+      if (d.messages.length !== count || d.messages.some((m) => m.direction === "out" && !m.delivered) || count < 0) {
+        const nearBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80 || count < 0;
+        thread.replaceChildren(...d.messages.map((m) => bubble(m, call.to_name))); count = d.messages.length;
+        if (nearBottom) thread.scrollTop = thread.scrollHeight;
+      }
+      if (!call.active) {
+        clearInterval(state.voicePoll); state.voicePoll = null;
+        composer.replaceChildren(h("button", { class: "btn primary", type: "button", onClick: () => { state.voiceCall = null; render(); } }, t("voiceNewCall")));
+      }
+    }
+    box.append(head, thread, composer);
+    poll(); state.voicePoll = setInterval(() => { if (state.view !== "voice") { clearInterval(state.voicePoll); state.voicePoll = null; return; } poll(); }, 2000);
+  }
+
+  const active = calls.find((c) => c.active);
+  if (state.voiceCall || active) { conversation(state.voiceCall ?? active.id); return; }
+
+  // ---- a new call ----
+  const who = h("select", { "aria-label": t("voiceTo"), onChange: () => { const c = info.contacts.find((x) => String(x.id) === who.value); if (c) langSel.value = c.lang === "en" ? "en" : "fr"; } }, h("option", { value: "" }, `— ${t("voiceChoose")}`), info.contacts.map((c) => h("option", { value: c.id }, `${c.name} (…${c.tail})`)));
+  const langSel = h("select", { "aria-label": t("voiceLangLabel") }, [["fr", "Français"], ["en", "English"]].map(([v, l]) => h("option", { value: v, selected: v === lang }, l)));
+  const msg = h("textarea", { rows: 4, maxLength: 500, placeholder: t("voiceMessage"), "aria-label": t("voiceMessage") });
+  const go = h("button", { class: "btn primary big", type: "button", disabled: !info.ready, onClick: async () => {
+    if (!who.value) { toast(t("voiceChoose")); return; }
+    go.disabled = true;
+    try { const r = await api("/voice/calls", { method: "POST", body: { staff_id: Number(who.value), lang: langSel.value, text: msg.value } }); state.voiceCall = r.id; render(); }
+    catch (e) { toast(errMsg(e)); go.disabled = false; }
+  } }, t("voiceCallBtn"));
+  box.append(h("p", { class: "meta" }, t("voiceHelp")), info.ready ? null : h("div", { class: "info" }, `⚠ ${t("voiceNotReady")}`),
+    h("div", { class: "card vc-new" }, h("div", { class: "vc-two" }, h("label", { class: "field" }, h("span", {}, t("voiceTo")), who), h("label", { class: "field" }, h("span", {}, t("voiceLangLabel")), langSel)),
+      h("label", { class: "field" }, h("span", {}, t("voiceMessage")), msg), phrases(msg), go));
+  if (calls.length) box.append(h("h3", { class: "restock-title" }, t("voiceHistory")), h("div", { class: "vc-history" }, calls.map((c) => h("button", { type: "button", class: "vc-hist-row", onClick: () => { state.voiceCall = c.id; render(); } },
+    h("b", {}, c.to_name), h("small", {}, new Date(c.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })), h("small", { class: "meta" }, statusText(c, null))))));
+}
+
 // ---------- Communities ----------
 // A message board per restaurant and group of departments; people are in the ones matching their roles.
 const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -3792,7 +3870,11 @@ function staffCard(s, ov) {
         adminMsg.textContent = { email_required: t("adminNeedsEmail"), invalid_email: t("invalidEmail"), email_taken: t("emailTaken"), cannot_remove_self: t("cannotRemoveSelf"), last_admin: t("lastAdmin") }[err.body?.error] ?? errorText(err);
         if (err.body?.error === "email_required") email.focus();
       }
-    } }), h("span", {}, t("isAdminLabel")))),
+    } }), h("span", {}, t("isAdminLabel"))),
+    h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.voice_assist || !!s.is_admin, disabled: !!s.is_admin, onChange: async (e) => {
+      const want = e.target.checked;
+      try { await api(`/staff/${s.id}/voice-assist`, { method: "PUT", body: { allowed: want } }); s.voice_assist = want ? 1 : 0; toast(t("saved")); } catch (err) { e.target.checked = !want; adminMsg.textContent = errorText(err); }
+    } }), h("span", {}, `📞 ${t("voiceAllowedLabel")}`))),
     adminMsg,
     h("div", { class: "field" }, h("span", {}, `${t("hourlyRate")} · ${t("adminOnlyField")}`),
       h("div", { class: "rate-line" },
@@ -3995,7 +4077,7 @@ async function boot() {
 function openFromLink() {
   const q = new URLSearchParams(location.search);
   const view = q.get("view");
-  if (view && ["mine", "schedule", "posts", "checklist", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
+  if (view && ["mine", "schedule", "posts", "checklist", "voice", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
     state.view = view;
     if (q.get("c")) state.communityId = Number(q.get("c"));
     if (q.get("tab")) state.accountTab = q.get("tab");

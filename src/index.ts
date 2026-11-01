@@ -18,7 +18,8 @@ import { getVapid, pushToStaff } from "./push.ts";
 import { listsForShift, progress as checklistProgress } from "./checklists.ts";
 import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminders.ts";
 import { publicConnectionView } from "./connections.ts";
-import { verifyTwilioSignature } from "./twilio.ts";
+import { verifyTwilioSignature, startTwilioCall, hangupTwilioCall } from "./twilio.ts";
+import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
@@ -164,7 +165,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
@@ -177,6 +178,7 @@ const OWNER_SQL: Record<Owned, string> = {
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
+  voice_call: "SELECT 1 FROM voice_calls WHERE id = ?1 AND client_id = ?2",
   community_post: "SELECT 1 FROM community_posts p JOIN communities c ON c.id = p.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE p.id = ?1 AND r.client_id = ?2",
 };
 const PATH_OWNERS: [RegExp, Owned][] = [
@@ -185,7 +187,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -588,7 +590,7 @@ app.get("/api/me", async (c) => {
     .all();
   const client = await db.prepare("SELECT id, name FROM clients WHERE id = ?").bind(me.client_id).first();
   const schedules = me.is_admin ? null : await viewableSchedules(db, me.id);
-  return c.json({ me, client, managed: managed.results, roles: roles.results, schedules });
+  return c.json({ me, client, managed: managed.results, roles: roles.results, schedules, voice: await voiceAllowed(db, me) });
 });
 
 app.get("/api/departments", async (c) =>
@@ -637,6 +639,13 @@ app.put("/api/staff/:id/active", requireAdmin, async (c) => {
 });
 
 // Make someone an administrator (or remove it). The last administrator and yourself cannot be removed.
+app.put("/api/staff/:id/voice-assist", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ allowed?: boolean }>().catch(() => ({} as { allowed?: boolean }));
+  if (!id || typeof b.allowed !== "boolean") return c.json({ error: "bad_request" }, 400);
+  await c.env.DB.prepare("UPDATE staff SET voice_assist = ? WHERE id = ? AND client_id = ?").bind(b.allowed ? 1 : 0, id, c.get("me").client_id).run();
+  return c.json({ ok: true });
+});
 app.put("/api/staff/:id/admin", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   const { is_admin, email } = await c.req.json<{ is_admin?: boolean; email?: string }>();
@@ -2668,6 +2677,161 @@ app.get("/api/admin/checklist-report", requireAdmin, async (c) => {
 });
 type ShiftRefFull = { id: number; staff_id: number; restaurant_id: number; role_id: number; start_at: string; end_at: string; staff_name: string; restaurant: string; name_fr: string; name_en: string; department_id: string };
 
+// ---------- Assisted phone calls ----------
+// The owner types, the person on the phone hears it read aloud and answers out loud; the answer comes back as text (screen, push, SMS).
+type VoiceCall = { id: number; client_id: number; caller_id: number; to_staff_id: number | null; to_name: string; to_phone: string; lang: string; call_sid: string | null; status: string; created_at: number; ended_at: number | null };
+const VOICE_ACTIVE = ["queued", "in_progress", "ending"];
+async function voiceAllowed(db: D1Database, me: Me): Promise<boolean> {
+  if (me.is_admin) return true;
+  return (await db.prepare("SELECT voice_assist FROM staff WHERE id = ?").bind(me.id).first<{ voice_assist: number }>())?.voice_assist === 1;
+}
+const requireVoice = async (c: any, next: any) => {
+  const me = c.get("me") as Me;
+  if ((me as { via_token?: boolean }).via_token || !(await voiceAllowed(c.env.DB, me))) return c.json({ error: "forbidden" }, 403);
+  await next();
+};
+const voiceView = (k: VoiceCall) => ({ id: k.id, to_name: k.to_name, lang: k.lang, status: k.status, active: VOICE_ACTIVE.includes(k.status), created_at: k.created_at, ended_at: k.ended_at });
+app.get("/api/voice/contacts", requireVoice, async (c) => {
+  const me = c.get("me");
+  const rows = (await c.env.DB.prepare("SELECT id, name, first_name, lang, substr(phone, -4) AS tail FROM staff WHERE client_id = ? AND active = 1 AND id != ? AND phone IS NOT NULL AND phone != '' ORDER BY name").bind(me.client_id, me.id).all<{ id: number; name: string; first_name: string | null; lang: string; tail: string }>()).results;
+  const conn = await loadConnections(c.env, c.env.DB, me.client_id);
+  return c.json({ contacts: sortByName(rows), ready: !!conn.twilio && !!conn.appUrl, missing: !conn.twilio ? "twilio" : !conn.appUrl ? "app_url" : null });
+});
+app.get("/api/voice/calls", requireVoice, async (c) => {
+  const me = c.get("me");
+  const rows = (await c.env.DB.prepare("SELECT * FROM voice_calls WHERE caller_id = ? ORDER BY id DESC LIMIT 20").bind(me.id).all<VoiceCall>()).results;
+  return c.json(rows.map(voiceView));
+});
+app.get("/api/voice/calls/:id", requireVoice, async (c) => {
+  const me = c.get("me"), id = intParam(c.req.param("id"));
+  const call = id ? await c.env.DB.prepare("SELECT * FROM voice_calls WHERE id = ? AND caller_id = ?").bind(id, me.id).first<VoiceCall>() : null;
+  if (!call) return c.json({ error: "not_found" }, 404);
+  const messages = (await c.env.DB.prepare("SELECT id, direction, text, delivered, created_at FROM voice_messages WHERE call_id = ? ORDER BY id").bind(call.id).all()).results;
+  return c.json({ call: voiceView(call), messages });
+});
+app.post("/api/voice/calls", requireVoice, async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ staff_id?: number; phone?: string; lang?: string; text?: string }>().catch(() => ({} as { staff_id?: number; phone?: string; lang?: string; text?: string }));
+  const text = cleanSpeech(b.text);
+  if (!text) return c.json({ error: "empty_text" }, 400);
+  const conn = await loadConnections(c.env, db, me.client_id);
+  if (!conn.twilio) return c.json({ error: "twilio_not_configured" }, 422);
+  if (!conn.appUrl) return c.json({ error: "app_url_missing" }, 422);
+  if (await db.prepare(`SELECT 1 FROM voice_calls WHERE caller_id = ? AND status IN ('queued', 'in_progress', 'ending') AND created_at > ?`).bind(me.id, Date.now() - 20 * 60_000).first()) return c.json({ error: "call_in_progress" }, 409);
+  if (((await db.prepare("SELECT COUNT(*) AS n FROM voice_calls WHERE caller_id = ? AND created_at > ?").bind(me.id, Date.now() - 86_400_000).first<{ n: number }>())?.n ?? 0) >= 40) return c.json({ error: "too_many_calls" }, 429);
+  let name = "", phone: string | null = null, lang: VoiceLang = b.lang === "en" ? "en" : "fr", staffId: number | null = null;
+  if (b.staff_id) {
+    const t = await db.prepare("SELECT id, name, phone, lang FROM staff WHERE id = ? AND client_id = ? AND active = 1").bind(b.staff_id, me.client_id).first<{ id: number; name: string; phone: string | null; lang: string }>();
+    if (!t?.phone) return c.json({ error: "no_phone" }, 422);
+    staffId = t.id; name = t.name; phone = t.phone; if (!b.lang) lang = t.lang === "en" ? "en" : "fr";
+  } else { phone = normalizePhone(b.phone); name = phone ?? ""; }
+  if (!phone) return c.json({ error: "invalid_phone" }, 400);
+  const now = Date.now();
+  const call = await db.prepare("INSERT INTO voice_calls (client_id, caller_id, to_staff_id, to_name, to_phone, lang, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(me.client_id, me.id, staffId, name, phone, lang, now).first<{ id: number }>();
+  await db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'out', ?, ?)").bind(call!.id, text, now).run();
+  const base = conn.appUrl;
+  const started = await startTwilioCall(conn.twilio, phone, `${base}/hooks/voice/${call!.id}/talk`, `${base}/hooks/voice/${call!.id}/status`, VOICE_MAX_SECONDS);
+  if (!started.ok) {
+    await db.batch([db.prepare("UPDATE voice_calls SET status = 'failed', ended_at = ? WHERE id = ?").bind(Date.now(), call!.id), db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'sys', ?, ?)").bind(call!.id, `call_failed: ${started.error ?? ""}`, Date.now())]);
+    return c.json({ error: "call_failed", detail: started.error ?? null, id: call!.id }, 502);
+  }
+  if (started.sid) await db.prepare("UPDATE voice_calls SET call_sid = ? WHERE id = ?").bind(started.sid, call!.id).run();
+  return c.json({ id: call!.id }, 201);
+});
+app.post("/api/voice/calls/:id/say", requireVoice, async (c) => {
+  const me = c.get("me"), db = c.env.DB, id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ text?: string }>().catch(() => ({} as { text?: string }));
+  const text = cleanSpeech(b.text);
+  const call = id ? await db.prepare("SELECT * FROM voice_calls WHERE id = ? AND caller_id = ?").bind(id, me.id).first<VoiceCall>() : null;
+  if (!call) return c.json({ error: "not_found" }, 404);
+  if (!text) return c.json({ error: "empty_text" }, 400);
+  if (!VOICE_ACTIVE.includes(call.status)) return c.json({ error: "call_over" }, 409);
+  if (((await db.prepare("SELECT COUNT(*) AS n FROM voice_messages WHERE call_id = ? AND direction = 'out' AND delivered = 0").bind(call.id).first<{ n: number }>())?.n ?? 0) >= 10) return c.json({ error: "too_many_waiting" }, 429);
+  await db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'out', ?, ?)").bind(call.id, text, Date.now()).run();
+  return c.json({ ok: true });
+});
+app.post("/api/voice/calls/:id/hangup", requireVoice, async (c) => {
+  const me = c.get("me"), db = c.env.DB, id = intParam(c.req.param("id"));
+  const call = id ? await db.prepare("SELECT * FROM voice_calls WHERE id = ? AND caller_id = ?").bind(id, me.id).first<VoiceCall>() : null;
+  if (!call) return c.json({ error: "not_found" }, 404);
+  if (VOICE_ACTIVE.includes(call.status)) {
+    await db.prepare("UPDATE voice_calls SET status = 'completed', ended_at = ? WHERE id = ?").bind(Date.now(), call.id).run();
+    const conn = await loadConnections(c.env, db, call.client_id);
+    if (call.call_sid && conn.twilio) await hangupTwilioCall(conn.twilio, call.call_sid);
+  }
+  return c.json({ ok: true });
+});
+
+// What Twilio asks while the call is on: only reachable by Twilio (signature checked with the client's own token).
+async function voiceHook(c: Context<any>): Promise<{ call: VoiceCall; params: Record<string, string>; conn: Awaited<ReturnType<typeof loadConnections>>; base: string; lang: VoiceLang } | Response> {
+  const db: D1Database = c.env.DB;
+  await ensureMigrated(db);
+  const id = intParam(c.req.param("id"));
+  const call = id ? await db.prepare("SELECT * FROM voice_calls WHERE id = ?").bind(id).first<VoiceCall>() : null;
+  if (!call) return c.text("not found", 404);
+  const conn = await loadConnections(c.env, db, call.client_id);
+  const form = await c.req.formData().catch(() => null);
+  const params: Record<string, string> = {};
+  form?.forEach((v, k) => { if (typeof v === "string") params[k] = v; });
+  const base = conn.appUrl || new URL(c.req.url).origin;
+  if (!conn.twilio || !(await verifyTwilioSignature(conn.twilio.token, `${base}${c.req.path}`, params, c.req.header("X-Twilio-Signature")))) return c.text("forbidden", 403);
+  return { call, params, conn, base, lang: call.lang === "en" ? "en" : "fr" };
+}
+const xmlReply = (c: Context<any>, body: string) => c.body(body, 200, { "content-type": "text/xml" });
+app.post("/hooks/voice/:id/talk", async (c) => {
+  const v = await voiceHook(c); if (v instanceof Response) return v;
+  const { call, base, lang } = v, db = c.env.DB;
+  const heard = `${base}/hooks/voice/${call.id}/heard`, talk = `${base}/hooks/voice/${call.id}/talk`;
+  if (call.status === "ending" || call.status === "completed") return xmlReply(c, hangUp(lang));
+  if (call.status === "queued") await db.prepare("UPDATE voice_calls SET status = 'in_progress' WHERE id = ? AND status = 'queued'").bind(call.id).run();
+  const next = await db.prepare("SELECT id, text FROM voice_messages WHERE call_id = ? AND direction = 'out' AND delivered = 0 ORDER BY id LIMIT 1").bind(call.id).first<{ id: number; text: string }>();
+  if (next) {
+    await db.prepare("UPDATE voice_messages SET delivered = 1 WHERE id = ?").bind(next.id).run();
+    const first = !(await db.prepare("SELECT 1 FROM voice_messages WHERE call_id = ? AND direction = 'out' AND delivered = 1 AND id < ?").bind(call.id, next.id).first());
+    const who = (await db.prepare("SELECT first_name, name FROM staff WHERE id = ?").bind(call.caller_id).first<{ first_name: string | null; name: string }>());
+    return xmlReply(c, sayAndListen(first ? `${intro(lang, who?.first_name || who?.name || "")} ${next.text}` : next.text, lang, heard, talk));
+  }
+  // nobody typed or answered for a while: close the line politely
+  const last = (await db.prepare("SELECT MAX(created_at) AS t FROM voice_messages WHERE call_id = ? AND direction IN ('out', 'in')").bind(call.id).first<{ t: number | null }>())?.t ?? call.created_at;
+  if (Date.now() - last > VOICE_IDLE_MS) {
+    await db.batch([db.prepare("UPDATE voice_calls SET status = 'completed', ended_at = ? WHERE id = ?").bind(Date.now(), call.id), db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'sys', 'idle', ?)").bind(call.id, Date.now())]);
+    return xmlReply(c, hangUp(lang, goodbye(lang)));
+  }
+  return xmlReply(c, listenOnly(lang, heard, talk));
+});
+app.post("/hooks/voice/:id/heard", async (c) => {
+  const v = await voiceHook(c); if (v instanceof Response) return v;
+  const { call, params, conn, base } = v, db = c.env.DB;
+  const said = cleanSpeech(params.SpeechResult);
+  if (said) {
+    await db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'in', ?, ?)").bind(call.id, said, Date.now()).run();
+    // the answer reaches the owner as a text message and a notification on their devices
+    c.executionCtx.waitUntil((async () => {
+      try {
+        const owner = await db.prepare("SELECT id, phone FROM staff WHERE id = ?").bind(call.caller_id).first<{ id: number; phone: string | null }>();
+        if (owner?.phone) await deliver(db, conn, "sms", owner.phone, { subject: "", text: `📞 ${call.to_name}: « ${said} »` }, "voice_reply", owner.id);
+        await pushToStaff(db, call.caller_id, { title: `📞 ${call.to_name}`, body: said.slice(0, 140), url: "/?view=voice", tag: `voice-${call.id}` }, { appUrl: base });
+      } catch { /* the answer is on screen anyway */ }
+    })());
+  }
+  return xmlReply(c, redirectTo(`${base}/hooks/voice/${call.id}/talk`));
+});
+app.post("/hooks/voice/:id/status", async (c) => {
+  const v = await voiceHook(c); if (v instanceof Response) return v;
+  const { call, params, conn } = v, db = c.env.DB;
+  const status = ({ completed: "completed", busy: "busy", "no-answer": "no_answer", failed: "failed", canceled: "failed" } as Record<string, string>)[params.CallStatus ?? ""];
+  if (status && VOICE_ACTIVE.includes(call.status)) {
+    const final = status === "completed" && call.status === "queued" ? "no_answer" : status;
+    await db.batch([db.prepare("UPDATE voice_calls SET status = ?, ended_at = ? WHERE id = ?").bind(final, Date.now(), call.id), db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'sys', ?, ?)").bind(call.id, final, Date.now())]);
+    if (final !== "completed") {
+      const owner = await db.prepare("SELECT id, phone FROM staff WHERE id = ?").bind(call.caller_id).first<{ id: number; phone: string | null }>();
+      const why = ({ no_answer: "ne répond pas", busy: "est occupé(e)", failed: "n’a pas pu être jointe" } as Record<string, string>)[final] ?? final;
+      if (owner?.phone) await deliver(db, conn, "sms", owner.phone, { subject: "", text: `📞 ${call.to_name} ${why}.` }, "voice_reply", owner.id);
+    }
+  }
+  return c.body(null, 204);
+});
+
 // ---------- Web Push (this device) ----------
 app.get("/api/push/key", async (c) => c.json({ publicKey: (await getVapid(c.env.DB)).publicKey }));
 app.get("/api/push/status", async (c) => {
@@ -2972,7 +3136,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const cid = c.get("me").client_id;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff WHERE client_id = ? ORDER BY name").bind(cid).all(),
+    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, voice_assist, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff WHERE client_id = ? ORDER BY name").bind(cid).all(),
     db.prepare("SELECT sr.staff_id, sr.restaurant_id, sr.role_id FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT m.staff_id, m.restaurant_id, m.department_id FROM managers m JOIN staff s ON s.id = m.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all(),
@@ -3308,6 +3472,6 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await flushDeliveries(env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await flushDeliveries(env.DB); })());
   },
 };

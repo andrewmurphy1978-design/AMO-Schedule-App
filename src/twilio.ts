@@ -36,3 +36,26 @@ export async function sendTwilioSms(cfg: TwilioConfig, to: string, body: string)
   try { const j = JSON.parse(text); message = j.message ? `${j.message}${j.code ? ` (code ${j.code})` : ""}` : message; } catch { /* keep status */ }
   return { ok: false, error: message.slice(0, 300) };
 }
+
+/** Starts a phone call; Twilio then asks `url` what to say. */
+export async function startTwilioCall(cfg: TwilioConfig, to: string, url: string, statusUrl: string, timeLimit: number): Promise<{ ok: boolean; sid?: string; error?: string }> {
+  const base = cfg.apiBase ?? "https://api.twilio.com";
+  const body = new URLSearchParams({ To: to, From: cfg.from, Url: url, Method: "POST", StatusCallback: statusUrl, StatusCallbackMethod: "POST", TimeLimit: String(timeLimit) });
+  for (const ev of ["completed"]) body.append("StatusCallbackEvent", ev);
+  const res = await fetch(`${base}/2010-04-01/Accounts/${encodeURIComponent(cfg.sid)}/Calls.json`, {
+    method: "POST", headers: { authorization: `Basic ${btoa(`${cfg.sid}:${cfg.token}`)}`, "content-type": "application/x-www-form-urlencoded" }, body: body.toString(),
+  });
+  const text = await res.text().catch(() => "");
+  if (res.ok) { try { return { ok: true, sid: JSON.parse(text).sid }; } catch { return { ok: true }; } }
+  let message = `HTTP ${res.status}`;
+  try { const j = JSON.parse(text); message = j.message ? `${j.message}${j.code ? ` (code ${j.code})` : ""}` : message; } catch { /* keep status */ }
+  return { ok: false, error: message.slice(0, 300) };
+}
+
+/** Ends a call in progress. */
+export async function hangupTwilioCall(cfg: TwilioConfig, callSid: string): Promise<void> {
+  const base = cfg.apiBase ?? "https://api.twilio.com";
+  await fetch(`${base}/2010-04-01/Accounts/${encodeURIComponent(cfg.sid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+    method: "POST", headers: { authorization: `Basic ${btoa(`${cfg.sid}:${cfg.token}`)}`, "content-type": "application/x-www-form-urlencoded" }, body: "Status=completed",
+  }).catch(() => {});
+}
