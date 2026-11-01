@@ -1736,21 +1736,61 @@ async function shrinkImage(file) {
   } catch { return file; }
 }
 async function uploadCommunityMedia(communityId, file) {
-  const isVideo = file.type.startsWith("video/");
-  if (!isVideo && !file.type.startsWith("image/")) throw new Error("invalid_type");
+  const isVideo = file.type.startsWith("video/"), isAudio = file.type.startsWith("audio/");
+  if (!isVideo && !isAudio && !file.type.startsWith("image/")) throw new Error("invalid_type");
   if (isVideo && file.size > 20 * 1024 * 1024) throw new Error("too_large");
-  const blob = isVideo ? file : await shrinkImage(file);
+  if (isAudio && file.size > 6 * 1024 * 1024) throw new Error("too_large");
+  const blob = isVideo || isAudio ? file : await shrinkImage(file);
   const res = await fetch(`/api/communities/${communityId}/media`, { method: "POST", headers: { "content-type": blob.type || file.type, ...clientHeader() }, body: blob });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(j.error ?? "error"), { body: j });
-  return { id: j.id, kind: j.kind, url: URL.createObjectURL(blob) };
+  return { id: j.id, kind: j.kind, url: URL.createObjectURL(blob), transcript: j.transcript ?? null };
 }
-// the pictures and videos of a post (tap a picture to see it full size)
+// the pictures and videos of a post (tap a picture to see it full size); voice messages, and a transcript under each voice or video message
 function mediaGrid(list = []) {
   if (!list.length) return null;
-  return h("div", { class: `post-media n${Math.min(list.length, 4)}` }, list.map((m) => m.kind === "video"
-    ? h("video", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata", playsinline: true })
-    : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" }))));
+  const visual = list.filter((m) => m.kind !== "audio");
+  const transcript = (m) => {
+    if (!m.transcript) return state.me?.deaf_mute ? h("p", { class: "meta tr-none" }, `📝 ${t("transcriptNone")}`) : null;
+    return h("details", { class: "post-transcript", open: true }, h("summary", {}, `📝 ${t("transcriptTitle")}`), h("p", {}, m.transcript));
+  };
+  return h("div", { class: "post-media-wrap" },
+    visual.length ? h("div", { class: `post-media n${Math.min(visual.length, 4)}` }, visual.map((m) => m.kind === "video"
+      ? h("video", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata", playsinline: true })
+      : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" })))) : null,
+    list.filter((m) => m.kind === "audio").map((m) => h("div", { class: "post-voice" }, h("b", {}, `🎤 ${t("voiceMsg")}`), h("audio", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata" }), transcript(m))),
+    visual.filter((m) => m.kind === "video").map(transcript));
+}
+
+// Records a voice or a video message with the microphone / camera. Resolves to a File, or null when cancelled.
+function recordMessage(withVideo) {
+  return new Promise(async (resolve) => {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") { toast(t("recUnsupported")); resolve(null); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia(withVideo ? { audio: true, video: { facingMode: "user", width: { ideal: 640 } } } : { audio: true }); }
+    catch { toast(t("recDenied")); resolve(null); return; }
+    const maxSec = withVideo ? 60 : 300;
+    const mime = (withVideo ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"] : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]).find((m) => MediaRecorder.isTypeSupported?.(m));
+    let rec, chunks = [], timer = null, started = 0, finished = false;
+    let dlg = document.getElementById("rec-modal"); if (!dlg) { dlg = h("dialog", { id: "rec-modal" }); document.body.append(dlg); }
+    const clock = h("b", { class: "rec-clock" }, "0:00");
+    const preview = withVideo ? h("video", { class: "rec-preview", muted: true, autoplay: true, playsinline: true }) : h("div", { class: "rec-mic", "aria-hidden": "true" }, "🎤");
+    if (withVideo) preview.srcObject = stream;
+    const finish = (file) => { if (finished) return; finished = true; clearInterval(timer); stream.getTracks().forEach((tr) => tr.stop()); if (dlg.open) dlg.close(); resolve(file); };
+    const startBtn = h("button", { class: "btn primary big", type: "button", onClick: () => {
+      try { rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), ...(withVideo ? { videoBitsPerSecond: 1_000_000 } : { audioBitsPerSecond: 64_000 }) }); } catch { toast(t("recUnsupported")); finish(null); return; }
+      rec.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
+      rec.onstop = () => { const type = (rec.mimeType || mime || (withVideo ? "video/webm" : "audio/webm")).split(";")[0]; finish(chunks.length ? new File(chunks, `${withVideo ? "video" : "voice"}.${type.split("/")[1].replace("x-", "")}`, { type }) : null); };
+      rec.start(1000); started = Date.now(); startBtn.hidden = true; stopBtn.hidden = false; status.textContent = `🔴 ${t("recRecording")}`;
+      timer = setInterval(() => { const s = Math.floor((Date.now() - started) / 1000); clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; if (s >= maxSec && rec.state === "recording") rec.stop(); }, 250);
+    } }, `● ${t("recStart")}`);
+    const stopBtn = h("button", { class: "btn primary big", type: "button", hidden: true, onClick: () => { if (rec?.state === "recording") rec.stop(); } }, `■ ${t("recStop")} · ${t("recAttach").toLowerCase()}`);
+    const status = h("p", { class: "meta" }, `${t("recMax")} : ${Math.floor(maxSec / 60)}:${String(maxSec % 60).padStart(2, "0")}`);
+    dlg.replaceChildren(h("div", { class: "modal-body rec-body" }, h("h2", {}, withVideo ? `🎥 ${t("recVideo")}` : `🎤 ${t("recVoice")}`), preview, clock, status,
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => { chunks = []; if (rec?.state === "recording") { rec.onstop = () => finish(null); rec.stop(); } else finish(null); } }, t("recCancel")), startBtn, stopBtn)));
+    dlg.addEventListener("close", () => finish(null), { once: true });
+    dlg.showModal();
+  });
 }
 
 // ---- emojis: a picker with categories (like Messenger) for messages and reactions on posts ----
@@ -2259,9 +2299,9 @@ async function renderCommunity() {
   let attached = [];
   const previews = h("div", { class: "comm-previews" });
   const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
-    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : h("img", { src: m.url, alt: "" }),
+    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : m.kind === "audio" ? h("div", { class: "comm-preview-audio" }, h("audio", { src: m.url, controls: true, preload: "metadata" }), m.transcript ? h("small", { class: "meta" }, `📝 ${m.transcript}`) : null) : h("img", { src: m.url, alt: "" }),
     h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); } }, "✕"))));
-  const picker = h("input", { type: "file", accept: "image/*,video/*", multiple: true, hidden: true, onChange: async (e) => {
+  const picker = h("input", { type: "file", accept: "image/*,video/*,audio/*", multiple: true, hidden: true, onChange: async (e) => {
     const files = [...e.target.files]; e.target.value = "";
     for (const file of files) {
       if (attached.length >= 4) { toast(t("mediaTooMany")); break; }
@@ -2269,6 +2309,13 @@ async function renderCommunity() {
       catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
     }
   } });
+  // record a voice or video message right here: it is uploaded (and transcribed) like a picked file
+  const record = async (withVideo) => {
+    const file = await recordMessage(withVideo); if (!file) return;
+    if (attached.length >= 4) { toast(t("mediaTooMany")); return; }
+    try { toast(t("transcriptWorking")); attached.push(await uploadCommunityMedia(id, file)); drawPreviews(); }
+    catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
+  };
   const compose = h("form", { class: "comm-compose", onSubmit: async (e) => {
     e.preventDefault();
     if (!body.value.trim() && !attached.length) return;
@@ -2276,6 +2323,8 @@ async function renderCommunity() {
   } }, body, previews,
     h("div", { class: "comm-compose-actions" },
       h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
+        h("button", { class: "btn", type: "button", "aria-label": t("recVoice"), title: t("recVoice"), onClick: () => record(false) }, "🎤"),
+        h("button", { class: "btn", type: "button", "aria-label": t("recVideo"), title: t("recVideo"), onClick: () => record(true) }, "🎥"),
         h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(body, em)) }, "😊")),
       h("button", { class: "btn primary", type: "submit" }, t("publishPost"))));
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
@@ -3315,7 +3364,10 @@ function communitiesPanel(ov) {
           try { await api("/admin/communities", { method: "POST", body: { restaurant_id: r.id, name: name.value, departments: deps.filter((x) => x.input.checked).map((x) => x.d) } }); load(); } catch (e) { toast(e.body?.error === "invalid_community" ? t("communityInvalid") : errorText(e)); }
         } }, `+ ${t("add")}`)));
     };
+    const tr = await api("/admin/community-transcripts").catch(() => ({ all: false, ai_available: false }));
     box.replaceChildren(h("h2", {}, t("adminCommunities")), h("p", { class: "meta" }, t("communitiesHelp")),
+      h("div", { class: "card tr-setting" }, h("label", { class: "check" }, h("input", { type: "checkbox", checked: tr.all, onChange: async (e) => { const want = e.target.checked; try { await api("/admin/community-transcripts", { method: "PUT", body: { all: want } }); toast(t("saved")); } catch (err) { e.target.checked = !want; toast(errorText(err)); } } }), h("span", {}, `📝 ${t("transcriptAllLabel")}`)),
+        h("p", { class: "meta" }, t("transcriptAllHelp")), tr.ai_available ? null : h("p", { class: "meta" }, `⚠ ${t("transcriptNoAi")}`)),
       ...ov.restaurants.map((r) => h("div", { class: "comm-resto" }, h("h3", {}, r.name), ...rows.filter((c) => c.restaurant_id === r.id).map(rowFor), addFor(r))));
   }
   load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
@@ -3871,6 +3923,10 @@ function staffCard(s, ov) {
         if (err.body?.error === "email_required") email.focus();
       }
     } }), h("span", {}, t("isAdminLabel"))),
+    h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.deaf_mute, onChange: async (e) => {
+      const want = e.target.checked;
+      try { await api(`/staff/${s.id}/deaf-mute`, { method: "PUT", body: { deaf_mute: want } }); s.deaf_mute = want ? 1 : 0; toast(t("saved")); } catch (err) { e.target.checked = !want; adminMsg.textContent = errorText(err); }
+    } }), h("span", {}, `🧏 ${t("deafMuteLabel")}`)),
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!s.voice_assist || !!s.is_admin, disabled: !!s.is_admin, onChange: async (e) => {
       const want = e.target.checked;
       try { await api(`/staff/${s.id}/voice-assist`, { method: "PUT", body: { allowed: want } }); s.voice_assist = want ? 1 : 0; toast(t("saved")); } catch (err) { e.target.checked = !want; adminMsg.textContent = errorText(err); }

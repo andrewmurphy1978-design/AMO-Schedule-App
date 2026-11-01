@@ -19,6 +19,8 @@
   },
   // Every 5 minutes: alert managers when nobody accepted a sick-call replacement in time.
   "triggers": { "crons": ["*/5 * * * *"] },
+  // Speech to text (Whisper) for the transcripts of voice and video messages.
+  "ai": { "binding": "AI" },
   "d1_databases": [
     { "binding": "DB", "database_name": "mikes-schedule-db", "database_id": "c9c1e842-b5b7-4db2-97a5-907080a4715a" }
   ]

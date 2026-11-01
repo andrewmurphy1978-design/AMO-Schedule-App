@@ -19,6 +19,7 @@ import { listsForShift, progress as checklistProgress } from "./checklists.ts";
 import { sendShiftReminders, REMINDER_CHANNELS, MAX_REMINDERS } from "./reminders.ts";
 import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature, startTwilioCall, hangupTwilioCall } from "./twilio.ts";
+import { transcribe, type AiBinding } from "./transcribe.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
@@ -47,6 +48,8 @@ type Env = {
   // Public address of the app (used in links sent by SMS/email) and the restaurants' time zone.
   APP_URL?: string;
   TIMEZONE?: string;
+  // Workers AI (speech to text for voice and video messages); absent = no transcripts.
+  AI?: AiBinding;
   // Optional secrets: key to read pay slip PDFs with Claude, and the key used to hash Social Insurance Numbers.
   ANTHROPIC_API_KEY?: string; SIN_KEY?: string; ANTHROPIC_API_BASE?: string;
   // Optional: messaging credentials as environment secrets (otherwise they are saved from the Administration screen).
@@ -590,7 +593,7 @@ app.get("/api/me", async (c) => {
     .all();
   const client = await db.prepare("SELECT id, name FROM clients WHERE id = ?").bind(me.client_id).first();
   const schedules = me.is_admin ? null : await viewableSchedules(db, me.id);
-  return c.json({ me, client, managed: managed.results, roles: roles.results, schedules, voice: await voiceAllowed(db, me) });
+  return c.json({ me, client, managed: managed.results, roles: roles.results, schedules, voice: await voiceAllowed(db, me), deaf_mute: (await db.prepare("SELECT deaf_mute FROM staff WHERE id = ?").bind(me.id).first<{ deaf_mute: number }>())?.deaf_mute === 1 });
 });
 
 app.get("/api/departments", async (c) =>
@@ -639,6 +642,13 @@ app.put("/api/staff/:id/active", requireAdmin, async (c) => {
 });
 
 // Make someone an administrator (or remove it). The last administrator and yourself cannot be removed.
+app.put("/api/staff/:id/deaf-mute", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ deaf_mute?: boolean }>().catch(() => ({} as { deaf_mute?: boolean }));
+  if (!id || typeof b.deaf_mute !== "boolean") return c.json({ error: "bad_request" }, 400);
+  await c.env.DB.prepare("UPDATE staff SET deaf_mute = ? WHERE id = ? AND client_id = ?").bind(b.deaf_mute ? 1 : 0, id, c.get("me").client_id).run();
+  return c.json({ ok: true });
+});
 app.put("/api/staff/:id/voice-assist", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   const b = await c.req.json<{ allowed?: boolean }>().catch(() => ({} as { allowed?: boolean }));
@@ -2921,9 +2931,10 @@ app.get("/api/communities/:id/posts", async (c) => {
      FROM community_posts p JOIN staff s ON s.id = p.staff_id WHERE p.parent_id IN (${page.map(() => "?").join(",")}) ORDER BY p.id`,
   ).bind(...page.map((x) => x.id)).all<{ id: number; parent_id: number; staff_id: number }>()).results : [];
   const allIds = [...page.map((x) => x.id), ...replies.map((x) => x.id)];
-  const media = allIds.length ? (await db.prepare(`SELECT id, post_id, kind, mime FROM community_media WHERE post_id IN (${allIds.map(() => "?").join(",")}) ORDER BY id`).bind(...allIds).all<{ id: number; post_id: number; kind: string; mime: string }>()).results : [];
+  const media = allIds.length ? (await db.prepare(`SELECT id, post_id, kind, mime, transcript FROM community_media WHERE post_id IN (${allIds.map(() => "?").join(",")}) ORDER BY id`).bind(...allIds).all<{ id: number; post_id: number; kind: string; mime: string; transcript: string | null }>()).results : [];
   const reacts = allIds.length ? (await db.prepare(`SELECT post_id, emoji, count(*) AS n, max(staff_id = ?) AS mine FROM community_reactions WHERE post_id IN (${allIds.map(() => "?").join(",")}) GROUP BY post_id, emoji ORDER BY min(rowid)`).bind(me.id, ...allIds).all<{ post_id: number; emoji: string; n: number; mine: number }>()).results : [];
-  const mark = (x: { id: number; staff_id: number }) => ({ ...x, media: media.filter((m) => m.post_id === x.id), reactions: reacts.filter((r) => r.post_id === x.id).map((r) => ({ emoji: r.emoji, count: r.n, mine: r.mine === 1 })), mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
+  const seeTranscripts = media.some((m) => m.transcript) && (await canReadTranscripts(db, me));
+  const mark = (x: { id: number; staff_id: number }) => ({ ...x, media: media.filter((m) => m.post_id === x.id).map((m) => ({ ...m, transcript: seeTranscripts ? m.transcript : null })), reactions: reacts.filter((r) => r.post_id === x.id).map((r) => ({ emoji: r.emoji, count: r.n, mine: r.mine === 1 })), mine: x.staff_id === me.id, can_delete: mod || x.staff_id === me.id });
   if (!before) {
     const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM community_posts WHERE community_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
     await db.prepare("INSERT INTO community_reads (community_id, staff_id, last_post_id) VALUES (?, ?, ?) ON CONFLICT (community_id, staff_id) DO UPDATE SET last_post_id = excluded.last_post_id").bind(id, me.id, last).run();
@@ -2951,7 +2962,7 @@ app.post("/api/communities/:id/posts", async (c) => {
   }
   const r = await db.prepare("INSERT INTO community_posts (community_id, parent_id, staff_id, body) VALUES (?, ?, ?, ?)").bind(id, b.parent_id ?? null, me.id, body).run();
   if (mediaIds.length) await db.prepare(`UPDATE community_media SET post_id = ? WHERE id IN (${mediaIds.map(() => "?").join(",")})`).bind(r.meta.last_row_id, ...mediaIds).run();
-  const preview = body ? "" : (await db.prepare("SELECT kind FROM community_media WHERE post_id = ? LIMIT 1").bind(r.meta.last_row_id).first<{ kind: string }>())?.kind === "video" ? "🎥" : "📷";
+  const preview = body ? "" : (await db.prepare("SELECT kind FROM community_media WHERE post_id = ? LIMIT 1").bind(r.meta.last_row_id).first<{ kind: string }>())?.kind === "video" ? "🎥" : (await db.prepare("SELECT kind FROM community_media WHERE post_id = ? LIMIT 1").bind(r.meta.last_row_id).first<{ kind: string }>())?.kind === "audio" ? "🎤" : "📷";
   // everyone of the community who enabled notifications (the author excepted)
   c.executionCtx.waitUntil((async () => {
     try {
@@ -2970,15 +2981,42 @@ app.post("/api/communities/:id/posts", async (c) => {
   return c.json({ id: r.meta.last_row_id }, 201);
 });
 
+// Transcripts cost money (AI): they are made only when someone is going to read them: a deaf and mute member of the community, or everybody when the owner turned that on.
+const transcriptsForAll = async (db: D1Database, clientId: number) => (await getSetting(db, clientId, "community_transcripts_all")) === "1";
+async function communityHasDeafMute(db: D1Database, clientId: number, communityId: number, restaurantId: number): Promise<boolean> {
+  return !!(await db.prepare(
+    `SELECT 1 FROM staff s WHERE s.client_id = ?1 AND s.active = 1 AND s.deaf_mute = 1 AND (s.is_admin = 1
+       OR s.id IN (SELECT staff_id FROM staff_community_access WHERE community_id = ?2)
+       OR (s.community_custom = 0 AND s.id IN (SELECT sr.staff_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN community_departments cd ON cd.department_id = ro.department_id WHERE cd.community_id = ?2 AND sr.restaurant_id = ?3))
+       OR s.id IN (SELECT m.staff_id FROM managers m JOIN community_departments cd ON cd.department_id = m.department_id WHERE cd.community_id = ?2 AND m.restaurant_id = ?3)) LIMIT 1`,
+  ).bind(clientId, communityId, restaurantId).first());
+}
+/** Who may read transcripts: deaf and mute people always, everybody else only when the owner allowed it. */
+async function canReadTranscripts(db: D1Database, me: Me): Promise<boolean> {
+  if (await transcriptsForAll(db, me.client_id)) return true;
+  return (await db.prepare("SELECT deaf_mute FROM staff WHERE id = ?").bind(me.id).first<{ deaf_mute: number }>())?.deaf_mute === 1;
+}
+app.get("/api/admin/community-transcripts", requireAdmin, async (c) => c.json({ all: await transcriptsForAll(c.env.DB, c.get("me").client_id), ai_available: !!c.env.AI }));
+app.put("/api/admin/community-transcripts", requireAdmin, async (c) => {
+  const b = await c.req.json<{ all?: boolean }>().catch(() => ({} as { all?: boolean }));
+  if (typeof b.all !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const cid = c.get("me").client_id;
+  await (b.all ? putSettingStmt(c.env.DB, cid, "community_transcripts_all", "1") : delSettingStmt(c.env.DB, cid, "community_transcripts_all")).run();
+  return c.json({ ok: true });
+});
+
 // Photos and videos of community posts. Uploaded first (raw body), attached to the post when it is published.
-const MEDIA_TYPES: Record<string, "image" | "video"> = { "image/jpeg": "image", "image/png": "image", "image/webp": "image", "video/mp4": "video", "video/quicktime": "video", "video/webm": "video" };
-const MAX_IMAGE_BYTES = 3 * 1024 * 1024, MAX_VIDEO_BYTES = 20 * 1024 * 1024, MAX_MEDIA_PER_POST = 4, MEDIA_CHUNK = 600_000;
+const MEDIA_TYPES: Record<string, "image" | "video" | "audio"> = { "image/jpeg": "image", "image/png": "image", "image/webp": "image", "video/mp4": "video", "video/quicktime": "video", "video/webm": "video", "audio/webm": "audio", "audio/mp4": "audio", "audio/ogg": "audio", "audio/mpeg": "audio", "audio/aac": "audio", "audio/x-m4a": "audio" };
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024, MAX_AUDIO_BYTES = 6 * 1024 * 1024, MAX_VIDEO_BYTES = 20 * 1024 * 1024, MAX_MEDIA_PER_POST = 4, MEDIA_CHUNK = 600_000;
 function sniffMedia(b: Uint8Array, mime: string): boolean {
   const at = (i: number, ...v: number[]) => v.every((x, k) => b[i + k] === x);
   if (mime === "image/jpeg") return at(0, 0xff, 0xd8);
   if (mime === "image/png") return at(0, 0x89, 0x50, 0x4e, 0x47);
   if (mime === "image/webp") return at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50);
-  if (mime === "video/webm") return at(0, 0x1a, 0x45, 0xdf, 0xa3);
+  if (mime === "video/webm" || mime === "audio/webm") return at(0, 0x1a, 0x45, 0xdf, 0xa3);
+  if (mime === "audio/ogg") return at(0, 0x4f, 0x67, 0x67, 0x53);
+  if (mime === "audio/mpeg") return at(0, 0x49, 0x44, 0x33) || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0);
+  if (mime === "audio/aac") return b[0] === 0xff && (b[1] & 0xf0) === 0xf0;
   return at(4, 0x66, 0x74, 0x79, 0x70); // mp4 / mov: "ftyp"
 }
 const toB64 = (u: Uint8Array) => { let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); };
@@ -2986,11 +3024,12 @@ app.post("/api/communities/:id/media", async (c) => {
   const me = c.get("me"), db = c.env.DB;
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  if (!(await communityAccess(db, me, id))) return c.json({ error: "forbidden" }, 403);
+  const community = await communityAccess(db, me, id);
+  if (!community) return c.json({ error: "forbidden" }, 403);
   const mime = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
   const kind = MEDIA_TYPES[mime];
   if (!kind) return c.json({ error: "invalid_type" }, 400);
-  const limit = kind === "video" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+  const limit = kind === "video" ? MAX_VIDEO_BYTES : kind === "audio" ? MAX_AUDIO_BYTES : MAX_IMAGE_BYTES;
   if (Number(c.req.header("content-length") ?? 0) > limit) return c.json({ error: "too_large", max: limit }, 413);
   const bytes = new Uint8Array(await c.req.arrayBuffer());
   if (!bytes.length || bytes.length > limit) return c.json({ error: bytes.length ? "too_large" : "invalid_media", max: limit }, bytes.length ? 413 : 400);
@@ -3000,7 +3039,14 @@ app.post("/api/communities/:id/media", async (c) => {
   for (let i = 0, n = 0; i < bytes.length; i += MEDIA_CHUNK, n++) {
     await db.prepare("INSERT INTO community_media_chunks (media_id, idx, data) VALUES (?, ?, ?)").bind(mid, n, toB64(bytes.subarray(i, i + MEDIA_CHUNK))).run();
   }
-  return c.json({ id: mid, kind, mime }, 201);
+  // voice and video messages come with a text transcript when speech to text is available
+  let transcript: string | null = null;
+  if (kind !== "image" && c.env.AI && ((await transcriptsForAll(db, me.client_id)) || (await communityHasDeafMute(db, me.client_id, id, community.restaurant_id)))) {
+    const lang = (await db.prepare("SELECT lang FROM staff WHERE id = ?").bind(me.id).first<{ lang: string }>())?.lang === "en" ? "en" : "fr";
+    transcript = await transcribe(c.env.AI, bytes, lang);
+    if (transcript) await db.prepare("UPDATE community_media SET transcript = ? WHERE id = ?").bind(transcript, mid).run();
+  }
+  return c.json({ id: mid, kind, mime, transcript: transcript && (await canReadTranscripts(db, me)) ? transcript : null }, 201);
 });
 app.get("/api/community-media/:id", async (c) => {
   const me = c.get("me"), db = c.env.DB;
@@ -3136,7 +3182,7 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   const db = c.env.DB;
   const cid = c.get("me").client_id;
   const [staff, roles, managers, restaurants, roleWages] = await Promise.all([
-    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, voice_assist, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff WHERE client_id = ? ORDER BY name").bind(cid).all(),
+    db.prepare("SELECT id, name, first_name, last_name, sex, print_order, promised_hours, scheduling_notes, email, phone, is_admin, voice_assist, deaf_mute, active, lang, notify_channel, color, (SELECT updated_at FROM staff_photos WHERE staff_id = staff.id) AS photo_v, (SELECT hourly_cents FROM staff_wages WHERE staff_id = staff.id) AS hourly_cents, (SELECT last3 FROM staff_sin WHERE staff_id = staff.id) AS sin_last3, (SELECT max_weekly_hours FROM staff_limits WHERE staff_id = staff.id) AS max_weekly_hours FROM staff WHERE client_id = ? ORDER BY name").bind(cid).all(),
     db.prepare("SELECT sr.staff_id, sr.restaurant_id, sr.role_id FROM staff_roles sr JOIN staff s ON s.id = sr.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; role_id: number }>(),
     db.prepare("SELECT m.staff_id, m.restaurant_id, m.department_id FROM managers m JOIN staff s ON s.id = m.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; restaurant_id: number; department_id: string }>(),
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all(),
