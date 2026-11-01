@@ -77,6 +77,7 @@ import m0074 from "../migrations/0074_bar_products.sql";
 import m0075 from "../migrations/0075_closing_tasks.sql";
 import m0076 from "../migrations/0076_usage_log.sql";
 import m0077 from "../migrations/0077_service_group.sql";
+import m0078 from "../migrations/0078_oven_group.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -156,6 +157,7 @@ const MIGRATIONS: [string, string][] = [
   ["0075_closing_tasks", m0075],
   ["0076_usage_log", m0076],
   ["0077_service_group", m0077],
+  ["0078_oven_group", m0078],
 ];
 
 const statements = (sql: string) =>
