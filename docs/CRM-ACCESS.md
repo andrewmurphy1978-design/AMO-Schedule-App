@@ -223,6 +223,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 | 2026-11-01 | Ingredients are now called **Produits / Products** in the screens (API names unchanged). New place `cellar` (Cellier), new categories `dairy`, `beers`, `wines`, `spirits`; dairy products, eggs and margarine added for both restaurants in a "Réserve et général" group, supplier Bourassa added (migration 0072). |
 | 2026-11-01 | Suppliers: order method (call / email / API), customer number, API address / user / key (key stored on the server, never sent back; migration 0073). |
 | 2026-11-01 | Bar products from toujoursmikes.ca (9 beers, 12 wines) added to both restaurants in a "Bar" group (migration 0074). |
+| 2026-11-01 | Produits table fits the screen width on a computer (no sideways scrolling; scrolls on a phone). |
 | 2026-11-01 | **Closing task of the day** (the mop): removed from every kitchen post list, now one task a day given in turn to someone of the closing crew (last out, within 30 min) — whoever had it least recently; shown on the Postes screen where a manager can give it to someone else; migration 0075. |
 | 2026-10-30 | **Kitchen posts per shift**: assigned by a manager in the shift editor or on the new "Postes" screen (day board), shown on the schedule; migration 0052. |
 | 2026-10-30 | **End-of-shift reminder** (reminders can count from the end of the shift; sent only while the checklist is not done; migration 0051) and a checklist **test mode** (setting `checklist_test`: the tab shows at all times for the last/next 7 days' shifts). |

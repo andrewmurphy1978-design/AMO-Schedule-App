@@ -3676,7 +3676,7 @@ function ingredientsPanel() {
       h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`),
         h("select", { "aria-label": t("ingCategory"), onChange: (e) => { st.catFilter = e.target.value; draw(); } }, h("option", { value: "" }, t("ingAllCategories")), INGREDIENT_CATEGORIES.map(([v, key]) => h("option", { value: v, selected: st.catFilter === v }, t(key))), h("option", { value: "none", selected: st.catFilter === "none" }, t("ingNoCategory")))),
       h("div", { class: "ing-matrix-wrap" }, h("table", { class: "ing-matrix" },
-        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", {}))),
+        h("thead", {}, h("tr", {}, h("th", {}, t("ingName")), h("th", {}, t("ingLocation")), ...cols.map(({ g }) => h("th", { class: "ing-col" }, h("b", {}, gname(g)), bfOf(g) ? h("small", {}, `+ ${bfOf(g)}`) : null)), h("th", { class: "ing-edit-cell", "aria-label": t("editWord") }))),
         h("tbody", {}, byCat.flatMap(([label, list]) => [
           h("tr", { class: "ing-cat-row" }, h("th", { colSpan: 3 + cols.length, scope: "colgroup" }, label, h("small", { class: "meta" }, ` · ${list.length}`))),
           ...ingredientTree(list).map(({ item: r, depth }) => h("tr", {}, h("th", { scope: "row", style: depth ? `padding-left:${0.5 + depth * 1.4}rem` : "" }, depth ? "↳ " : "", r.name, r.thaw ? " ❄" : "", r.fridge_open ? " 🧊" : "", r.homemade ? " 🏠" : ""), h("td", {}, place(r.location)),
@@ -3684,7 +3684,7 @@ function ingredientsPanel() {
               if (e.target.checked) g.items.push({ ...r, id: undefined, components: [...(r.components ?? [])] }); else g.items = g.items.filter((i) => !same(i.name, r.name));
               await persist();
             } }))),
-            h("td", {}, editBtn(r))))])))) ];
+            h("td", { class: "ing-edit-cell" }, h("button", { class: "btn small ing-icon", type: "button", title: `${t("editWord")} · ${r.name}`, "aria-label": `${t("editWord")} · ${r.name}`, onClick: () => ingredientDialog(r) }, "✎"))))])))) ];
   }
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
