@@ -124,14 +124,16 @@ const round = (n: number) => Math.round(n * 10) / 10;
 const fromMinStr = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 /** Sends the prompt to Claude. Returns the text of the answer. */
-export async function callClaude(apiKey: string, system: string, user: string, fetcher: typeof fetch = fetch, apiBase = "https://api.anthropic.com"): Promise<string> {
+export const AI_MODEL = "claude-sonnet-5-5";
+export async function callClaude(apiKey: string, system: string, user: string, fetcher: typeof fetch = fetch, apiBase = "https://api.anthropic.com", onUsage?: (usage: Record<string, number>, model: string) => void): Promise<string> {
   const res = await fetcher(`${apiBase}/v1/messages`, {
     method: "POST",
     headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-5-5", max_tokens: 16000, system, messages: [{ role: "user", content: user }] }),
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: 16000, system, messages: [{ role: "user", content: user }] }),
   });
   if (!res.ok) throw new Error(`ai_http_${res.status}`);
-  const body = (await res.json()) as { content?: { type: string; text?: string }[] };
+  const body = (await res.json()) as { content?: { type: string; text?: string }[]; usage?: Record<string, number>; model?: string };
+  if (body.usage) onUsage?.(body.usage, body.model ?? AI_MODEL);
   const text = body.content?.filter((c) => c.type === "text").map((c) => c.text).join("") ?? "";
   if (!text) throw new Error("ai_empty");
   return text;

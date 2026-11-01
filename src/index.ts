@@ -21,6 +21,7 @@ import { publicConnectionView } from "./connections.ts";
 import { verifyTwilioSignature, startTwilioCall, hangupTwilioCall } from "./twilio.ts";
 import { transcribe, type AiBinding } from "./transcribe.ts";
 import { closingTasksOf, closingAssignee } from "./closing.ts";
+import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
@@ -1329,7 +1330,9 @@ app.post("/api/admin/payslips", requireAdmin, async (c) => {
   const b64 = bytesToBase64(bytes);
   const cid = c.get("me").client_id;
   const key = await anthropicKey(c.env, cid);
-  const ex = key ? await extractPayslip(key, b64).catch(() => null) : null;
+  let psUsage: Record<string, number> | null = null, psModel = "";
+  const ex = key ? await extractPayslip(key, b64, fetch, c.env.ANTHROPIC_API_BASE ?? "https://api.anthropic.com", (u, m) => { psUsage = u; psModel = m; }).catch(() => null) : null;
+  if (psUsage) await logClaude(c.env.DB, cid, "payslip", psModel, psUsage, filename, c.get("me").id);
   const people = (await c.env.DB.prepare("SELECT s.id, s.name, ss.sin_hash FROM staff s LEFT JOIN staff_sin ss ON ss.staff_id = s.id WHERE s.client_id = ?").bind(cid).all<{ id: number; name: string; sin_hash: string | null }>()).results;
   const m = ex ? await chooseMatch(ex, people, await sinKey(c.env)) : { staff_id: null, kind: "none" as const };
   const sinDigits = ex ? normalizeSin(ex.sin) : null;
@@ -1798,7 +1801,9 @@ app.post("/api/admin/ai-schedule", requireAdmin, async (c) => {
   const key = await anthropicKey(c.env, c.get("me").client_id);
   if (!key) return c.json({ error: "no_ai_key" }, 422);
   let text: string;
-  try { text = await callClaude(key, SYSTEM_PROMPT, user, fetch, c.env.ANTHROPIC_API_BASE); } catch (e) { return c.json({ error: "ai_failed", detail: String((e as Error).message) }, 502); }
+  let usage: Record<string, number> | null = null, usedModel = "";
+  try { text = await callClaude(key, SYSTEM_PROMPT, user, fetch, c.env.ANTHROPIC_API_BASE, (u, m) => { usage = u; usedModel = m; }); } catch (e) { return c.json({ error: "ai_failed", detail: String((e as Error).message) }, 502); }
+  if (usage) await logClaude(c.env.DB, c.get("me").client_id, "ai_schedule", usedModel, usage, `${ctx.restaurant.name} · ${b.week}`, c.get("me").id);
   let proposal;
   try { proposal = parseProposal(text); } catch { return c.json({ error: "ai_bad_answer" }, 502); }
   const checked = checkProposal(ctx, proposal);
@@ -2865,7 +2870,7 @@ app.post("/api/voice/calls", requireVoice, async (c) => {
     await db.batch([db.prepare("UPDATE voice_calls SET status = 'failed', ended_at = ? WHERE id = ?").bind(Date.now(), call!.id), db.prepare("INSERT INTO voice_messages (call_id, direction, text, created_at) VALUES (?, 'sys', ?, ?)").bind(call!.id, `call_failed: ${started.error ?? ""}`, Date.now())]);
     return c.json({ error: "call_failed", detail: started.error ?? null, id: call!.id }, 502);
   }
-  if (started.sid) await db.prepare("UPDATE voice_calls SET call_sid = ? WHERE id = ?").bind(started.sid, call!.id).run();
+  if (started.sid) { await db.prepare("UPDATE voice_calls SET call_sid = ? WHERE id = ?").bind(started.sid, call!.id).run(); await logUsage(db, { client_id: me.client_id, kind: "call", provider: "twilio", ref: started.sid, detail: `${name}`, staff_id: me.id }); }
   return c.json({ id: call!.id }, 201);
 });
 app.post("/api/voice/calls/:id/say", requireVoice, async (c) => {
@@ -2949,6 +2954,7 @@ app.post("/hooks/voice/:id/heard", async (c) => {
 app.post("/hooks/voice/:id/status", async (c) => {
   const v = await voiceHook(c); if (v instanceof Response) return v;
   const { call, params, conn } = v, db = c.env.DB;
+  if (call.call_sid && params.CallDuration) await db.prepare("UPDATE usage_log SET units = ? WHERE ref = ? AND kind = 'call'").bind(Number(params.CallDuration) || 0, call.call_sid).run();
   const status = ({ completed: "completed", busy: "busy", "no-answer": "no_answer", failed: "failed", canceled: "failed" } as Record<string, string>)[params.CallStatus ?? ""];
   if (status && VOICE_ACTIVE.includes(call.status)) {
     const final = status === "completed" && call.status === "queued" ? "no_answer" : status;
@@ -2960,6 +2966,20 @@ app.post("/hooks/voice/:id/status", async (c) => {
     }
   }
   return c.body(null, 204);
+});
+
+// What the paid services cost (Claude tokens, Twilio texts and calls), per month.
+app.get("/api/admin/usage", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const nowMonth = localNow(c.env.TIMEZONE).slice(0, 7);
+  const month = /^\d{4}-\d{2}$/.test(c.req.query("month") ?? "") ? c.req.query("month")! : nowMonth;
+  const from = Date.parse(`${month}-01T00:00:00Z`) - 5 * 3_600_000, nextMonth = new Date(Date.parse(`${month}-01T00:00:00Z`)); nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+  const to = nextMonth.getTime() - 5 * 3_600_000; // the local month (Quebec time, roughly), good enough for a cost report
+  const totals = (await db.prepare("SELECT kind, currency, COUNT(*) AS n, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(units), 0) AS units, COALESCE(SUM(cost_micro), 0) AS cost_micro, SUM(cost_micro IS NULL) AS pending FROM usage_log WHERE client_id = ? AND created_at >= ? AND created_at < ? GROUP BY kind, currency").bind(cid, from, to).all()).results;
+  const recent = (await db.prepare("SELECT id, kind, model, input_tokens, output_tokens, units, cost_micro, currency, detail, created_at FROM usage_log WHERE client_id = ? AND created_at >= ? AND created_at < ? ORDER BY id DESC LIMIT 60").bind(cid, from, to).all()).results;
+  const months = (await db.prepare("SELECT DISTINCT strftime('%Y-%m', created_at / 1000, 'unixepoch', '-5 hours') AS m FROM usage_log WHERE client_id = ? ORDER BY m DESC LIMIT 24").bind(cid).all<{ m: string }>()).results.map((r) => r.m);
+  if (!months.includes(nowMonth)) months.unshift(nowMonth);
+  return c.json({ month, months, totals, recent });
 });
 
 // ---------- Web Push (this device) ----------
@@ -3638,6 +3658,6 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await flushDeliveries(env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await fillTwilioPrices(env.DB, async (cid) => (await loadConnections(env, env.DB, cid)).twilio).catch(() => 0); await flushDeliveries(env.DB); })());
   },
 };

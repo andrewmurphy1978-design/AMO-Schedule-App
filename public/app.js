@@ -2992,8 +2992,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", targets: "🎯", messaging: "✉️", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -3047,6 +3047,7 @@ async function renderAdmin() {
     communities: () => [communitiesPanel(ov)],
     checklists: () => [checklistsPanel(), postPeriodsPanel()],
     ingredients: () => [ingredientsPanel()],
+    usage: () => [usagePanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
@@ -3459,6 +3460,36 @@ function previewChecklist(title, items, role) {
 }
 
 // Administration: the end-of-shift lists (per kitchen post and per role) and who did theirs.
+// Administration → Coûts: what Claude and Twilio cost, per month.
+function usagePanel() {
+  const box = h("section", { class: "panel usage-panel" });
+  const st = { month: null };
+  const usd = (micro) => { const d = micro / 1_000_000; return `${d < 1 ? d.toFixed(4) : d.toFixed(2)} $`; };
+  async function load() {
+    const d = await api(`/admin/usage${st.month ? `?month=${st.month}` : ""}`);
+    st.month = d.month;
+    const by = (kind) => d.totals.find((x) => x.kind === kind);
+    const card = (kind, label, qty) => { const x = by(kind); return h("div", { class: "card usage-card" }, h("h3", {}, label), x ? [h("div", { class: "usage-big" }, usd(x.cost_micro), x.pending ? h("small", { class: "meta" }, ` + ${x.pending} ${t("usagePending")}`) : null), h("p", { class: "meta" }, `${x.n} ${t("usageCount")} · ${qty(x)}`)] : h("p", { class: "meta" }, "—")); };
+    const total = d.totals.reduce((n, x) => n + x.cost_micro, 0);
+    const what = (r) => ({ ai_schedule: t("usageAiSchedule"), payslip: t("usagePayslip"), sms: t("usageSms"), call: t("usageCall") }[r.kind] ?? r.kind);
+    const qty = (r) => (r.kind === "ai_schedule" || r.kind === "payslip" ? `${(r.input_tokens ?? 0).toLocaleString(locale())} / ${(r.output_tokens ?? 0).toLocaleString(locale())}` : r.kind === "sms" ? `${r.units ?? 1} ${t("usageSegments")}` : r.units != null ? `${Math.round((r.units / 60) * 10) / 10} min` : "—");
+    box.replaceChildren(h("h2", {}, `💰 ${t("usageTitle")}`), h("p", { class: "meta" }, t("usageHelp")),
+      h("div", { class: "field", style: "max-width:220px" }, h("span", {}, t("usageMonth")), h("select", { "aria-label": t("usageMonth"), onChange: (e) => { st.month = e.target.value; load(); } }, d.months.map((m) => h("option", { value: m, selected: m === d.month }, m)))),
+      h("div", { class: "card usage-total" }, h("span", {}, t("usageTotal")), h("b", {}, usd(total))),
+      h("div", { class: "usage-cards" },
+        card("ai_schedule", t("usageAiSchedule"), (x) => `${x.input_tokens.toLocaleString(locale())} / ${x.output_tokens.toLocaleString(locale())} ${t("usageTokens")}`),
+        card("payslip", t("usagePayslip"), (x) => `${x.input_tokens.toLocaleString(locale())} / ${x.output_tokens.toLocaleString(locale())} ${t("usageTokens")}`),
+        card("sms", t("usageSms"), (x) => `${x.units} ${t("usageSegments")}`),
+        card("call", t("usageCall"), (x) => `${Math.round((x.units / 60) * 10) / 10} ${t("usageMinutes")}`)),
+      d.recent.length ? [h("h3", {}, t("usageRecent")), h("div", { class: "usage-table-wrap" }, h("table", { class: "usage-table" },
+        h("thead", {}, h("tr", {}, [t("usageWhen"), t("usageWhat"), "", t("usageQty"), t("usageCost")].map((x) => h("th", {}, x)))),
+        h("tbody", {}, d.recent.map((r) => h("tr", {}, h("td", {}, new Date(r.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })), h("td", {}, what(r)), h("td", { class: "meta" }, r.detail ?? ""), h("td", {}, qty(r)), h("td", {}, r.cost_micro == null ? h("span", { class: "meta" }, t("usagePending")) : usd(r.cost_micro)))))))] : h("p", { class: "meta" }, t("usageNone")),
+      h("p", { class: "meta" }, t("usageNotes")));
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 // Administration → Ingrédients: what each restaurant keeps, per group (post or area), where it is stored, whether it must be thawed
 // the day before (freezer) or is home-made from other ingredients. Everything is edited in dialogs and saved at once.
 function ingredientsPanel() {

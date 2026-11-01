@@ -5,6 +5,7 @@ import { sendMailOverSocket } from "./smtp-socket.ts";
 import type { Lang, Msg } from "./templates.ts";
 import { clientSettingRows, getSetting } from "./tenant.ts";
 import { pushToStaff } from "./push.ts";
+import { logUsage } from "./usage.ts";
 
 export interface StaffContact { id: number; name: string; phone: string | null; email: string | null; lang: string; notify_channel: string }
 
@@ -14,7 +15,7 @@ export async function loadConnections(env: ConnEnv, db: D1Database, clientId = 1
   const conn = parseConnections(rows, clientId === 1 ? env : { APP_URL: env.APP_URL });
   // The name used in messages ("Mikes: ...") is the client's company name.
   const brand = await getSetting(db, clientId, "brand_name") ?? (await db.prepare("SELECT name FROM clients WHERE id = ?").bind(clientId).first<{ name: string }>())?.name;
-  return { ...conn, brand: brand || "Mikes" };
+  return { ...conn, brand: brand || "Mikes", clientId };
 }
 
 async function log(db: D1Database, e: { staff_id: number | null; channel: Channel | "push"; to: string | null; subject: string | null; body: string; kind: string; status: "sent" | "failed" | "skipped"; error?: string }) {
@@ -28,7 +29,10 @@ export async function deliver(db: D1Database, conn: Connections, channel: Channe
   let result: { ok: boolean; error?: string };
   try {
     if (channel === "sms") {
-      result = conn.twilio ? await sendTwilioSms(conn.twilio, to, msg.text) : { ok: false, error: "SMS not configured" };
+      const sent = conn.twilio ? await sendTwilioSms(conn.twilio, to, msg.text) : { ok: false, error: "SMS not configured" } as Awaited<ReturnType<typeof sendTwilioSms>>;
+      result = sent;
+      // what the text costs is only known a little later (the cron fills it in from Twilio)
+      if (sent.ok && conn.clientId) await logUsage(db, { client_id: conn.clientId, kind: "sms", provider: "twilio", units: sent.segments ?? 1, ref: sent.sid ?? null, detail: `${kind} · …${to.slice(-4)}`, staff_id: staffId });
     } else if (conn.smtp) {
       await sendMailOverSocket({ host: conn.smtp.host, port: conn.smtp.port, secure: conn.smtp.secure, user: conn.smtp.user, pass: conn.smtp.pass }, { from: conn.smtp.from, to, subject: msg.subject, text: msg.text });
       result = { ok: true };

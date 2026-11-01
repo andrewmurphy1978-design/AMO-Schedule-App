@@ -23,15 +23,15 @@ export async function verifyTwilioSignature(authToken: string, url: string, para
 
 export interface TwilioConfig { sid: string; token: string; from: string; apiBase?: string }
 
-export async function sendTwilioSms(cfg: TwilioConfig, to: string, body: string): Promise<{ ok: boolean; error?: string }> {
+export async function sendTwilioSms(cfg: TwilioConfig, to: string, body: string): Promise<{ ok: boolean; error?: string; sid?: string; segments?: number }> {
   const base = cfg.apiBase ?? "https://api.twilio.com";
   const res = await fetch(`${base}/2010-04-01/Accounts/${encodeURIComponent(cfg.sid)}/Messages.json`, {
     method: "POST",
     headers: { authorization: `Basic ${btoa(`${cfg.sid}:${cfg.token}`)}`, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ To: to, From: cfg.from, Body: body }).toString(),
   });
-  if (res.ok) return { ok: true };
   const text = await res.text().catch(() => "");
+  if (res.ok) { try { const j = JSON.parse(text); const n = Number(j.num_segments); return { ok: true, sid: typeof j.sid === "string" ? j.sid : undefined, segments: Number.isFinite(n) && n > 0 ? n : undefined }; } catch { return { ok: true }; } }
   let message = `HTTP ${res.status}`;
   try { const j = JSON.parse(text); message = j.message ? `${j.message}${j.code ? ` (code ${j.code})` : ""}` : message; } catch { /* keep status */ }
   return { ok: false, error: message.slice(0, 300) };

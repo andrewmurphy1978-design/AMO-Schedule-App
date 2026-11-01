@@ -50,17 +50,19 @@ export const MAX_PDF_BYTES = 1_400_000;
 const PROMPT = `This PDF is one employee's pay slip (Canada). Extract: the employee's full name, their Social Insurance Number (SIN, 9 digits, if printed), the pay period (for example "2026-10-19 to 2026-10-25"), and the pay date (YYYY-MM-DD). Reply with ONLY a JSON object: {"employee_name": string|null, "sin": string|null, "period": string|null, "pay_date": string|null}. Use null for anything not printed. Do not guess.`;
 
 /** Asks Claude to read the PDF. Returns nulls when it cannot be read; never throws on a bad answer. */
-export async function extractPayslip(apiKey: string, pdfBase64: string, fetcher: typeof fetch = fetch, apiBase = "https://api.anthropic.com"): Promise<Extracted | null> {
+export const PAYSLIP_MODEL = "claude-sonnet-5-5";
+export async function extractPayslip(apiKey: string, pdfBase64: string, fetcher: typeof fetch = fetch, apiBase = "https://api.anthropic.com", onUsage?: (usage: Record<string, number>, model: string) => void): Promise<Extracted | null> {
   const res = await fetcher(`${apiBase}/v1/messages`, {
     method: "POST",
     headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-5-5", max_tokens: 400,
+      model: PAYSLIP_MODEL, max_tokens: 2000, // room for the answer even when the model thinks first
       messages: [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: PROMPT }] }],
     }),
   });
   if (!res.ok) return null;
-  const body = (await res.json()) as { content?: { type: string; text?: string }[] };
+  const body = (await res.json()) as { content?: { type: string; text?: string }[]; usage?: Record<string, number>; model?: string };
+  if (body.usage) onUsage?.(body.usage, body.model ?? PAYSLIP_MODEL);
   const text = body.content?.find((c) => c.type === "text")?.text ?? "";
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;

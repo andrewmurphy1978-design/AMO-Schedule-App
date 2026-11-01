@@ -1067,3 +1067,7 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
   .ing-matrix .ing-cat-row th{width:auto;position:static}
 }
 .ing-matrix .btn.small.ing-icon{min-width:34px;padding:0 .4rem}
+
+.usage-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.7rem;margin:.8rem 0}.usage-card h3{margin:0 0 .3rem;font-size:.95rem}.usage-big{font-size:1.5rem;font-weight:700}
+.usage-total{display:flex;justify-content:space-between;align-items:center;margin:.8rem 0;font-size:1.1rem}.usage-total b{font-size:1.6rem}
+.usage-table-wrap{overflow:auto}.usage-table{width:100%;border-collapse:collapse;font-size:.88rem}.usage-table th,.usage-table td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--line);white-space:nowrap}.usage-table td.meta{white-space:normal}
