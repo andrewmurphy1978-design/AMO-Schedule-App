@@ -71,6 +71,7 @@ import m0068 from "../migrations/0068_delivery_start.sql";
 import m0069 from "../migrations/0069_suppliers_orders.sql";
 import m0070 from "../migrations/0070_default_suppliers.sql";
 import m0071 from "../migrations/0071_supplier_defaults_by_category.sql";
+import m0072 from "../migrations/0072_dairy_products.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -144,6 +145,7 @@ const MIGRATIONS: [string, string][] = [
   ["0069_suppliers_orders", m0069],
   ["0070_default_suppliers", m0070],
   ["0071_supplier_defaults_by_category", m0071],
+  ["0072_dairy_products", m0072],
 ];
 
 const statements = (sql: string) =>

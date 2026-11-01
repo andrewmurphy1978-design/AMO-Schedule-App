@@ -2462,8 +2462,8 @@ app.put("/api/shifts/:id/prep/:taskId", async (c) => {
 });
 
 // ---------- Ingredients and restocking ("Remplissage") ----------
-const LOCATIONS = ["fridge", "freezer", "backstore", "basement"] as const;
-const CATEGORIES = ["pasta", "meats", "vegetables", "fruits", "sauces", "cheeses", "breads", "pizza_dough", "salads", "mixes"] as const;
+const LOCATIONS = ["fridge", "freezer", "backstore", "basement", "cellar"] as const;
+const CATEGORIES = ["pasta", "meats", "vegetables", "fruits", "dairy", "sauces", "cheeses", "breads", "pizza_dough", "salads", "mixes", "beers", "wines", "spirits"] as const;
 /** Who may see and fill the restock list of a restaurant: administrators, its managers, and people with a kitchen or prep role there. */
 async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
   if (me.is_admin) return (await db.prepare("SELECT id FROM restaurants WHERE client_id = ? ORDER BY id").bind(me.client_id).all<{ id: number }>()).results.map((r) => r.id);
