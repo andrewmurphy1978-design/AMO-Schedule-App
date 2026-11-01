@@ -3050,9 +3050,14 @@ async function renderAdmin() {
     usage: () => [usagePanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
-  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, [...ADMIN_SECTIONS, ...(state.me.me.is_super ? [["clients", "adminClients"]] : [])].map(([id, label]) =>
-    h("button", { type: "button", "aria-label": t(label), title: t(label), "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } },
-      h("span", { class: "tab-ic", "aria-hidden": "true" }, ADMIN_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, t(label)))));
+  // the menu in two groups: Personnel (people) and Restaurants (the places and what they use)
+  const labelOf = Object.fromEntries(ADMIN_SECTIONS);
+  const groups = [["adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets"]], ["adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "checklists", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["adminGroupPlatform", ["clients"]]] : [])];
+  const nav = h("nav", { class: "admin-nav", "aria-label": t("admin") }, groups.map(([title, ids]) => h("div", { class: "admin-group", role: "group", "aria-label": t(title) },
+    h("div", { class: "admin-group-title" }, t(title)),
+    h("div", { class: "admin-group-items" }, ids.map((id) => { const label = labelOf[id] ?? "adminClients";
+      return h("button", { type: "button", "aria-label": t(label), title: t(label), "aria-current": adminSectionOf() === id ? "page" : false, onClick: () => { state.adminSection = id; render(); } },
+        h("span", { class: "tab-ic", "aria-hidden": "true" }, ADMIN_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, t(label))); })))));
   $app.replaceChildren(h("div", { class: "admin-layout" }, nav, h("div", { class: "admin-content" }, sections[adminSectionOf()]())));
 }
 
