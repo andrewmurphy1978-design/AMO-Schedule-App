@@ -3590,9 +3590,9 @@ function ingredientsPanel() {
     // or a count of something: 2 slices, 3 pieces…
     const qty = h("input", { type: "number", min: "0", step: "0.5", inputmode: "decimal", value: cur.portion_qty ? String(cur.portion_qty) : "", "aria-label": t("ingPortionCount") });
     const unit = h("input", { value: cur.portion_unit ?? "", maxLength: 30, list: "ing-units", placeholder: t("ingPortionUnitPh"), "aria-label": t("ingPortionUnitPh") });
-    const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer", "sacs", "paquets"].map((u) => h("option", { value: u })));
+    const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer", "sacs", "paquets", "caisses", "boîtes", "bouteilles"].map((u) => h("option", { value: u })));
     const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
-    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, qtyBox, h("datalist", { id: "ing-qty-units" }, ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé", "unité", "tranche", "sac", "paquet"].map((u) => h("option", { value: u }))), note, portion, portionCount);
+    const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, qtyBox, h("datalist", { id: "ing-qty-units" }, ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé", "unité", "tranche", "sac", "paquet", "caisse", "boîte", "bouteille"].map((u) => h("option", { value: u }))), note, portion, portionCount);
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); drawQty(); };
