@@ -2164,8 +2164,9 @@ async function renderChecklist() {
   if (sub === "vehicles" && !vehicleIds.length) sub = "end";
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
-  if (restock.length || vehicleIds.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ...(restock.length ? [["restock", t("listsRestock")], ["prep", t("listsPrep")], ["orders", t("listsOrders")]] : []), ...(vehicleIds.length ? [["vehicles", `🚗 ${t("vehTab")}`]] : [])].map(([id, label]) =>
-    h("button", { type: "button", role: "tab", "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, label))));
+  // on a phone the tabs are icons only, so all of them show on the screen (the name stays as tooltip and for screen readers)
+  if (restock.length || vehicleIds.length) box.append(h("div", { class: "subtabs lists-tabs", role: "tablist" }, [["end", t("listsEndOfShift"), "✅"], ...(restock.length ? [["restock", t("listsRestock"), "📦"], ["prep", t("listsPrep"), "🥣"], ["orders", t("listsOrders"), "🛒"]] : []), ...(vehicleIds.length ? [["vehicles", t("vehTab"), "🚗"]] : [])].map(([id, label, icon]) =>
+    h("button", { type: "button", role: "tab", title: label, "aria-label": label, "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, h("span", { class: "tab-ic", "aria-hidden": "true" }, icon), h("span", { class: "tab-tx" }, label)))));
   if (sub === "vehicles") { await renderVehicles(box, vehicleIds); return; }
   if (sub === "orders") { await renderOrders(box, restock); return; }
   if (sub === "restock" || sub === "prep") { await renderRestock(box, restock, sub); return; }
@@ -2245,7 +2246,7 @@ async function renderVehicles(box, restaurantIds) {
     h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => vehicleIssueDialog({ restaurantId: d.restaurant_id, onSaved: reload }) }, `⚠ ${t("vehReport")}`),
       d.can_manage ? h("button", { class: "btn", type: "button", onClick: () => vehicleEditDialog(d, null, reload) }, `＋ ${t("vehAdd")}`) : null),
     ...(d.vehicles.length ? d.vehicles.map(card) : [h("div", { class: "empty" }, d.can_manage ? t("vehNoneManage") : t("vehNone"))]),
-    d.can_configure ? vehicleSettingsPanel() : null);
+    d.can_configure ? h("p", { class: "meta" }, `⚙ ${t("vehAdminHint")}`) : null);
 }
 
 function vehicleEditDialog(d, v, reload) {
@@ -2253,6 +2254,7 @@ function vehicleEditDialog(d, v, reload) {
   const name = h("input", { required: true, maxLength: 80, value: v?.name ?? "", placeholder: "Toyota Corolla 2019", "aria-label": t("vehName") });
   const plate = h("input", { maxLength: 20, value: v?.plate ?? "", placeholder: "ABC 123", "aria-label": t("vehPlate") });
   const notes = h("input", { maxLength: 300, value: v?.notes ?? "", "aria-label": t("vehNotes") });
+  const restoPick = !v && d.restaurants?.length > 1 ? h("select", { "aria-label": t("restaurant") }, d.restaurants.map((r) => h("option", { value: r.id, selected: r.id === d.restaurant_id }, r.name))) : null;
   const month = new Date().getMonth() + 1;
   const tires = radioGroup("veh-tires", [["summer", `☀️ ${t("vehSummer")}`], ["winter", `❄️ ${t("vehWinter")}`]], v?.tires ?? (month >= 11 || month <= 3 ? "winter" : "summer"));
   const active = h("input", { type: "checkbox", checked: v ? v.active : true });
@@ -2261,15 +2263,76 @@ function vehicleEditDialog(d, v, reload) {
     e.preventDefault();
     try {
       if (v) await api(`/vehicles/${v.id}`, { method: "PUT", body: { name: name.value, plate: plate.value, notes: notes.value, active: active.checked } });
-      else await api("/vehicles", { method: "POST", body: { restaurant_id: d.restaurant_id, name: name.value, plate: plate.value, notes: notes.value, tires: tires.value } });
+      else await api("/vehicles", { method: "POST", body: { restaurant_id: restoPick ? Number(restoPick.value) : d.restaurant_id, name: name.value, plate: plate.value, notes: notes.value, tires: tires.value } });
       done(); reload();
     } catch (err) { toast(errorText(err)); }
   } }, h("h2", {}, v ? t("vehEdit") : t("vehAdd")),
+    restoPick ? h("label", { class: "field" }, h("span", {}, t("restaurant")), restoPick) : null,
     h("label", { class: "field" }, h("span", {}, t("vehName")), name), h("label", { class: "field" }, h("span", {}, t("vehPlate")), plate), h("label", { class: "field" }, h("span", {}, t("vehNotes")), notes),
     v ? h("label", { class: "check" }, active, h("span", {}, t("vehActive"))) : h("div", { class: "field" }, h("span", {}, t("vehTiresNow")), tires),
     h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: done }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
   dlg.addEventListener("close", () => dlg.remove(), { once: true });
   document.body.append(dlg); dlg.showModal(); name.focus();
+}
+
+/** Administration → Véhicules: all the tasks and problems of every vehicle, and its whole history, in one place. */
+function vehiclesAdminPanel() {
+  const box = h("section", { class: "panel veh-admin" });
+  const st = { restaurant: "all", filter: "all" };
+  const fmtDay = (ms) => new Date(ms).toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" });
+  async function load() {
+    const d = await api("/admin/vehicles");
+    const reload = () => load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+    const open = (v) => v.issues.filter((i) => i.status !== "resolved");
+    const all = d.vehicles.filter((v) => st.restaurant === "all" || String(v.restaurant_id) === st.restaurant);
+    const shown = all.filter((v) => st.filter === "all" || (st.filter === "issues" ? open(v).length > 0 : v.tasks.length > 0));
+    const nIssues = all.reduce((n, v) => n + open(v).length, 0), nTires = all.filter((v) => v.tasks.length).length;
+    const sn = d.season, winter = sn.target === "winter";
+    const restoSel = h("select", { "aria-label": t("restaurant"), onChange: (e) => { st.restaurant = e.target.value; reload(); } }, [h("option", { value: "all" }, t("vehAllRestaurants")), ...d.restaurants.map((r) => h("option", { value: r.id, selected: String(r.id) === st.restaurant }, r.name))]);
+    restoSel.value = st.restaurant;
+    const chip = (id, label) => h("button", { type: "button", class: `chip-btn ${st.filter === id ? "on" : ""}`, "aria-pressed": String(st.filter === id), onClick: () => { st.filter = id; reload(); } }, label);
+    const issueLine = (i, manage) => h("div", { class: `veh-issue ${i.severity} ${i.status}` },
+      h("div", {}, h("span", { class: "badge" }, i.severity === "urgent" ? `🚨 ${t("vehSevUrgentShort")}` : t("vehSevNormalShort")), " ", h("b", {}, t(`vehCat_${i.category}`)), " · ", h("span", { class: "meta" }, `${i.by} · ${fmtDay(i.created_at)}`), " · ", h("span", { class: "badge" }, t(`vehSt_${i.status}`))),
+      h("p", { class: "veh-desc" }, i.description),
+      manage ? h("div", { class: "actions" },
+        i.status === "open" ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/vehicle-issues/${i.id}`, { method: "PUT", body: { status: "in_progress" } }); reload(); } catch (e) { toast(errorText(e)); } } }, t("vehStart")) : null,
+        h("button", { class: "btn sm primary", type: "button", onClick: async () => { const note = await promptDialog({ title: t("vehResolve"), label: t("vehNoteOptional") }); if (note === null) return; try { await api(`/vehicle-issues/${i.id}`, { method: "PUT", body: { status: "resolved", note } }); reload(); } catch (e) { toast(errorText(e)); } } }, `✓ ${t("vehResolve")}`)) : null);
+    // the history of a vehicle: problems reported, fixes, tire changes, newest first
+    const events = (v) => [
+      ...v.issues.map((i) => ({ at: i.created_at, icon: i.severity === "urgent" ? "🚨" : "⚠", title: `${t("vehEvIssue")} : ${t(`vehCat_${i.category}`)}`, text: i.description, who: i.by })),
+      ...v.issues.filter((i) => i.resolved_at).map((i) => ({ at: i.resolved_at, icon: "✓", title: `${t("vehEvFixed")} : ${t(`vehCat_${i.category}`)}`, text: i.resolution_note || "", who: i.resolved_by })),
+      ...v.tire_changes.map((c) => ({ at: c.created_at, icon: c.to_tires === "winter" ? "❄️" : "☀️", title: t(c.to_tires === "winter" ? "vehEvWinter" : "vehEvSummer"), text: c.note || "", who: c.by, day: c.changed_on })),
+    ].sort((a, b) => b.at - a.at);
+    const card = (v) => {
+      const o = open(v), out = o.some((i) => i.severity === "urgent"), toTires = v.tires === "winter" ? "summer" : "winter";
+      const todo = [
+        ...v.tasks.map((k) => h("div", { class: `veh-task ${k.in_window && k.days_left <= 14 ? "soon" : ""}` }, h("span", {}, `🔧 ${(k.target === "winter" ? t("vehTaskWinter") : t("vehTaskSummer")).replace("{date}", vehDate(k.deadline)).replace("{n}", String(Math.max(0, k.days_left)))}`),
+          k.in_window ? h("button", { class: "btn sm primary", type: "button", onClick: async () => { if (await ask(t(k.target === "winter" ? "vehConfirmWinter" : "vehConfirmSummer").replace("{v}", vehName(v)))) { try { await api(`/vehicles/${v.id}/tires`, { method: "POST", body: { to: k.target } }); reload(); } catch (e) { toast(errorText(e)); } } } }, `🔧 ${t(k.target === "winter" ? "vehToWinter" : "vehToSummer")}`) : h("span", { class: "meta" }, t("vehSpringWait").replace("{date}", vehDate(k.opens))))),
+        ...o.map((i) => issueLine(i, true))];
+      const ev = events(v);
+      return h("details", { class: `card veh-card ${out ? "out" : ""} ${v.active ? "" : "inactive"}`, open: todo.length > 0 },
+        h("summary", { class: "veh-sum" }, h("b", {}, `🚗 ${vehName(v)}`), h("span", { class: "meta" }, ` · ${v.restaurant}`), " ",
+          h("span", { class: `badge tires-${v.tires}` }, v.tires === "winter" ? `❄️ ${t("vehWinter")}` : `☀️ ${t("vehSummer")}`),
+          out ? h("span", { class: "badge veh-out" }, `🚨 ${t("vehOut")}`) : null, o.length ? h("span", { class: "badge" }, `⚠ ${o.length}`) : null, v.tasks.length ? h("span", { class: "badge" }, `🔧 ${t("vehTireTask")}`) : null, v.active ? null : h("span", { class: "badge" }, t("inactive"))),
+        v.notes ? h("p", { class: "meta" }, v.notes) : null, h("p", { class: "meta" }, v.tires_changed_on ? `${t("vehTiresChanged")} ${vehDate(v.tires_changed_on)}` : t("vehTiresUnknown")),
+        h("h4", {}, t("vehTodo")), todo.length ? h("div", { class: "veh-todo" }, todo) : h("p", { class: "meta" }, `✓ ${t("vehNothingTodo")}`),
+        h("div", { class: "actions" },
+          v.active ? h("button", { class: "btn", type: "button", onClick: () => vehicleIssueDialog({ restaurantId: v.restaurant_id, vehicleId: v.id, onSaved: reload }) }, `⚠ ${t("vehReport")}`) : null,
+          v.active ? h("button", { class: "btn", type: "button", onClick: async () => { if (await ask(t(toTires === "winter" ? "vehConfirmWinter" : "vehConfirmSummer").replace("{v}", vehName(v)))) { try { await api(`/vehicles/${v.id}/tires`, { method: "POST", body: { to: toTires } }); reload(); } catch (e) { toast(errorText(e)); } } } }, `🔧 ${t(toTires === "winter" ? "vehToWinter" : "vehToSummer")}`) : null,
+          h("button", { class: "btn", type: "button", onClick: () => vehicleEditDialog({ restaurant_id: v.restaurant_id, restaurants: d.restaurants }, v, reload) }, t("edit"))),
+        h("h4", {}, `${t("vehHistoryTitle")} (${ev.length})`),
+        ev.length ? h("ol", { class: "veh-history" }, ev.map((e) => h("li", {}, h("span", { class: "veh-ev-ic", "aria-hidden": "true" }, e.icon), h("div", {}, h("b", {}, e.title), e.text ? h("div", { class: "veh-desc" }, e.text) : null, h("div", { class: "meta" }, `${e.who ?? ""} · ${e.day ? vehDate(e.day) : fmtDay(e.at)}`))))) : h("p", { class: "meta" }, t("vehNoHistory")));
+    };
+    box.replaceChildren(h("h2", {}, `🚗 ${t("adminVehicles")}`), h("p", { class: "meta" }, t("vehAdminHelp")),
+      h("div", { class: `info veh-season ${sn.in_window && sn.days_left <= 14 && nTires ? "soon" : ""}`, role: "status" }, h("b", {}, winter ? `❄️ ${t("vehFallTitle")}` : `☀️ ${t("vehSpringTitle")}`), " ",
+        sn.in_window ? (winter ? t("vehFallLine") : t("vehSpringLine")).replace("{date}", vehDate(sn.deadline)).replace("{n}", String(Math.max(0, sn.days_left))) : t("vehSpringWait").replace("{date}", vehDate(sn.opens)), h("div", { class: "meta" }, winter ? t("vehLawWinter") : t("vehLawSpring"))),
+      h("div", { class: "veh-toolbar" }, restoSel, chip("all", `${t("vehFilterAll")} (${all.length})`), chip("issues", `⚠ ${t("vehFilterIssues")} (${nIssues})`), chip("tires", `🔧 ${t("vehFilterTires")} (${nTires})`),
+        h("button", { class: "btn primary", type: "button", onClick: () => vehicleEditDialog({ restaurant_id: st.restaurant === "all" ? d.restaurants[0]?.id : Number(st.restaurant), restaurants: st.restaurant === "all" ? d.restaurants : [] }, null, reload) }, `＋ ${t("vehAdd")}`)),
+      ...(shown.length ? shown.map(card) : [h("div", { class: "empty" }, d.vehicles.length ? t("vehNoMatch") : t("vehNoneManage"))]),
+      vehicleSettingsPanel());
+  }
+  load().catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
+  return box;
 }
 
 /** Administrators: the legal dates and the reminders for the tire changes. */
@@ -3546,8 +3609,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -3604,11 +3667,12 @@ async function renderAdmin() {
     products: () => [h("section", { class: "panel" }, h("h2", {}, `🛍️ ${t("adminProducts")}`), h("p", { class: "meta" }, t("productsSoon")))],
     usage: () => [usagePanel()],
     autoschedule: () => [autoSchedulePanel()],
+    vehicles: () => [vehiclesAdminPanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];

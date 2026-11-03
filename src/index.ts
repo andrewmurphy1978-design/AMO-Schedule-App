@@ -3933,6 +3933,35 @@ app.put("/api/vehicle-issues/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// Everything about the vehicles in one place (administrators): the tasks (tires to change, problems still open) and the whole history (problems, fixes, tire changes).
+app.get("/api/admin/vehicles", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const restaurants = (await db.prepare("SELECT id, name FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all<{ id: number; name: string }>()).results;
+  const vehicles = (await db.prepare("SELECT v.id, v.restaurant_id, r.name AS restaurant, v.name, v.plate, v.notes, v.tires, v.tires_changed_on, v.active FROM vehicles v JOIN restaurants r ON r.id = v.restaurant_id WHERE r.client_id = ? ORDER BY r.name, v.active DESC, v.name").bind(cid).all<VehicleRow & { restaurant: string }>()).results;
+  const issues = (await db.prepare(
+    `SELECT i.id, i.vehicle_id, i.severity, i.category, i.description, i.status, i.created_at, i.resolved_at, i.resolution_note, coalesce(s.first_name, s.name) AS by, coalesce(rs.first_name, rs.name) AS resolved_by
+     FROM vehicle_issues i JOIN vehicles v ON v.id = i.vehicle_id JOIN restaurants r ON r.id = v.restaurant_id JOIN staff s ON s.id = i.staff_id LEFT JOIN staff rs ON rs.id = i.resolved_by
+     WHERE r.client_id = ? ORDER BY i.id DESC LIMIT 1000`,
+  ).bind(cid).all<{ vehicle_id: number }>()).results;
+  const changes = (await db.prepare(
+    `SELECT t.id, t.vehicle_id, t.to_tires, t.changed_on, t.note, t.created_at, coalesce(s.first_name, s.name) AS by
+     FROM vehicle_tire_changes t JOIN vehicles v ON v.id = t.vehicle_id JOIN restaurants r ON r.id = v.restaurant_id LEFT JOIN staff s ON s.id = t.staff_id
+     WHERE r.client_id = ? ORDER BY t.id DESC LIMIT 1000`,
+  ).bind(cid).all<{ vehicle_id: number }>()).results;
+  const today = localNow(c.env.TIMEZONE).slice(0, 10);
+  const season = currentSeason(today, parseVehicleSettings(await getSetting(db, cid, "vehicle_maintenance")));
+  const inWindow = !season.opens || today >= season.opens;
+  return c.json({
+    restaurants, season: { ...season, in_window: inWindow },
+    vehicles: vehicles.map((v) => ({
+      ...v, active: v.active === 1,
+      issues: issues.filter((i) => i.vehicle_id === v.id), tire_changes: changes.filter((t) => t.vehicle_id === v.id),
+      // the tasks of a vehicle: the tire change that is due (the open problems are in `issues`)
+      tasks: v.active === 1 && v.tires !== season.target ? [{ kind: "tires", target: season.target, deadline: season.deadline, days_left: season.days_left, opens: season.opens, in_window: inWindow }] : [],
+    })),
+  });
+});
+
 // settings of the tire reminders (administrators)
 app.get("/api/admin/vehicle-settings", requireAdmin, async (c) => {
   const cid = c.get("me").client_id, db = c.env.DB;

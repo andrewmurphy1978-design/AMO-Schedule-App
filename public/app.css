@@ -1258,3 +1258,12 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 a.btn{display:flex;align-items:center;justify-content:center;text-align:center;text-decoration:none;box-sizing:border-box;min-height:44px}
 .acc-content .actions{margin-top:.4rem}.acc-form .reminder-sels select{font-size:.9rem;padding-left:.5rem;padding-right:1.3rem}
 .cov-row .actions{margin-top:.35rem}
+
+/* Lists: icons only on a phone, icon + name on a computer */
+.lists-tabs .tab-ic{margin-right:.35rem}
+@media (max-width:899px){.lists-tabs button{flex:1;padding:.4rem 0;font-size:1.4rem;min-height:44px;text-align:center}.lists-tabs .tab-tx{display:none}.lists-tabs .tab-ic{margin:0}}
+
+.veh-admin .veh-toolbar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:.75rem 0}.veh-admin .veh-toolbar select{max-width:14rem}
+.veh-sum{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;cursor:pointer;list-style:none}.veh-sum::-webkit-details-marker{display:none}
+.veh-card h4{margin:1rem 0 .4rem}.veh-todo{display:grid;gap:.4rem}.veh-task{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem;padding:.5rem .75rem;border-radius:10px;background:rgba(128,128,128,.12)}.veh-task.soon{background:rgba(224,168,0,.18)}
+.veh-history{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}.veh-history li{display:flex;gap:.6rem;align-items:flex-start;padding:.4rem 0;border-bottom:1px solid rgba(128,128,128,.2)}.veh-ev-ic{width:1.6rem;text-align:center;flex:none}
