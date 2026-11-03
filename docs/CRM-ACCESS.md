@@ -4,7 +4,7 @@
 > reach the schedule app. It is kept up to date with the app: the date and the change log at the bottom say
 > what changed last. **Never paste secrets into this file.**
 
-Last updated: 2026-10-28 · App version: draft/publish schedules (migration 0037) and later.
+Last updated: 2026-11-03 · App version: draft/publish schedules (migration 0037) and later.
 
 ## 1. What the app is
 
@@ -202,6 +202,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | Outgoing emails (login codes and notifications) now carry a sender display name (Branding "sender name", else the company name). In production the SMTP relay is Brevo (domain authenticated with DKIM/SPF/DMARC) instead of the IONOS mailbox; no secrets stored here. |
 | 2026-10-30 | **Checklist: "could not complete" with the missing ingredients** (counts as handled, shown in the daily report, managers notified; migration 0053). Breakfast posts only offered on shifts overlapping breakfast hours. |
 | 2026-10-30 | **Kitchen posts can be assigned for part of a shift** (optional `start_at`/`end_at` per post on `POST /shifts/:id/checklist/posts`; `ranges` in `/post-board`, `posts[].start_at/end_at` in `/schedule`; Postes timeline; migration 0054). |
 | 2026-10-30 | **Handovers and prep tasks**: a post list is due when the person leaves the post (end of their time range, e.g. 17:00), with an end-reminder before it; handover summary on the Postes screen; prep tasks assigned per shift (`/shifts/:id/prep`, migration 0055). |

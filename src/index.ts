@@ -548,7 +548,7 @@ app.post("/api/auth/request", async (c) => {
   if (allowed) {
     const lang = staff?.lang === "en" || (!staff && b.lang === "en") ? "en" : "fr";
     const brand = await loadBrand(db, clientId);
-    const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name) } };
+    const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } };
     c.executionCtx.waitUntil(deliver(db, smtp, "email", email, loginMessage(lang, code, brand.name), "login_code", staff?.id ?? null).then(() => {}));
   }
   return c.json({ ok: true });

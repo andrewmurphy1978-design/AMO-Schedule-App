@@ -2,6 +2,7 @@
 import { parseConnections, pickChannel, type Channel, type ConnEnv, type Connections } from "./connections.ts";
 import { sendTwilioSms } from "./twilio.ts";
 import { sendMailOverSocket } from "./smtp-socket.ts";
+import { senderAddress } from "./brand.ts";
 import type { Lang, Msg } from "./templates.ts";
 import { clientSettingRows, getSetting } from "./tenant.ts";
 import { pushToStaff } from "./push.ts";
@@ -34,7 +35,7 @@ export async function deliver(db: D1Database, conn: Connections, channel: Channe
       // what the text costs is only known a little later (the cron fills it in from Twilio)
       if (sent.ok && conn.clientId) await logUsage(db, { client_id: conn.clientId, kind: "sms", provider: "twilio", units: sent.segments ?? 1, ref: sent.sid ?? null, detail: `${kind} · …${to.slice(-4)}`, staff_id: staffId });
     } else if (conn.smtp) {
-      await sendMailOverSocket({ host: conn.smtp.host, port: conn.smtp.port, secure: conn.smtp.secure, user: conn.smtp.user, pass: conn.smtp.pass }, { from: conn.smtp.from, to, subject: msg.subject, text: msg.text });
+      await sendMailOverSocket({ host: conn.smtp.host, port: conn.smtp.port, secure: conn.smtp.secure, user: conn.smtp.user, pass: conn.smtp.pass }, { from: senderAddress(conn.smtp.from, conn.brand ?? ""), to, subject: msg.subject, text: msg.text });
       result = { ok: true };
     } else result = { ok: false, error: "Email not configured" };
   } catch (e) {
