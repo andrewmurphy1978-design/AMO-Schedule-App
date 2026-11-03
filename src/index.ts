@@ -3517,16 +3517,22 @@ const dmMember = (db: D1Database, threadId: number, staffId: number) => db.prepa
 const dmPerson = "s.id, s.name, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v";
 
 /** Adds a message, moves the conversation up, and tells the other members who enabled notifications. */
-async function dmPost(c: Context<any>, threadId: number, me: Me, body: string, title: string | null): Promise<number> {
+async function dmPost(c: Context<any>, threadId: number, me: Me, body: string, title: string | null, opts: { mediaIds?: number[]; replyTo?: number | null } = {}): Promise<number> {
   const db = c.env.DB as D1Database, now = Date.now();
-  const r = await db.prepare("INSERT INTO dm_messages (thread_id, staff_id, body, created_at) VALUES (?, ?, ?, ?)").bind(threadId, me.id, body, now).run();
+  const r = await db.prepare("INSERT INTO dm_messages (thread_id, staff_id, body, created_at, reply_to) VALUES (?, ?, ?, ?, ?)").bind(threadId, me.id, body, now, opts.replyTo ?? null).run();
   const id = r.meta.last_row_id as number;
+  const mediaIds = opts.mediaIds ?? [];
+  let preview = body;
+  if (mediaIds.length) {
+    await db.prepare(`UPDATE dm_media SET message_id = ? WHERE id IN (${mediaIds.map(() => "?").join(",")})`).bind(id, ...mediaIds).run();
+    if (!preview) { const k = (await db.prepare("SELECT kind FROM dm_media WHERE message_id = ? LIMIT 1").bind(id).first<{ kind: string }>())?.kind; preview = k === "video" ? "🎥" : k === "audio" ? "🎤" : "📷"; }
+  }
   await db.batch([db.prepare("UPDATE dm_threads SET last_message_at = ? WHERE id = ?").bind(now, threadId), db.prepare("UPDATE dm_members SET last_read_id = ? WHERE thread_id = ? AND staff_id = ?").bind(id, threadId, me.id)]);
   c.executionCtx.waitUntil((async () => {
     try {
       const others = (await db.prepare("SELECT dm.staff_id FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.thread_id = ? AND dm.staff_id != ? AND dm.left_at IS NULL AND s.active = 1").bind(threadId, me.id).all<{ staff_id: number }>()).results;
       const first = me.name.split(" ")[0];
-      for (const p of others) await pushToStaff(db, p.staff_id, { title: title ? `${first} · ${title}` : first, body: body.slice(0, 140), url: `/?view=community&dm=${threadId}`, tag: `dm-${threadId}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+      for (const p of others) await pushToStaff(db, p.staff_id, { title: title ? `${first} · ${title}` : first, body: preview.slice(0, 140), url: `/?view=community&dm=${threadId}`, tag: `dm-${threadId}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
     } catch { /* notifications never block a message */ }
   })());
   return id;
@@ -3571,6 +3577,7 @@ app.get("/api/messages/threads", async (c) => {
   const threads = (await db.prepare(
     `SELECT t.id, t.title, t.is_group, t.last_message_at,
             (SELECT CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END FROM dm_messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+            (SELECT dm2.kind FROM dm_media dm2 WHERE dm2.message_id = (SELECT m.id FROM dm_messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) LIMIT 1) AS last_media,
             (SELECT m.staff_id FROM dm_messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_by,
             (SELECT count(*) FROM dm_messages m WHERE m.thread_id = t.id AND m.staff_id != ?1 AND m.deleted_at IS NULL AND m.id > me.last_read_id) AS unread
      FROM dm_threads t JOIN dm_members me ON me.thread_id = t.id AND me.staff_id = ?1 AND me.left_at IS NULL
@@ -3623,18 +3630,32 @@ app.get("/api/messages/threads/:id", async (c) => {
   if (!(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
   const before = intParam(c.req.query("before")) ?? 0;
   const rows = (await db.prepare(
-    `SELECT m.id, m.staff_id, CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END AS body, m.created_at, m.deleted_at IS NOT NULL AS deleted
+    `SELECT m.id, m.staff_id, CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END AS body, m.created_at, m.deleted_at IS NOT NULL AS deleted, m.reply_to
      FROM dm_messages m WHERE m.thread_id = ? AND (? = 0 OR m.id < ?) ORDER BY m.id DESC LIMIT 51`,
-  ).bind(id, before, before).all<{ id: number; staff_id: number; deleted: number }>()).results;
+  ).bind(id, before, before).all<{ id: number; staff_id: number; deleted: number; reply_to: number | null }>()).results;
   const more = rows.length > 50;
   const messages = rows.slice(0, 50).reverse();
+  const mids = messages.map((m) => m.id);
+  const mark = mids.map(() => "?").join(",");
+  const media = mids.length ? (await db.prepare(`SELECT id, message_id, kind, mime, transcript FROM dm_media WHERE message_id IN (${mark}) ORDER BY id`).bind(...mids).all<{ id: number; message_id: number; kind: string; mime: string; transcript: string | null }>()).results : [];
+  const reacts = mids.length ? (await db.prepare(`SELECT message_id, emoji, count(*) AS n, max(staff_id = ?) AS mine FROM dm_reactions WHERE message_id IN (${mark}) GROUP BY message_id, emoji ORDER BY min(rowid)`).bind(me.id, ...mids).all<{ message_id: number; emoji: string; n: number; mine: number }>()).results : [];
+  const replyIds = [...new Set(messages.map((m) => m.reply_to).filter((x): x is number => !!x))];
+  const replied = replyIds.length ? (await db.prepare(`SELECT m.id, m.staff_id, CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END AS body, m.deleted_at IS NOT NULL AS deleted, (SELECT kind FROM dm_media WHERE message_id = m.id LIMIT 1) AS kind FROM dm_messages m WHERE m.thread_id = ? AND m.id IN (${replyIds.map(() => "?").join(",")})`).bind(id, ...replyIds).all<{ id: number; staff_id: number; body: string; deleted: number; kind: string | null }>()).results : [];
+  const readable = media.some((m) => m.transcript) && (await canReadTranscripts(db, me));
   const thread = await db.prepare("SELECT id, title, is_group FROM dm_threads WHERE id = ?").bind(id).first();
   const members = (await db.prepare(`SELECT ${dmPerson} FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.thread_id = ? AND dm.left_at IS NULL`).bind(id).all()).results;
   if (!before) {
     const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM dm_messages WHERE thread_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
     await db.prepare("UPDATE dm_members SET last_read_id = ? WHERE thread_id = ? AND staff_id = ?").bind(last, id, me.id).run();
   }
-  return c.json({ thread, members, more, messages: messages.map((m) => ({ ...m, mine: m.staff_id === me.id, deleted: !!m.deleted })) });
+  const who = (sid: number) => { const p = (members as { id: number; first_name: string | null; name: string }[]).find((x) => x.id === sid); return p ? p.first_name || p.name.split(" ")[0] : "—"; };
+  return c.json({ thread, members, more, messages: messages.map((m) => {
+    const rp = m.reply_to ? replied.find((r) => r.id === m.reply_to) : null;
+    return { ...m, mine: m.staff_id === me.id, deleted: !!m.deleted,
+      media: m.deleted ? [] : media.filter((x) => x.message_id === m.id).map((x) => ({ id: x.id, kind: x.kind, mime: x.mime, transcript: readable ? x.transcript : null })),
+      reactions: m.deleted ? [] : reacts.filter((r) => r.message_id === m.id).map((r) => ({ emoji: r.emoji, count: r.n, mine: r.mine === 1 })),
+      reply: rp ? { id: rp.id, by: who(rp.staff_id), body: rp.deleted ? "" : rp.body, kind: rp.kind, deleted: !!rp.deleted } : null };
+  }) });
 });
 
 app.post("/api/messages/threads/:id/messages", async (c) => {
@@ -3642,12 +3663,89 @@ app.post("/api/messages/threads/:id/messages", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
   if (!(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
-  const body = dmClean((await c.req.json<{ body?: unknown }>().catch(() => ({} as { body?: unknown }))).body);
-  if (!body || body.length > DM_MAX_LEN) return c.json({ error: "invalid_body" }, 400);
+  const b = await c.req.json<{ body?: unknown; media_ids?: unknown; reply_to?: unknown }>().catch(() => ({} as { body?: unknown; media_ids?: unknown; reply_to?: unknown }));
+  const body = dmClean(b.body);
+  const mediaIds = Array.isArray(b.media_ids) ? [...new Set(b.media_ids.filter((x): x is number => Number.isInteger(x)))] : [];
+  if ((!body && !mediaIds.length) || body.length > DM_MAX_LEN || mediaIds.length > MAX_MEDIA_PER_POST) return c.json({ error: "invalid_body" }, 400);
+  // only the sender's own uploads for this conversation that are not in a message yet
+  if (mediaIds.length) {
+    const ok = await db.prepare(`SELECT count(*) AS n FROM dm_media WHERE id IN (${mediaIds.map(() => "?").join(",")}) AND staff_id = ? AND thread_id = ? AND message_id IS NULL`).bind(...mediaIds, me.id, id).first<{ n: number }>();
+    if (ok?.n !== mediaIds.length) return c.json({ error: "invalid_media" }, 400);
+  }
+  let replyTo: number | null = null;
+  if (b.reply_to !== undefined && b.reply_to !== null) {
+    if (!Number.isInteger(b.reply_to)) return c.json({ error: "invalid_reply" }, 400);
+    if (!(await db.prepare("SELECT 1 FROM dm_messages WHERE id = ? AND thread_id = ?").bind(b.reply_to, id).first())) return c.json({ error: "invalid_reply" }, 400);
+    replyTo = b.reply_to as number;
+  }
   const recent = await db.prepare("SELECT count(*) AS n FROM dm_messages WHERE staff_id = ? AND created_at > ?").bind(me.id, Date.now() - 60_000).first<{ n: number }>();
   if ((recent?.n ?? 0) >= DM_PER_MINUTE) return c.json({ error: "too_many_requests" }, 429);
   const t = await db.prepare("SELECT title, is_group FROM dm_threads WHERE id = ?").bind(id).first<{ title: string | null; is_group: number }>();
-  return c.json({ id: await dmPost(c, id, me, body, t?.is_group ? t.title : null) }, 201);
+  return c.json({ id: await dmPost(c, id, me, body, t?.is_group ? t.title : null, { mediaIds, replyTo }) }, 201);
+});
+
+// photos, videos and voice messages of a conversation: uploaded first (raw body), attached when the message is sent
+app.post("/api/messages/threads/:id/media", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
+  const mime = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const kind = MEDIA_TYPES[mime];
+  if (!kind) return c.json({ error: "invalid_type" }, 400);
+  const limit = kind === "video" ? MAX_VIDEO_BYTES : kind === "audio" ? MAX_AUDIO_BYTES : MAX_IMAGE_BYTES;
+  if (Number(c.req.header("content-length") ?? 0) > limit) return c.json({ error: "too_large", max: limit }, 413);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (!bytes.length || bytes.length > limit) return c.json({ error: bytes.length ? "too_large" : "invalid_media", max: limit }, bytes.length ? 413 : 400);
+  if (!sniffMedia(bytes, mime)) return c.json({ error: "invalid_media" }, 400);
+  const pending = await db.prepare("SELECT count(*) AS n FROM dm_media WHERE staff_id = ? AND thread_id = ? AND message_id IS NULL").bind(me.id, id).first<{ n: number }>();
+  if ((pending?.n ?? 0) >= MAX_MEDIA_PER_POST + 4) return c.json({ error: "too_many_requests" }, 429);
+  const r = await db.prepare("INSERT INTO dm_media (thread_id, staff_id, kind, mime, size, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, me.id, kind, mime, bytes.length, Date.now()).run();
+  const mid = r.meta.last_row_id as number;
+  for (let i = 0, n = 0; i < bytes.length; i += MEDIA_CHUNK, n++) await db.prepare("INSERT INTO dm_media_chunks (media_id, idx, data) VALUES (?, ?, ?)").bind(mid, n, toB64(bytes.subarray(i, i + MEDIA_CHUNK))).run();
+  // voice and video come with a transcript when a member of the conversation is deaf and mute (or the owner turned transcripts on for everyone)
+  let transcript: string | null = null;
+  if (kind !== "image" && c.env.AI && ((await transcriptsForAll(db, me.client_id)) || (await db.prepare("SELECT 1 FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.thread_id = ? AND dm.left_at IS NULL AND s.deaf_mute = 1 LIMIT 1").bind(id).first()))) {
+    const lang = (await db.prepare("SELECT lang FROM staff WHERE id = ?").bind(me.id).first<{ lang: string }>())?.lang === "en" ? "en" : "fr";
+    transcript = await transcribe(c.env.AI, bytes, lang);
+    if (transcript) await db.prepare("UPDATE dm_media SET transcript = ? WHERE id = ?").bind(transcript, mid).run();
+  }
+  return c.json({ id: mid, kind, mime, transcript: transcript && (await canReadTranscripts(db, me)) ? transcript : null }, 201);
+});
+app.get("/api/messages/media/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.body(null, 404);
+  const m = await db.prepare("SELECT thread_id, mime, size FROM dm_media WHERE id = ?").bind(id).first<{ thread_id: number; mime: string; size: number }>();
+  if (!m) return c.body(null, 404);
+  if (!(await dmMember(db, m.thread_id, me.id)) || !(await db.prepare("SELECT 1 FROM dm_threads WHERE id = ? AND client_id = ?").bind(m.thread_id, me.client_id).first())) return c.body(null, 403);
+  let start = 0, end = m.size - 1, status = 200;
+  const range = /^bytes=(\d*)-(\d*)$/.exec(c.req.header("range") ?? "");
+  if (range && (range[1] || range[2])) {
+    if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), m.size - 1) : m.size - 1; } else start = Math.max(0, m.size - Number(range[2]));
+    if (start > end || start >= m.size) return new Response(null, { status: 416, headers: { "content-range": `bytes */${m.size}` } });
+    status = 206;
+  }
+  const first = Math.floor(start / MEDIA_CHUNK), last = Math.floor(end / MEDIA_CHUNK);
+  const rows = (await db.prepare("SELECT idx, data FROM dm_media_chunks WHERE media_id = ? AND idx BETWEEN ? AND ? ORDER BY idx").bind(id, first, last).all<{ idx: number; data: string }>()).results;
+  const parts = rows.map((r) => Uint8Array.from(atob(r.data), (ch) => ch.charCodeAt(0)));
+  const joined = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { joined.set(p, o); o += p.length; }
+  const out = joined.subarray(start - first * MEDIA_CHUNK, end - first * MEDIA_CHUNK + 1);
+  return new Response(out, { status, headers: { "content-type": m.mime, "content-length": String(out.length), "accept-ranges": "bytes", "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'", ...(status === 206 ? { "content-range": `bytes ${start}-${end}/${m.size}` } : {}) } });
+});
+
+// a reaction to a message (an emoji; one person can leave several)
+app.put("/api/messages/messages/:id/reaction", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  const b = await c.req.json<{ emoji?: string; on?: boolean }>().catch(() => ({} as { emoji?: string; on?: boolean }));
+  if (!id || !isEmoji(b.emoji ?? "") || typeof b.on !== "boolean") return c.json({ error: "bad_request" }, 400);
+  const m = await db.prepare("SELECT m.thread_id, m.deleted_at FROM dm_messages m JOIN dm_threads t ON t.id = m.thread_id WHERE m.id = ? AND t.client_id = ?").bind(id, me.client_id).first<{ thread_id: number; deleted_at: number | null }>();
+  if (!m || m.deleted_at || !(await dmMember(db, m.thread_id, me.id))) return c.json({ error: "forbidden" }, 403);
+  await (b.on
+    ? db.prepare("INSERT OR IGNORE INTO dm_reactions (message_id, staff_id, emoji) VALUES (?, ?, ?)").bind(id, me.id, b.emoji)
+    : db.prepare("DELETE FROM dm_reactions WHERE message_id = ? AND staff_id = ? AND emoji = ?").bind(id, me.id, b.emoji)).run();
+  return c.json({ ok: true });
 });
 
 // a sender can withdraw their own message (it stays in the conversation as "message deleted")
@@ -3656,7 +3754,9 @@ app.delete("/api/messages/messages/:id", async (c) => {
   if (!id) return c.json({ error: "bad_id" }, 400);
   const me = c.get("me");
   const r = await c.env.DB.prepare("UPDATE dm_messages SET deleted_at = ?, body = '' WHERE id = ? AND staff_id = ? AND deleted_at IS NULL AND thread_id IN (SELECT id FROM dm_threads WHERE client_id = ?)").bind(Date.now(), id, me.id, me.client_id).run();
-  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+  if (!r.meta.changes) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.batch([c.env.DB.prepare("DELETE FROM dm_media WHERE message_id = ?").bind(id), c.env.DB.prepare("DELETE FROM dm_reactions WHERE message_id = ?").bind(id)]); // the files go with the message
+  return c.json({ ok: true });
 });
 
 // leave a group (a direct conversation cannot be left)
@@ -4407,6 +4507,6 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(vehicleTick(env).catch(() => {}));
     ctx.waitUntil(autoScheduleTick(env).catch(() => {})); // on its own: creating schedules takes minutes and must not hold back the reminders
-    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await fillTwilioPrices(env.DB, async (cid) => (await loadConnections(env, env.DB, cid)).twilio).catch(() => 0); await flushDeliveries(env.DB); })());
+    ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM dm_media WHERE message_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await fillTwilioPrices(env.DB, async (cid) => (await loadConnections(env, env.DB, cid)).twilio).catch(() => 0); await flushDeliveries(env.DB); })());
   },
 };

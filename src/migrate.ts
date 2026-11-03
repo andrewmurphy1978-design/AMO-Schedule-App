@@ -88,6 +88,7 @@ import m0085 from "../migrations/0085_auto_schedule.sql";
 import m0086 from "../migrations/0086_messages.sql";
 import m0087 from "../migrations/0087_vehicles.sql";
 import m0088 from "../migrations/0088_session_devices.sql";
+import m0089 from "../migrations/0089_dm_media_reactions.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -178,6 +179,7 @@ const MIGRATIONS: [string, string][] = [
   ["0086_messages", m0086],
   ["0087_vehicles", m0087],
   ["0088_session_devices", m0088],
+  ["0089_dm_media_reactions", m0089],
 ];
 
 const statements = (sql: string) =>

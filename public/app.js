@@ -1744,19 +1744,20 @@ async function shrinkImage(file) {
     return await new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("invalid_media"))), "image/jpeg", 0.82));
   } catch { return file; }
 }
-async function uploadCommunityMedia(communityId, file) {
+const uploadCommunityMedia = (communityId, file) => uploadMedia(`/api/communities/${communityId}/media`, file);
+async function uploadMedia(url, file) {
   const isVideo = file.type.startsWith("video/"), isAudio = file.type.startsWith("audio/");
   if (!isVideo && !isAudio && !file.type.startsWith("image/")) throw new Error("invalid_type");
   if (isVideo && file.size > 20 * 1024 * 1024) throw new Error("too_large");
   if (isAudio && file.size > 6 * 1024 * 1024) throw new Error("too_large");
   const blob = isVideo || isAudio ? file : await shrinkImage(file);
-  const res = await fetch(`/api/communities/${communityId}/media`, { method: "POST", headers: { "content-type": blob.type || file.type, ...clientHeader() }, body: blob });
+  const res = await fetch(url, { method: "POST", headers: { "content-type": blob.type || file.type, ...clientHeader() }, body: blob });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(j.error ?? "error"), { body: j });
   return { id: j.id, kind: j.kind, url: URL.createObjectURL(blob), transcript: j.transcript ?? null };
 }
 // the pictures and videos of a post (tap a picture to see it full size); voice messages, and a transcript under each voice or video message
-function mediaGrid(list = []) {
+function mediaGrid(list = [], base = "/api/community-media/") {
   if (!list.length) return null;
   const visual = list.filter((m) => m.kind !== "audio");
   const transcript = (m) => {
@@ -1765,10 +1766,51 @@ function mediaGrid(list = []) {
   };
   return h("div", { class: "post-media-wrap" },
     visual.length ? h("div", { class: `post-media n${Math.min(visual.length, 4)}` }, visual.map((m) => m.kind === "video"
-      ? h("video", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata", playsinline: true })
-      : h("a", { href: `/api/community-media/${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `/api/community-media/${m.id}`, alt: "", loading: "lazy" })))) : null,
-    list.filter((m) => m.kind === "audio").map((m) => h("div", { class: "post-voice" }, h("b", {}, `🎤 ${t("voiceMsg")}`), h("audio", { src: `/api/community-media/${m.id}`, controls: true, preload: "metadata" }), transcript(m))),
+      ? h("video", { src: `${base}${m.id}`, controls: true, preload: "metadata", playsinline: true })
+      : h("a", { href: `${base}${m.id}`, target: "_blank", rel: "noopener" }, h("img", { src: `${base}${m.id}`, alt: "", loading: "lazy" })))) : null,
+    list.filter((m) => m.kind === "audio").map((m) => h("div", { class: "post-voice" }, h("b", {}, `🎤 ${t("voiceMsg")}`), h("audio", { src: `${base}${m.id}`, controls: true, preload: "metadata" }), transcript(m))),
     visual.filter((m) => m.kind === "video").map(transcript));
+}
+
+// ---------- Messenger-style actions on a message or a post: a small toolbar on hover (computer), a sheet on a long press (phone) ----------
+const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/** actions: { react(emoji), reply(), pin: { label, run } | null, del() | null }. Adds the toolbar to `host` and the long-press sheet. */
+function msgActions(host, actions) {
+  host.classList.add("has-tools");
+  const quick = (anchor, done) => {
+    document.querySelector(".react-quick")?.remove();
+    const pop = h("div", { class: "react-quick", role: "dialog", "aria-label": t("react") });
+    const close = () => { pop.remove(); document.removeEventListener("pointerdown", outside, true); };
+    const outside = (ev) => { if (!pop.contains(ev.target)) close(); };
+    pop.append(...QUICK_REACTIONS.map((e) => h("button", { type: "button", class: "round", onClick: () => { close(); done?.(); actions.react(e); } }, e)),
+      h("button", { type: "button", class: "round", "aria-label": t("emojis"), title: t("emojis"), onClick: (ev) => { close(); done?.(); emojiPopover(ev.currentTarget.isConnected ? ev.currentTarget : anchor, (em) => actions.react(em)); } }, "＋"));
+    (anchor.parentElement ?? document.body).append(pop); pop.parentElement.style.position ||= "relative";
+    setTimeout(() => document.addEventListener("pointerdown", outside, true), 0);
+  };
+  const btn = (icon, label, onClick, danger = false) => h("button", { type: "button", class: `round ${danger ? "danger" : ""}`, "aria-label": label, title: label, onClick }, icon);
+  const tools = h("div", { class: "msg-tools" },
+    actions.react ? btn("😊", t("react"), (e) => quick(e.currentTarget)) : null, actions.reply ? btn("↩", t("reply"), () => actions.reply()) : null,
+    actions.pin ? btn("📌", actions.pin.label, () => actions.pin.run()) : null, actions.del ? btn("🗑", t("delete"), () => actions.del(), true) : null);
+  host.append(tools);
+  // phone: long press (or the context-menu key / right click) opens a sheet with the reactions and the actions
+  const sheet = () => {
+    document.querySelector(".msg-sheet-wrap")?.remove();
+    const close = () => wrap.remove();
+    const row = (icon, label, run, danger) => h("button", { type: "button", class: `sheet-row ${danger ? "danger" : ""}`, onClick: () => { close(); run(); } }, h("span", { "aria-hidden": "true" }, icon), ` ${label}`);
+    const wrap = h("div", { class: "msg-sheet-wrap", onClick: (e) => { if (e.target === wrap) close(); } }, h("div", { class: "msg-sheet", role: "dialog" },
+      actions.react ? h("div", { class: "sheet-reacts" }, ...QUICK_REACTIONS.map((e) => h("button", { type: "button", class: "round", onClick: () => { close(); actions.react(e); } }, e)),
+        h("button", { type: "button", class: "round", "aria-label": t("emojis"), onClick: () => { close(); emojiPopover(host, (em) => actions.react(em)); } }, "＋")) : null,
+      actions.reply ? row("↩", t("reply"), () => actions.reply()) : null, actions.pin ? row("📌", actions.pin.label, () => actions.pin.run()) : null, actions.del ? row("🗑", t("delete"), () => actions.del(), true) : null,
+      h("button", { type: "button", class: "sheet-row cancel", onClick: close }, t("cancel"))));
+    document.body.append(wrap);
+    if (navigator.vibrate) try { navigator.vibrate(15); } catch { /* not everywhere */ }
+  };
+  let timer = null, x0 = 0, y0 = 0;
+  const stop = () => { clearTimeout(timer); timer = null; };
+  host.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse" || e.target.closest("a,button,audio,video,input,textarea")) return; x0 = e.clientX; y0 = e.clientY; timer = setTimeout(() => { timer = null; sheet(); }, 450); });
+  host.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - x0, e.clientY - y0) > 10) stop(); });
+  for (const ev of ["pointerup", "pointercancel", "pointerleave"]) host.addEventListener(ev, stop);
+  host.addEventListener("contextmenu", (e) => { if (e.target.closest("a,audio,video,input,textarea")) return; if (e.pointerType === "touch" || matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sheet(); } });
 }
 
 // Records a voice or a video message with the microphone / camera. Resolves to a File, or null when cancelled.
@@ -2522,7 +2564,7 @@ async function renderMessages(box) {
     listEl.replaceChildren(...(rows.length ? rows.map((th) => h("button", { type: "button", role: "listitem", class: `dm-row ${th.unread ? "unread" : ""} ${state.dmThread === th.id ? "selected" : ""}`, "aria-current": state.dmThread === th.id ? "true" : "false", onClick: () => pick(th.id) },
       dmIcon(th, myId, 52),
       h("span", { class: "dm-row-main" }, h("span", { class: "dm-row-top" }, h("b", {}, dmName(th, myId)), h("span", { class: "meta dm-when" }, when(th.last_message_at))),
-        h("span", { class: "dm-preview-line" }, h("span", { class: "meta dm-preview" }, `${th.last_by === myId ? `${t("dmYou")} : ` : ""}${th.last_body || t("dmDeleted")}`), th.unread ? h("span", { class: "dm-dot", "aria-label": `${th.unread}` }, th.unread > 9 ? "9+" : String(th.unread)) : null)))) : [h("div", { class: "empty" }, threads.length ? t("dmNoMatch") : t("dmNone"))]));
+        h("span", { class: "dm-preview-line" }, h("span", { class: "meta dm-preview" }, `${th.last_by === myId ? `${t("dmYou")} : ` : ""}${th.last_body || (th.last_media ? dmMediaLabel(th.last_media) : t("dmDeleted"))}`), th.unread ? h("span", { class: "dm-dot", "aria-label": `${th.unread}` }, th.unread > 9 ? "9+" : String(th.unread)) : null)))) : [h("div", { class: "empty" }, threads.length ? t("dmNoMatch") : t("dmNone"))]));
   };
   search.addEventListener("input", paintList);
   const startNew = (kind) => { state.dmThread = kind; if (desktop) { paintList(); renderPane(); } else renderMessages(box); };
@@ -2605,29 +2647,51 @@ async function messageComposer(box, toThread, toList, group = false) {
       h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); ready(); }) }, "😊"), send))));
 }
 
-/** One conversation: a header (back arrow, who), the messages, and a bar to answer. */
+const dmMediaLabel = (k) => (k === "video" ? `🎥 ${t("dmVideo")}` : k === "audio" ? `🎤 ${t("voiceMsg")}` : `📷 ${t("dmPhoto")}`);
+/** One conversation: a header (back arrow, who), the messages, and a Messenger-style bar to answer. */
 async function messageThread(box, id, myId, toList, onChange) {
   let d = await api(`/messages/threads/${id}`);
   const msgs = h("div", { class: "dm-msgs", "aria-live": "polite" });
   const finePointer = window.matchMedia("(pointer: fine)").matches;
-  const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: t("dmWrite"), "aria-label": t("dmWrite") });
+  const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: t("dmMsgPh"), "aria-label": t("dmWrite") });
   const grow = () => { body.style.height = "auto"; body.style.height = `${Math.min(body.scrollHeight, 140)}px`; };
-  body.addEventListener("input", grow);
   const nameOf = (sid) => { const p = d.members.find((m) => m.id === sid); return p ? dmFirst(p) : "—"; };
   const person = (sid) => d.members.find((m) => m.id === sid);
   const th = () => ({ ...d.thread, members: d.members });
   const dayLabel = (ms) => { const x = new Date(ms), n = new Date(); const y = new Date(n); y.setDate(n.getDate() - 1); return x.toDateString() === n.toDateString() ? t("today") : x.toDateString() === y.toDateString() ? t("yesterday") : x.toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "long" }); };
   const hhmm = (ms) => new Date(ms).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+  const snippet = (m) => (m.deleted ? t("dmDeleted") : m.body || (m.media?.[0] ? dmMediaLabel(m.media[0].kind) : m.kind ? dmMediaLabel(m.kind) : ""));
+  // what is being written: pictures / voice already uploaded, the message being answered
+  let attached = [], replyTo = null, expanded = true;
+  const previews = h("div", { class: "comm-previews dm-previews" });
+  const replyBar = h("div", { class: "dm-replybar", hidden: true });
+  const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
+    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : m.kind === "audio" ? h("div", { class: "comm-preview-audio" }, h("audio", { src: m.url, controls: true, preload: "metadata" })) : h("img", { src: m.url, alt: "" }),
+    h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); sync(); } }, "✕"))));
+  const setReply = (m) => {
+    replyTo = m; replyBar.hidden = !m;
+    replyBar.replaceChildren(...(m ? [h("div", { class: "dm-replytxt" }, h("b", {}, `${t("dmReplyTo")} ${m.mine ? t("dmYou") : nameOf(m.staff_id)}`), h("span", { class: "meta" }, snippet(m))), h("button", { type: "button", class: "round", "aria-label": t("cancel"), onClick: () => setReply(null) }, "✕")] : []));
+    if (m) body.focus();
+  };
+  const toggleReaction = async (m, emoji) => {
+    const on = !m.reactions.some((r) => r.emoji === emoji && r.mine);
+    try { await api(`/messages/messages/${m.id}/reaction`, { method: "PUT", body: { emoji, on } }); await reload(false); } catch (e) { toast(errorText(e)); }
+  };
+  const removeMessage = async (m) => { if (await ask(t("dmDeleteConfirm"))) { try { await api(`/messages/messages/${m.id}`, { method: "DELETE" }); await reload(false); } catch (e) { toast(errorText(e)); } } };
   const bubble = (m, prev, next) => {
     const first = !prev || prev.staff_id !== m.staff_id || m.created_at - prev.created_at > 300000, last = !next || next.staff_id !== m.staff_id || next.created_at - m.created_at > 300000;
     const p = person(m.staff_id);
-    return h("div", { class: `dm-line ${m.mine ? "mine" : "theirs"}` },
-      !m.mine ? (last ? (p ? avatar(p.id, p.name, p.color, p.photo_v, 28) : h("span", { class: "dm-av-gap" })) : h("span", { class: "dm-av-gap" })) : null,
-      h("div", { class: `dm-msg ${m.mine ? "mine" : "theirs"} ${m.deleted ? "deleted" : ""}`, title: hhmm(m.created_at) },
-        !m.mine && d.thread.is_group && first ? h("b", { class: "dm-from" }, nameOf(m.staff_id)) : null,
-        m.deleted ? h("i", {}, t("dmDeleted")) : h("span", { class: "dm-text" }, m.body),
-        last ? h("span", { class: "meta dm-time" }, hhmm(m.created_at)) : null,
-        m.mine && !m.deleted ? h("button", { type: "button", class: "dm-del", "aria-label": t("delete"), title: t("delete"), onClick: async () => { if (await ask(t("dmDeleteConfirm"))) { try { await api(`/messages/messages/${m.id}`, { method: "DELETE" }); await reload(false); } catch (e) { toast(errorText(e)); } } } }, "✕") : null));
+    const line = h("div", { class: `dm-line ${m.mine ? "mine" : "theirs"}`, "data-mid": String(m.id) },
+      !m.mine ? (last && p ? avatar(p.id, p.name, p.color, p.photo_v, 28) : h("span", { class: "dm-av-gap" })) : null,
+      h("div", { class: "dm-stack" },
+        h("div", { class: `dm-msg ${m.mine ? "mine" : "theirs"} ${m.deleted ? "deleted" : ""}`, title: hhmm(m.created_at) },
+          !m.mine && d.thread.is_group && first ? h("b", { class: "dm-from" }, nameOf(m.staff_id)) : null,
+          m.reply ? h("button", { type: "button", class: "dm-quote", onClick: () => msgs.querySelector(`[data-mid="${m.reply.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }) }, h("b", {}, m.reply.by), h("span", {}, m.reply.deleted ? t("dmDeleted") : m.reply.body || (m.reply.kind ? dmMediaLabel(m.reply.kind) : ""))) : null,
+          m.deleted ? h("i", {}, t("dmDeleted")) : [mediaGrid(m.media, "/api/messages/media/"), m.body ? h("span", { class: "dm-text" }, m.body) : null],
+          last ? h("span", { class: "meta dm-time" }, hhmm(m.created_at)) : null),
+        m.reactions?.length ? h("div", { class: "dm-reacts" }, m.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggleReaction(m, r.emoji) }, r.count > 1 ? `${r.emoji} ${r.count}` : r.emoji))) : null));
+    if (!m.deleted) msgActions(line, { react: (e) => toggleReaction(m, e), reply: () => setReply(m), del: m.mine ? () => removeMessage(m) : null });
+    return line;
   };
   const older = h("button", { class: "btn sm", type: "button", hidden: true, onClick: async () => {
     const first = d.messages[0]?.id; if (!first) return;
@@ -2638,33 +2702,58 @@ async function messageThread(box, id, myId, toList, onChange) {
     const nearBottom = stick || msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
     const out = [older];
     d.messages.forEach((m, i) => {
-      const prev = d.messages[i - 1], next = d.messages[i + 1];
-      if (!prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString()) out.push(h("div", { class: "dm-day" }, dayLabel(m.created_at)));
-      out.push(bubble(m, prev && new Date(prev.created_at).toDateString() === new Date(m.created_at).toDateString() ? prev : null, next && new Date(next.created_at).toDateString() === new Date(m.created_at).toDateString() ? next : null));
+      const same = (o) => o && new Date(o.created_at).toDateString() === new Date(m.created_at).toDateString() ? o : null;
+      const prev = d.messages[i - 1];
+      if (!same(prev)) out.push(h("div", { class: "dm-day" }, dayLabel(m.created_at)));
+      out.push(bubble(m, same(prev), same(d.messages[i + 1])));
     });
     msgs.replaceChildren(...out);
     older.hidden = !d.more;
     if (nearBottom) msgs.scrollTop = msgs.scrollHeight;
   }
   async function reload(stick) { d = await api(`/messages/threads/${id}`); paint(stick); api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {}); onChange?.(); }
+
+  // the bar: round icons on the left; as soon as something is typed they fold into a "›" and the arrow appears; empty, the button is a thumbs-up
+  const upload = async (file) => {
+    if (attached.length >= 4) { toast(t("mediaTooMany")); return; }
+    try { toast(t("mediaUploading")); attached.push(await uploadMedia(`/api/messages/threads/${id}/media`, file)); drawPreviews(); sync(); }
+    catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
+  };
+  const picker = h("input", { type: "file", accept: "image/*,video/*,audio/*", multiple: true, hidden: true, onChange: async (e) => { const files = [...e.target.files]; e.target.value = ""; for (const f of files) await upload(f); } });
+  const record = async (video) => { const file = await recordMessage(video); if (file) await upload(file); };
+  const ic = (icon, label, run) => h("button", { class: "dm-ic round", type: "button", "aria-label": label, title: label, onClick: run }, icon);
+  const toolsEl = h("div", { class: "dm-bar-tools" }, ic("📎", t("addMedia"), () => picker.click()), picker, ic("🎤", t("recVoice"), () => record(false)), ic("🎥", t("recVideo"), () => record(true)),
+    ic("😊", t("emojis"), (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); sync(); grow(); })));
+  const moreBtn = ic("›", t("dmMoreTools"), () => { expanded = true; sync(); });
+  moreBtn.classList.add("dm-more");
+  const sendBtn = h("button", { class: "dm-send", type: "submit" });
+  const typing = () => body.value.trim().length > 0 || attached.length > 0;
+  function sync() {
+    if (!typing()) expanded = true;
+    toolsEl.hidden = typing() && !expanded; moreBtn.hidden = !(typing() && !expanded);
+    const on = typing();
+    sendBtn.textContent = on ? "➤" : "👍"; sendBtn.classList.toggle("like", !on); sendBtn.setAttribute("aria-label", on ? t("dmSend") : t("dmLike")); sendBtn.title = on ? t("dmSend") : t("dmLike");
+  }
+  body.addEventListener("input", () => { if (body.value.trim() && expanded) expanded = false; sync(); grow(); });
   const sendNow = async (e) => {
     e?.preventDefault();
-    const text = body.value.trim(); if (!text) return;
-    try { await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: text } }); body.value = ""; grow(); await reload(true); }
-    catch (err) { toast(err.body?.error === "too_many_requests" ? t("dmSlow") : errorText(err)); }
+    const text = body.value.trim();
+    const like = !text && !attached.length;                       // nothing written: the thumbs-up
+    try {
+      await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: like ? "👍" : text, media_ids: attached.map((m) => m.id), reply_to: replyTo?.id } });
+      body.value = ""; attached = []; drawPreviews(); setReply(null); expanded = true; grow(); sync(); await reload(true);
+    } catch (err) { toast(err.body?.error === "too_many_requests" ? t("dmSlow") : errorText(err)); }
   };
-  // a computer: Enter sends (Shift+Enter = new line); a phone: Enter is a new line and the arrow sends
+  // a computer: Enter sends (Shift+Enter = new line); a phone: Enter is a new line and the button sends
   body.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && (finePointer ? !e.shiftKey : false)) sendNow(e); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendNow(e); });
   const members = d.members.filter((m) => m.id !== myId);
   box.replaceChildren(h("div", { class: "dm-chat" },
     h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"),
       h("div", { class: "dm-title" }, dmIcon(th(), myId, 40), h("div", { class: "dm-title-tx" }, h("b", {}, dmName(th(), myId)), d.thread.is_group ? h("div", { class: "meta" }, `${d.members.length} ${t("dmPeople")} · ${members.map(dmFirst).join(", ")}`) : null)),
       d.thread.is_group ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("dmLeaveConfirm"))) { try { await api(`/messages/threads/${id}/leave`, { method: "POST" }); toList(); } catch (e) { toast(errorText(e)); } } } }, t("dmLeave")) : null),
-    msgs,
-    h("form", { class: "dm-compose", onSubmit: sendNow },
-      h("button", { class: "dm-ic", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); grow(); }) }, "😊"),
-      body, h("button", { class: "dm-send", type: "submit", "aria-label": t("dmSend"), title: t("dmSend") }, "➤"))));
-  paint(true);
+    msgs, replyBar, previews,
+    h("form", { class: "dm-compose", onSubmit: sendNow }, toolsEl, moreBtn, body, sendBtn)));
+  paint(true); sync();
   api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {});
   state.dmTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmTimer); return; } if (!document.hidden && !body.value.trim()) reload(false).catch(() => {}); }, 12000); // new messages arrive while it is open
   if (finePointer) body.focus();
@@ -2738,9 +2827,10 @@ async function renderCommunity() {
   const reactionBar = (x) => {
     const toggle = async (emoji, on) => { try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
     return h("div", { class: "reactions" },
-      ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggle(r.emoji, !r.mine) }, `${r.emoji} ${r.count}`)),
-      h("button", { type: "button", class: "react add", "aria-label": t("react"), title: t("react"), onClick: (e) => emojiPopover(e.currentTarget, (em) => toggle(em, true)) }, "😊＋"));
+      ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggle(r.emoji, !r.mine) }, `${r.emoji} ${r.count}`)));
   };
+  const toggleReact = async (x, emoji) => { const on = !x.reactions.some((r) => r.emoji === emoji && r.mine); try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
+  const removePost = async (x) => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } };
   const postCard = (x) => {
     const replyInput = h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") });
     const replyBox = h("form", { class: "comm-reply", hidden: true, onSubmit: async (e) => {
@@ -2748,15 +2838,16 @@ async function renderCommunity() {
       const input = e.target.querySelector("input"); if (!input.value.trim()) return;
       try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(); } catch (err) { toast(errorText(err)); }
     } }, replyInput, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(replyInput, em)) }, "😊"), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
-    return h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
+    const article = h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
       x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
       author(x), x.body ? h("p", { class: "post-body" }, x.body) : null, mediaGrid(x.media), reactionBar(x),
-      h("div", { class: "post-actions" },
-        h("button", { class: "btn sm", type: "button", onClick: () => { replyBox.hidden = !replyBox.hidden; if (!replyBox.hidden) replyBox.querySelector("input").focus(); } }, t("reply")),
-        moderator ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } }, x.pinned ? t("unpin") : t("pin")) : null,
-        del(x)),
-      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => h("div", { class: "reply" }, author(r), r.body ? h("p", { class: "post-body" }, r.body) : null, mediaGrid(r.media), reactionBar(r), h("div", { class: "post-actions" }, del(r))))) : null,
+      x.replies.length ? h("div", { class: "post-replies" }, x.replies.map((r) => { const el = h("div", { class: "reply" }, author(r), r.body ? h("p", { class: "post-body" }, r.body) : null, mediaGrid(r.media), reactionBar(r)); msgActions(el, { react: (e) => toggleReact(r, e), del: r.can_delete ? () => removePost(r) : null }); return el; })) : null,
       replyBox);
+    // hover toolbar / long press: react, reply, pin (moderators), delete
+    msgActions(article, { react: (e) => toggleReact(x, e), reply: () => { replyBox.hidden = false; replyBox.querySelector("input").focus(); },
+      pin: moderator ? { label: x.pinned ? t("unpin") : t("pin"), run: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } } : null,
+      del: x.can_delete ? () => removePost(x) : null });
+    return article;
   };
   let posts = [];
   async function load() {
