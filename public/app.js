@@ -1679,6 +1679,40 @@ function availabilityEditor(staffId, part = "both") {
 }
 
 // Time-off requests and decisions, as a list of blocks (shown in Mon compte → Congés).
+// Change a leave request: allowed until its dates are over. An approved leave goes back to "requested" when the employee changes it.
+function timeOffEditDialog(r, onSaved) {
+  const today = ymd(new Date());
+  const dlg = h("dialog", { class: "modal" });
+  const from = h("input", { type: "date", required: true, value: r.start_date, min: r.start_date < today ? r.start_date : today });
+  const to = h("input", { type: "date", value: r.end_date, min: r.start_date });
+  from.addEventListener("change", () => { to.min = from.value; if (to.value < from.value) to.value = from.value; });
+  const allDay = h("input", { type: "checkbox", checked: !r.start_time });
+  const tStart = timeField(r.start_time ?? "14:00"), tEnd = timeField(r.end_time ?? "21:00");
+  const timeBox = h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr", hidden: !r.start_time }, h("label", { class: "field" }, h("span", {}, t("start")), tStart), h("label", { class: "field" }, h("span", {}, t("end")), tEnd));
+  allDay.addEventListener("change", () => { timeBox.hidden = allDay.checked; });
+  const note = h("input", { maxLength: 300, value: r.note ?? "", placeholder: t("optional") });
+  const done = () => { dlg.close(); dlg.remove(); };
+  dlg.append(h("form", { class: "modal-body", onSubmit: async (e) => {
+    e.preventDefault();
+    try {
+      const body = { start_date: from.value, end_date: to.value || from.value, note: note.value };
+      if (!allDay.checked) { body.start_time = tStart.value; body.end_time = tEnd.value; }
+      const res = await api(`/time-off/${r.id}`, { method: "PUT", body });
+      toast(res.status === "requested" && r.status === "approved" ? t("leaveUpdatedAgain") : t("leaveUpdated")); done(); onSaved?.();
+    } catch (err) {
+      const k = err.body?.error;
+      toast(k === "already_requested" ? t("alreadyRequested") : k === "invalid_times" ? t("opensBeforeCloses") : k === "in_the_past" ? t("leaveInThePast") : errorText(err));
+    }
+  } }, h("h2", {}, t("editLeaveTitle")),
+    r.status === "approved" ? h("p", { class: "alert" }, t("editApprovedWarn")) : null,
+    h("label", { class: "field" }, h("span", {}, t("fromDate")), from), h("label", { class: "field" }, h("span", {}, t("toDate")), to),
+    h("label", { class: "check" }, allDay, h("span", {}, t("allDay"))), timeBox,
+    h("label", { class: "field" }, h("span", {}, t("note")), note),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: done }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+  dlg.addEventListener("close", () => dlg.remove(), { once: true });
+  document.body.append(dlg); dlg.showModal();
+}
+
 async function timeOffNodes(part = "mine") {
   const today = ymd(new Date());
   const [mine, review] = await Promise.all([api("/time-off/mine"), api("/time-off/review")]);
@@ -1712,7 +1746,10 @@ async function timeOffNodes(part = "mine") {
   const myList = h("section", { class: "panel" }, h("h2", {}, t("myTimeOff")), mine.length ? mine.map((r) =>
     h("div", { class: "cov-row" }, h("div", {}, h("span", { class: `off-chip ${r.status}` }, r.status === "approved" ? "C/A" : r.status === "denied" ? "✕" : "C/D"), ` ${dates(r)}`),
       h("div", { class: "meta" }, `${statusText[r.status] ?? r.status}${r.note ? ` · ${r.note}` : ""}${r.decision_note ? ` · ${r.decision_note}` : ""}`),
-      r.status === "requested" || r.status === "approved" ? h("button", { class: "btn", type: "button", onClick: async () => { if ((await ask(t("confirmCancelOff")))) { await api(`/time-off/${r.id}/cancel`, { method: "POST" }); render(); } } }, t("cancel")) : null))
+      r.status === "requested" || r.status === "approved" ? h("div", { class: "actions" },
+        // editable until the dates are over
+        r.end_date >= today ? h("button", { class: "btn", type: "button", onClick: () => timeOffEditDialog(r, () => render()) }, `✎ ${t("editLeave")}`) : null,
+        h("button", { class: "btn", type: "button", onClick: async () => { if ((await ask(t("confirmCancelOff")))) { await api(`/time-off/${r.id}/cancel`, { method: "POST" }); render(); } } }, t("cancel"))) : null))
     : h("p", { class: "meta" }, t("noTimeOff")));
   const decide = async (r, approve) => {
     const asked = await promptDialog({ title: t("decisionNote"), label: t("optional") });
@@ -2942,21 +2979,27 @@ function durationLabel(min) {
   if (min >= 60) { const hh = Math.floor(min / 60), m = min % 60; return m ? `${hh} h ${String(m).padStart(2, "0")}` : `${hh} h`; }
   return `${min} min`;
 }
+// A section that folds: open on a computer, closed on a phone (to keep the screen short).
+function fold(title, children, open) {
+  const d = h("details", { class: "fold" }, h("summary", {}, title), h("div", { class: "fold-body" }, ...[].concat(children)));
+  d.open = open ?? mqDesktop.matches;
+  return d;
+}
 function reminderControls() {
   const box = h("div", { class: "reminders" });
   let items = [];
   const draw = () => {
     const rows = items.map((it, i) => {
       const opts = REMINDER_PRESETS.includes(it.minutes_before) ? REMINDER_PRESETS : [...REMINDER_PRESETS, it.minutes_before].sort((a, b) => a - b);
-      const when = h("select", { "aria-label": t("reminderBefore"), onChange: (e) => { it.minutes_before = Number(e.target.value); } }, opts.map((m) => h("option", { value: m, selected: m === it.minutes_before }, `${durationLabel(m)} ${t("reminderBeforeWord")}`)));
-      const anchor = h("select", { "aria-label": t("reminderFrom"), onChange: (e) => { it.anchor = e.target.value; } }, [["start", t("reminderStart")], ["end", t("reminderEnd")]].map(([v, l]) => h("option", { value: v, selected: (it.anchor ?? "start") === v }, l)));
+      const word = (it.anchor ?? "start") === "end" ? t("reminderBeforeEnd") : t("reminderBeforeWord"); // "30 min avant" / "30 min avant la fin": no separate field for it
+      const when = h("select", { "aria-label": t("reminderBefore"), onChange: (e) => { it.minutes_before = Number(e.target.value); } }, opts.map((m) => h("option", { value: m, selected: m === it.minutes_before }, `${durationLabel(m)} ${word}`)));
       const how = h("select", { "aria-label": t("reminderHow"), onChange: (e) => { it.channel = e.target.value; } }, [["push", t("reminderPush")], ["sms", t("sms")], ["email", t("emailCh")]].map(([v, l]) => h("option", { value: v, selected: v === it.channel }, l)));
-      return h("div", { class: "reminder-row" }, h("div", { class: "reminder-sels" }, when, anchor, how), h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), title: t("delete"), onClick: () => { items.splice(i, 1); draw(); } }, "🗑️"));
+      return h("div", { class: "reminder-row" }, h("div", { class: "reminder-sels" }, when, how), h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), title: t("delete"), onClick: () => { items.splice(i, 1); draw(); } }, "🗑"));
     });
-    box.replaceChildren(h("p", { class: "meta" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
-      h("div", { class: "actions push-actions" },
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push", anchor: "start" }); draw(); } }, `+ ${t("addReminder")}`) : null,
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: 30, channel: "push", anchor: "end" }); draw(); } }, `+ ${t("addEndReminder")}`) : null));
+    box.replaceChildren(h("p", { class: "meta acc-help" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
+      h("div", { class: "actions push-actions reminder-add" },
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push", anchor: "start" }); draw(); } }, `+ ${t("addReminderShort")}`) : null,
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: 30, channel: "push", anchor: "end" }); draw(); } }, `+ ${t("addEndReminderShort")}`) : null));
   };
   // saved together with the rest of the form (the main Enregistrer button)
   box.save = async () => { if (loaded) await api("/account/reminders", { method: "PUT", body: { items } }); };
@@ -2998,6 +3041,8 @@ function pushControls() {
   return box;
 }
 
+// On a phone the tabs of Mon compte are icons only (the name stays as tooltip and for screen readers).
+const ACCOUNT_TAB_ICONS = { profile: "📋", daysoff: "📅", availability: "🕑", timeoff: "🌴", calendar: "🗓️", payslips: "💵", security: "🔒" };
 async function renderAccount() {
   const acc = await api("/account");
   const phone = h("input", { type: "tel", value: acc.phone ?? "", autocomplete: "tel" });
@@ -3031,15 +3076,14 @@ async function renderAccount() {
     .catch(() => { slipsLoaded = false; slipsBox.replaceChildren(h("p", { class: "meta" }, t("genericError"))); }); };
   // Mobile-first, tab-based screen (same tabs as the employee dialog, limited to what the employee may change).
   const profile = h("form", { class: "acc-form", onSubmit: save },
-    h("h3", {}, acc.name), h("p", { class: "meta" }, `${t("loginAs")} ${acc.email ?? "—"}`),
-    h("label", { class: "field acc-phone" }, h("span", {}, t("phone")), phone, h("span", { class: "meta" }, t("phoneHelp"))),
-    h("div", { class: "field" }, h("span", {}, t("language")), lang),
-    h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel),
-    h("div", { class: "field push-field" }, h("span", {}, t("installTitle")), installControls()),
-    h("div", { class: "field push-field" }, h("span", {}, t("pushTitle")), pushControls()),
+    h("div", { class: "acc-who" }, h("b", {}, acc.name), h("span", { class: "meta" }, acc.email ?? "—")),
+    h("label", { class: "field acc-phone" }, h("span", {}, t("phone")), phone, h("span", { class: "meta acc-help" }, t("phoneHelp"))),
+    h("div", { class: "acc-pair" }, h("div", { class: "field" }, h("span", {}, t("language")), lang), h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel)),
+    fold(t("installTitle"), installControls()),
+    fold(t("pushTitle"), pushControls()),
     h("div", { class: "field push-field" }, h("span", {}, t("remindersTitle")), reminders),
-    h("button", { class: "btn primary", type: "submit" }, t("save")),
-    h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
+    h("div", { class: "acc-actions" }, h("button", { class: "btn primary", type: "submit" }, t("save")),
+      h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout"))));
   const securityBox = () => {
     const box = h("div", { class: "acc-content" }, h("p", { class: "meta" }, t("loading")));
     const draw = async () => {
@@ -3075,11 +3119,11 @@ async function renderAccount() {
           h("div", { class: "meta" }, `${t("secSignedBy")} ${t(`secMethod_${x.method ?? "code"}`)} · ${t("secLastActivity")} : ${ago(x.last_seen_at)}`)),
         x.current ? null : h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secSignOutConfirm"))) { try { await api(`/account/sessions/${x.id}`, { method: "DELETE" }); toast(t("secSignedOut")); draw(); } catch (e) { toast(errorText(e)); } } } }, t("secSignOut"))));
       box.replaceChildren(
-        h("div", { class: "sec-block" }, h("h3", {}, `${t("secDevices")} (${sessions.length})`), h("p", { class: "meta" }, t("secDevicesHelp")), ...sessions,
-          sessions.length > 1 ? h("button", { class: "btn", type: "button", onClick: async () => { if (await ask(t("secSignOutOthersConfirm"))) { try { const r = await api("/account/sessions/sign-out-others", { method: "POST" }); toast(`${r.signed_out} ${t("secSignedOutN")}`); draw(); } catch (e) { toast(errorText(e)); } } } }, t("secSignOutOthers")) : null),
-        h("div", { class: "sec-block" }, h("h3", {}, t("secPasskeys")), h("p", { class: "meta" }, t("secPasskeysHelp")), h("p", { class: "meta" }, t("secSyncedHint")), ...keys, add),
-        h("div", { class: "sec-block" }, h("h3", {}, t("secPassword")), h("p", { class: "meta" }, info.has_password ? t("secPasswordSet") : t("secPasswordNone")), h("p", { class: "meta" }, t("secPasswordHelp")), pwForm,
-          ...(info.has_password ? [h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemovePasswordConfirm"))) { await api("/account/password", { method: "DELETE" }); toast(t("secPasswordRemoved")); draw(); } } }, t("secRemovePassword"))] : [])));
+        fold(`${t("secDevices")} (${sessions.length})`, [h("p", { class: "meta acc-help" }, t("secDevicesHelp")), ...sessions,
+          sessions.length > 1 ? h("button", { class: "btn", type: "button", onClick: async () => { if (await ask(t("secSignOutOthersConfirm"))) { try { const r = await api("/account/sessions/sign-out-others", { method: "POST" }); toast(`${r.signed_out} ${t("secSignedOutN")}`); draw(); } catch (e) { toast(errorText(e)); } } } }, t("secSignOutOthers")) : null]),
+        fold(t("secPasskeys"), [h("p", { class: "meta acc-help" }, t("secPasskeysHelp")), h("p", { class: "meta acc-help" }, t("secSyncedHint")), ...keys, add]),
+        fold(t("secPassword"), [h("p", { class: "meta" }, info.has_password ? t("secPasswordSet") : t("secPasswordNone")), h("p", { class: "meta acc-help" }, t("secPasswordHelp")), pwForm,
+          ...(info.has_password ? [h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemovePasswordConfirm"))) { await api("/account/password", { method: "DELETE" }); toast(t("secPasswordRemoved")); draw(); } } }, t("secRemovePassword"))] : [])]));
     };
     draw();
     return box;
@@ -3097,11 +3141,12 @@ async function renderAccount() {
   const bar = h("div", { class: "dlg-tabs acc-tabs", role: "tablist" });
   const content = h("div", { class: "acc-content" });
   const draw = () => {
-    bar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(state.accountTab === id), onClick: () => { state.accountTab = id; draw(); } }, label)));
+    bar.replaceChildren(...tabs.map(([id, label]) => h("button", { type: "button", role: "tab", title: label, "aria-label": label, "aria-selected": String(state.accountTab === id), onClick: () => { state.accountTab = id; draw(); } },
+      h("span", { class: "tab-ic", "aria-hidden": "true" }, ACCOUNT_TAB_ICONS[id] ?? "•"), h("span", { class: "tab-tx" }, label))));
     content.replaceChildren(...tabs.find(([id]) => id === state.accountTab)[2]());
   };
   draw();
-  $app.replaceChildren(h("div", { class: "account" }, h("h2", {}, t("account")), bar, content));
+  $app.replaceChildren(h("div", { class: "account acc-screen" }, h("h2", {}, t("account")), bar, content));
 }
 
 async function renderMine() {

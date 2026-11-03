@@ -4,7 +4,7 @@
 export const EVENTS = [
   "staff.created", "staff.updated", "staff.active_changed",
   "shift.created", "shift.updated", "shift.deleted", "schedule.applied", "schedule.published", "schedule.unpublished",
-  "time_off.requested", "time_off.decided", "time_off.cancelled",
+  "time_off.requested", "time_off.updated", "time_off.decided", "time_off.cancelled",
   "coverage.opened", "coverage.filled",
 ] as const;
 export type EventName = (typeof EVENTS)[number];

@@ -81,9 +81,9 @@ export const T = {
     l === "fr" ? { subject: "Aucun quart", text: "Mikes: aucun quart à venir trouvé dans les prochaines 24 h." }
                : { subject: "No shift", text: "Mikes: no upcoming shift found in the next 24 hours." },
 
-  timeOffRequest: (l: Lang, c: { name: string; from: string; to: string; note: string | null }): Msg =>
-    l === "fr" ? { subject: `Demande de congé : ${c.name}`, text: `${c.name} demande congé du ${c.from} au ${c.to}.${c.note ? ` Note : ${c.note}` : ""} Ouvrez l’application (onglet Congés) pour répondre.` }
-               : { subject: `Time-off request: ${c.name}`, text: `${c.name} requests time off from ${c.from} to ${c.to}.${c.note ? ` Note: ${c.note}` : ""} Open the app (Time off tab) to answer.` },
+  timeOffRequest: (l: Lang, c: { name: string; from: string; to: string; note: string | null; changed?: boolean }): Msg =>
+    l === "fr" ? { subject: `${c.changed ? "Demande de congé modifiée" : "Demande de congé"} : ${c.name}`, text: `${c.name} ${c.changed ? "a modifié sa demande : congé" : "demande congé"} du ${c.from} au ${c.to}.${c.note ? ` Note : ${c.note}` : ""} Ouvrez l’application (onglet Congés) pour répondre.` }
+               : { subject: `${c.changed ? "Time-off request changed" : "Time-off request"}: ${c.name}`, text: `${c.name} ${c.changed ? "changed the request: time off" : "requests time off"} from ${c.from} to ${c.to}.${c.note ? ` Note: ${c.note}` : ""} Open the app (Time off tab) to answer.` },
 
   timeOffDecision: (l: Lang, c: { approved: boolean; from: string; to: string; note: string | null }): Msg =>
     l === "fr" ? { subject: c.approved ? "Congé accordé" : "Congé refusé", text: `Ta demande de congé du ${c.from} au ${c.to} est ${c.approved ? "accordée" : "refusée"}.${c.note ? ` Note : ${c.note}` : ""}` }

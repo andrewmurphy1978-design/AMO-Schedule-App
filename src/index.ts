@@ -202,7 +202,7 @@ const OWNER_SQL: Record<Owned, string> = {
 const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/staff\/(\d+)(\/|$)/, "staff"], [/^\/api\/time-off\/staff\/(\d+)$/, "staff"], [/^\/api\/admin\/staff\/(\d+)\//, "staff"],
   [/^\/api\/restaurants\/(\d+)\//, "restaurant"], [/^\/api\/target-sets\/(\d+)$/, "target_set"], [/^\/api\/shifts\/(\d+)(\/|$)/, "shift"],
-  [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
+  [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
   [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
@@ -1650,6 +1650,48 @@ app.get("/api/time-off/people", async (c) => {
 app.get("/api/time-off/mine", async (c) => {
   const r = await c.env.DB.prepare("SELECT id, start_date, end_date, start_time, end_time, note, status, decision_note FROM time_off_requests WHERE staff_id = ? AND end_date >= date('now','-60 day') ORDER BY start_date DESC").bind(c.get("me").id).all();
   return c.json(r.results);
+});
+
+// Change a request: dates, part of the day, note. Allowed until the leave is over (a leave whose dates are all past can no longer be edited).
+// An employee who changes an approved leave sends it again for approval; a manager or an administrator changing it keeps it approved.
+app.put("/api/time-off/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const row = await db.prepare("SELECT staff_id, start_date, end_date, start_time, end_time, status FROM time_off_requests WHERE id = ?").bind(id).first<{ staff_id: number; start_date: string; end_date: string; start_time: string | null; end_time: string | null; status: string }>();
+  if (!row || row.status === "cancelled") return c.json({ error: "not_found" }, 404);
+  const own = row.staff_id === me.id;
+  if (!own && !(await canDecideFor(db, me, row.staff_id))) return c.json({ error: "forbidden" }, 403);
+  if (row.status === "denied") return c.json({ error: "not_editable" }, 409);
+  const today = localNow(c.env.TIMEZONE).slice(0, 10);
+  if (row.end_date < today) return c.json({ error: "in_the_past" }, 409); // the dates are over
+  const b = await c.req.json<{ start_date?: string; end_date?: string; start_time?: string | null; end_time?: string | null; note?: string }>().catch(() => ({} as { start_date?: string; end_date?: string; start_time?: string | null; end_time?: string | null; note?: string }));
+  const start = b.start_date ?? "", end = b.end_date || start;
+  if (!DATE_RE3.test(start) || !DATE_RE3.test(end) || start > end) return c.json({ error: "invalid_dates" }, 400);
+  if (end < today || (start !== row.start_date && start < today)) return c.json({ error: "in_the_past" }, 400); // no move into the past (a leave already under way keeps its start)
+  const st = b.start_time || null, et = b.end_time || null;
+  if ((st && !HHMM_RE.test(st)) || (et && !HHMM_RE.test(et)) || (!!st !== !!et) || (st && et && st >= et)) return c.json({ error: "invalid_times" }, 400);
+  const same = (await db.prepare("SELECT start_time, end_time FROM time_off_requests WHERE staff_id = ? AND id != ? AND status IN ('requested','approved') AND start_date <= ? AND end_date >= ?").bind(row.staff_id, id, end, start).all<{ start_time: string | null; end_time: string | null }>()).results;
+  if (same.some((o) => !o.start_time || !st || (o.start_time < et! && st < o.end_time!))) return c.json({ error: "already_requested" }, 409);
+  const note = b.note?.trim().slice(0, 300) || null;
+  const again = own && row.status === "approved"; // an employee's change to an approved leave must be approved again
+  await db.prepare(`UPDATE time_off_requests SET start_date = ?, end_date = ?, start_time = ?, end_time = ?, note = ?${again ? ", status = 'requested', decided_by = NULL, decided_at = NULL, decision_note = NULL" : ""} WHERE id = ?`).bind(start, end, st, et, note, id).run();
+  const status = again ? "requested" : row.status;
+  try {
+    const conn = await loadConnections(c.env, db, me.client_id);
+    if (own) {
+      const ids = (await approversOf(db, me.id)).filter((x) => x !== me.id);
+      if (ids.length) {
+        const people = (await db.prepare(`SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<any>()).results;
+        for (const p of people) await notifyStaff(db, conn, p, (l) => T.timeOffRequest(l, { name: me.name, from: start, to: end, note, changed: true }), "time_off_request");
+      }
+    } else {
+      const target = await db.prepare("SELECT id, name, phone, email, lang, notify_channel FROM staff WHERE id = ?").bind(row.staff_id).first<any>();
+      if (target && status === "approved") await notifyStaff(db, conn, target, (l) => T.timeOffDecision(l, { approved: true, from: start, to: end, note }), "time_off_decision");
+    }
+  } catch { /* messaging problems never block the change */ }
+  emit(c, "time_off.updated", () => timeOffData(db, id));
+  return c.json({ ok: true, status });
 });
 
 app.post("/api/time-off/:id/cancel", async (c) => {
