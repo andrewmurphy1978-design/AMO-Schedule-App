@@ -2077,15 +2077,17 @@ function ingredientTree(list) {
 const categoriesAlpha = () => [...INGREDIENT_CATEGORIES].sort((a, b) => t(a[1]).localeCompare(t(b[1]), getLang()));
 const LOCATION_INFO = { fridge: ["🧊", "locFridge"], freezer: ["❄️", "locFreezer"], backstore: ["📦", "locBackstore"], basement: ["🪜", "locBasement"], cellar: ["🍷", "locCellar"] };
 async function renderChecklist() {
-  const { test, shifts, restock } = await api("/my-checklist");
+  const { test, shifts, restock, vehicle_restaurants: vehicleIds = [] } = await api("/my-checklist");
   state.restock = restock;
   const hasEnd = shifts.length > 0 || (test && state.me.me.is_admin);
   let sub = state.listsSub ?? (hasEnd ? "end" : "restock");
   if ((sub === "restock" || sub === "prep" || sub === "orders") && !restock.length) sub = "end";
+  if (sub === "vehicles" && !vehicleIds.length) sub = "end";
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
-  if (restock.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ["restock", t("listsRestock")], ["prep", t("listsPrep")], ["orders", t("listsOrders")]].map(([id, label]) =>
+  if (restock.length || vehicleIds.length) box.append(h("div", { class: "subtabs", role: "tablist" }, [["end", t("listsEndOfShift")], ...(restock.length ? [["restock", t("listsRestock")], ["prep", t("listsPrep")], ["orders", t("listsOrders")]] : []), ...(vehicleIds.length ? [["vehicles", `🚗 ${t("vehTab")}`]] : [])].map(([id, label]) =>
     h("button", { type: "button", role: "tab", "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, label))));
+  if (sub === "vehicles") { await renderVehicles(box, vehicleIds); return; }
   if (sub === "orders") { await renderOrders(box, restock); return; }
   if (sub === "restock" || sub === "prep") { await renderRestock(box, restock, sub); return; }
   if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
@@ -2096,6 +2098,138 @@ async function renderChecklist() {
   }
   for (const sh of shifts) box.append(await checklistCard(sh.id, sh, test));
 }
+// ---------- Delivery vehicles: tires, problems, reminders ----------
+const VEH_CATS = ["tires", "brakes", "engine", "lights", "body", "cleanliness", "other"];
+const vehDate = (ymd) => { const x = new Date(`${ymd}T12:00:00Z`).toLocaleDateString(locale(), { day: "numeric", month: "long", timeZone: "UTC" }); return getLang() === "fr" ? x.replace(/^1 /, "1er ") : x; };
+const vehName = (v) => (v.plate ? `${v.name} · ${v.plate}` : v.name);
+
+/** A driver reports a problem with a vehicle: which one, what kind, how serious, what is wrong. */
+async function vehicleIssueDialog({ restaurantId, vehicleId, onSaved }) {
+  let d;
+  try { d = await api(`/vehicles?restaurant=${restaurantId}`); } catch (e) { toast(errorText(e)); return; }
+  const list = d.vehicles.filter((v) => v.active);
+  if (!list.length) { toast(t("vehNoneToReport")); return; }
+  const dlg = h("dialog", { class: "modal veh-dialog" });
+  const vehicle = h("select", { required: true, "aria-label": t("vehVehicle") }, list.map((v) => h("option", { value: v.id, selected: v.id === vehicleId }, vehName(v))));
+  const category = h("select", { required: true, "aria-label": t("vehCategory") }, VEH_CATS.map((c) => h("option", { value: c }, t(`vehCat_${c}`))));
+  const severity = radioGroup("veh-sev", [["normal", t("vehSevNormal")], ["urgent", t("vehSevUrgent")]], "normal");
+  const text = h("textarea", { rows: 4, maxLength: 1000, required: true, minLength: 3, placeholder: t("vehDescribe"), "aria-label": t("vehDescribe") });
+  const done = () => { dlg.close(); dlg.remove(); };
+  dlg.append(h("form", { class: "modal-body", onSubmit: async (e) => {
+    e.preventDefault();
+    try { await api(`/vehicles/${vehicle.value}/issues`, { method: "POST", body: { severity: severity.value, category: category.value, description: text.value } }); toast(t("vehReported")); done(); onSaved?.(); }
+    catch (err) { toast(err.body?.error === "too_many_requests" ? t("loginTooMany") : errorText(err)); }
+  } }, h("h2", {}, `🚗 ${t("vehReport")}`),
+    h("label", { class: "field" }, h("span", {}, t("vehVehicle")), vehicle), h("label", { class: "field" }, h("span", {}, t("vehCategory")), category),
+    h("div", { class: "field" }, h("span", {}, t("vehSeverity")), severity, h("span", { class: "meta" }, t("vehSevHelp"))), h("label", { class: "field" }, h("span", {}, t("vehDescribe")), text),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: done }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("vehSend")))));
+  dlg.addEventListener("close", () => dlg.remove(), { once: true });
+  document.body.append(dlg); dlg.showModal(); text.focus();
+}
+
+async function renderVehicles(box, restaurantIds) {
+  if (!restaurantIds.includes(state.vehicleRestaurant)) state.vehicleRestaurant = restaurantIds.includes(state.sel?.restaurant) ? state.sel.restaurant : restaurantIds[0];
+  const reload = () => renderChecklist();
+  const d = await api(`/vehicles?restaurant=${state.vehicleRestaurant}`);
+  const fmtTime = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const picker = d.restaurants.length > 1 ? h("label", { class: "field veh-resto" }, h("span", {}, t("restaurant")), h("select", { "aria-label": t("restaurant"), onChange: (e) => { state.vehicleRestaurant = Number(e.target.value); reload(); } }, d.restaurants.map((r) => h("option", { value: r.id, selected: r.id === d.restaurant_id }, r.name)))) : null;
+  // the next tire deadline, in words
+  const sn = d.season, winter = sn.target === "winter";
+  const urgentSoon = sn.in_window && sn.days_left <= 14 && sn.pending > 0;
+  const banner = h("div", { class: `info veh-season ${urgentSoon ? "soon" : ""}`, role: "status" },
+    h("b", {}, winter ? `❄️ ${t("vehFallTitle")}` : `☀️ ${t("vehSpringTitle")}`), " ",
+    sn.in_window ? (winter ? t("vehFallLine") : t("vehSpringLine")).replace("{date}", vehDate(sn.deadline)).replace("{n}", String(Math.max(0, sn.days_left))) : t("vehSpringWait").replace("{date}", vehDate(sn.opens)),
+    sn.in_window && sn.pending ? h("div", {}, `⚠ ${sn.pending} ${t("vehToChange")}`) : null, h("div", { class: "meta" }, winter ? t("vehLawWinter") : t("vehLawSpring")));
+  const issueRow = (i, canManage) => h("div", { class: `veh-issue ${i.severity} ${i.status}` },
+    h("div", {}, h("span", { class: "badge" }, i.severity === "urgent" ? `🚨 ${t("vehSevUrgentShort")}` : t("vehSevNormalShort")), " ", h("b", {}, t(`vehCat_${i.category}`)), " · ", h("span", { class: "meta" }, `${i.by} · ${fmtTime(i.created_at)}`), " · ", h("span", { class: "badge" }, t(`vehSt_${i.status}`))),
+    h("p", { class: "veh-desc" }, i.description), i.resolution_note ? h("p", { class: "meta" }, `${t("vehNote")} : ${i.resolution_note}`) : null,
+    canManage && i.status !== "resolved" ? h("div", { class: "actions" },
+      i.status === "open" ? h("button", { class: "btn sm", type: "button", onClick: async () => { try { await api(`/vehicle-issues/${i.id}`, { method: "PUT", body: { status: "in_progress" } }); reload(); } catch (e) { toast(errorText(e)); } } }, t("vehStart")) : null,
+      h("button", { class: "btn sm primary", type: "button", onClick: async () => { const note = await promptDialog({ title: t("vehResolve"), label: t("vehNoteOptional") }); if (note === null) return; try { await api(`/vehicle-issues/${i.id}`, { method: "PUT", body: { status: "resolved", note } }); reload(); } catch (e) { toast(errorText(e)); } } }, `✓ ${t("vehResolve")}`)) : null);
+  const card = (v) => {
+    const open = v.issues.filter((i) => i.status !== "resolved"), closed = v.issues.filter((i) => i.status === "resolved");
+    const out = open.some((i) => i.severity === "urgent");
+    const toTires = v.tires === "winter" ? "summer" : "winter";
+    return h("section", { class: `card veh-card ${out ? "out" : ""} ${v.active ? "" : "inactive"}` },
+      h("div", { class: "veh-head" }, h("h3", {}, `🚗 ${vehName(v)}`), h("span", { class: `badge tires-${v.tires}` }, v.tires === "winter" ? `❄️ ${t("vehWinter")}` : `☀️ ${t("vehSummer")}`), out ? h("span", { class: "badge veh-out" }, `🚨 ${t("vehOut")}`) : null, v.active ? null : h("span", { class: "badge" }, t("inactive"))),
+      v.notes ? h("p", { class: "meta" }, v.notes) : null,
+      h("p", { class: "meta" }, v.tires_changed_on ? `${t("vehTiresChanged")} ${vehDate(v.tires_changed_on)}` : t("vehTiresUnknown")),
+      open.length ? h("div", { class: "veh-issues" }, open.map((i) => issueRow(i, d.can_manage))) : h("p", { class: "meta" }, `✓ ${t("vehNoIssue")}`),
+      h("div", { class: "actions" },
+        v.active ? h("button", { class: "btn", type: "button", onClick: () => vehicleIssueDialog({ restaurantId: d.restaurant_id, vehicleId: v.id, onSaved: reload }) }, `⚠ ${t("vehReport")}`) : null,
+        d.can_manage && v.active ? h("button", { class: `btn ${v.tires !== sn.target ? "primary" : ""}`, type: "button", onClick: async () => { if (await ask(t(toTires === "winter" ? "vehConfirmWinter" : "vehConfirmSummer").replace("{v}", vehName(v)))) { try { await api(`/vehicles/${v.id}/tires`, { method: "POST", body: { to: toTires } }); reload(); } catch (e) { toast(errorText(e)); } } } }, `🔧 ${t(toTires === "winter" ? "vehToWinter" : "vehToSummer")}`) : null,
+        d.can_manage ? h("button", { class: "btn", type: "button", onClick: () => vehicleEditDialog(d, v, reload) }, t("edit")) : null),
+      closed.length ? h("details", { class: "veh-closed" }, h("summary", {}, `${t("vehHistory")} (${closed.length})`), closed.map((i) => issueRow(i, false))) : null);
+  };
+  box.append(
+    h("h3", {}, `🚗 ${t("vehTab")}`), picker, banner,
+    h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => vehicleIssueDialog({ restaurantId: d.restaurant_id, onSaved: reload }) }, `⚠ ${t("vehReport")}`),
+      d.can_manage ? h("button", { class: "btn", type: "button", onClick: () => vehicleEditDialog(d, null, reload) }, `＋ ${t("vehAdd")}`) : null),
+    ...(d.vehicles.length ? d.vehicles.map(card) : [h("div", { class: "empty" }, d.can_manage ? t("vehNoneManage") : t("vehNone"))]),
+    d.can_configure ? vehicleSettingsPanel() : null);
+}
+
+function vehicleEditDialog(d, v, reload) {
+  const dlg = h("dialog", { class: "modal veh-dialog" });
+  const name = h("input", { required: true, maxLength: 80, value: v?.name ?? "", placeholder: "Toyota Corolla 2019", "aria-label": t("vehName") });
+  const plate = h("input", { maxLength: 20, value: v?.plate ?? "", placeholder: "ABC 123", "aria-label": t("vehPlate") });
+  const notes = h("input", { maxLength: 300, value: v?.notes ?? "", "aria-label": t("vehNotes") });
+  const month = new Date().getMonth() + 1;
+  const tires = radioGroup("veh-tires", [["summer", `☀️ ${t("vehSummer")}`], ["winter", `❄️ ${t("vehWinter")}`]], v?.tires ?? (month >= 11 || month <= 3 ? "winter" : "summer"));
+  const active = h("input", { type: "checkbox", checked: v ? v.active : true });
+  const done = () => { dlg.close(); dlg.remove(); };
+  dlg.append(h("form", { class: "modal-body", onSubmit: async (e) => {
+    e.preventDefault();
+    try {
+      if (v) await api(`/vehicles/${v.id}`, { method: "PUT", body: { name: name.value, plate: plate.value, notes: notes.value, active: active.checked } });
+      else await api("/vehicles", { method: "POST", body: { restaurant_id: d.restaurant_id, name: name.value, plate: plate.value, notes: notes.value, tires: tires.value } });
+      done(); reload();
+    } catch (err) { toast(errorText(err)); }
+  } }, h("h2", {}, v ? t("vehEdit") : t("vehAdd")),
+    h("label", { class: "field" }, h("span", {}, t("vehName")), name), h("label", { class: "field" }, h("span", {}, t("vehPlate")), plate), h("label", { class: "field" }, h("span", {}, t("vehNotes")), notes),
+    v ? h("label", { class: "check" }, active, h("span", {}, t("vehActive"))) : h("div", { class: "field" }, h("span", {}, t("vehTiresNow")), tires),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: done }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+  dlg.addEventListener("close", () => dlg.remove(), { once: true });
+  document.body.append(dlg); dlg.showModal(); name.focus();
+}
+
+/** Administrators: the legal dates and the reminders for the tire changes. */
+function vehicleSettingsPanel() {
+  const box = h("details", { class: "veh-settings" }, h("summary", {}, `⚙ ${t("vehSettings")}`), h("p", { class: "meta" }, t("loading")));
+  let loaded = false;
+  box.addEventListener("toggle", async () => {
+    if (!box.open || loaded) return; loaded = true;
+    try {
+      const d = await api("/admin/vehicle-settings"); const s = d.settings;
+      const md = (v) => { const i = h("input", { type: "text", pattern: "(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])", value: v, maxLength: 5, placeholder: "MM-JJ", style: "max-width:6rem", required: true }); return i; };
+      const enabled = h("input", { type: "checkbox", checked: s.enabled });
+      const fall = md(s.fall_deadline), springStart = md(s.spring_start), springEnd = md(s.spring_deadline);
+      const offsets = [45, 30, 21, 14, 7, 3, 1, 0].map((n) => [n, h("input", { type: "checkbox", checked: s.offsets.includes(n), "aria-label": String(n) })]);
+      const hourSel = h("select", { "aria-label": t("autoRemindHour") }, Array.from({ length: 24 }, (_, i) => h("option", { value: i, selected: i === s.hour }, getLang() === "en" ? `${i % 12 || 12} ${i < 12 ? "AM" : "PM"}` : `${i} h`)));
+      const email = h("input", { type: "checkbox", checked: s.email }), sms = h("input", { type: "checkbox", checked: s.sms });
+      const same = h("input", { type: "checkbox", checked: s.recipients === null });
+      const picks = d.candidates.map((p) => [p, h("input", { type: "checkbox", checked: d.recipients_now.includes(p.id), disabled: s.recipients === null, "aria-label": p.name })]);
+      same.addEventListener("change", () => picks.forEach(([, cb]) => { cb.disabled = same.checked; }));
+      box.replaceChildren(h("summary", {}, `⚙ ${t("vehSettings")}`), h("p", { class: "meta" }, t("vehSettingsHelp")),
+        h("form", { class: "acc-form", onSubmit: async (e) => {
+          e.preventDefault();
+          try {
+            await api("/admin/vehicle-settings", { method: "PUT", body: { enabled: enabled.checked, fall_deadline: fall.value, spring_start: springStart.value, spring_deadline: springEnd.value, offsets: offsets.filter(([, cb]) => cb.checked).map(([n]) => n), hour: Number(hourSel.value), recipients: same.checked ? null : picks.filter(([, cb]) => cb.checked).map(([p]) => p.id), email: email.checked, sms: sms.checked } });
+            toast(t("saved"));
+          } catch (err) { toast(err.body?.field === "spring_dates" ? t("vehSpringDatesBad") : errorText(err)); }
+        } },
+          h("label", { class: "check" }, enabled, h("span", {}, t("vehRemindersOn"))),
+          h("div", { class: "form-row r3" }, h("label", { class: "field" }, h("span", {}, t("vehFallDeadline")), fall), h("label", { class: "field" }, h("span", {}, t("vehSpringStart")), springStart), h("label", { class: "field" }, h("span", {}, t("vehSpringDeadline")), springEnd)),
+          h("div", { class: "field" }, h("span", {}, t("vehOffsets")), h("div", { class: "auto-days" }, offsets.map(([n, cb]) => h("label", { class: "check" }, cb, h("span", {}, n === 0 ? t("vehOnTheDay") : `${n} ${t("autoDayShort")}`))))),
+          h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("autoRemindHour")), hourSel), h("div", { class: "field" }, h("span", {}, t("autoNoticeBy")), h("label", { class: "check" }, email, h("span", {}, t("autoNoticeEmail"))), h("label", { class: "check" }, sms, h("span", {}, t("autoNoticeSms"))))),
+          h("div", { class: "field" }, h("span", {}, t("autoRecipients")), h("label", { class: "check" }, same, h("span", {}, t("vehRecipientsDefault"))),
+            h("div", { class: "auto-people" }, picks.map(([p, cb]) => h("label", { class: "check auto-person" }, cb, h("span", {}, p.name, " ", h("small", { class: "meta" }, `${p.is_admin ? t("autoAdminTag") : t("autoManagerTag")} · ${p.email ?? t("autoNoEmail")} · ${p.phone ?? t("autoNoPhone")}`)))))),
+          h("button", { class: "btn primary", type: "submit" }, t("save"))));
+    } catch (e) { loaded = false; box.replaceChildren(h("summary", {}, `⚙ ${t("vehSettings")}`), h("p", { class: "meta" }, errorText(e))); }
+  });
+  return box;
+}
+
 // "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.
 async function renderOrders(box, restaurantIds) {
   const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
@@ -2255,6 +2389,7 @@ async function checklistCard(shiftId, info, test = false) {
               } catch (err) { toast(errorText(err)); }
             } }, "⚠️")),
           it.issue ? h("div", { class: "cl-issue" }, h("b", {}, it.issue.reason === "missing_ingredient" ? `${t("checklistMissingIng")} : ` : `${t("checklistOtherReason")} : `), it.issue.note) : null)))),
+      d.vehicle_report ? h("div", { class: "cl-vehicle" }, h("button", { class: "btn", type: "button", onClick: () => vehicleIssueDialog({ restaurantId: d.vehicle_report.restaurant_id }) }, `🚗 ${t("vehReport")}`), h("span", { class: "meta" }, ` ${t("vehReportHint")}`)) : null,
       !d.lists.length ? h("p", { class: "cl-pick-hint" }, `👆 ${t("checklistPickPost")}`) : null,
       total && done === total && !d.submitted ? h("div", { class: "okmsg" }, `🎉 ${t("checklistComplete")}`) : null,
       // close the list even if some tasks are not ticked

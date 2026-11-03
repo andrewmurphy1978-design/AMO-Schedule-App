@@ -47,6 +47,8 @@ export async function deliver(db: D1Database, conn: Connections, channel: Channe
 
 /** Events that can also reach a phone or computer through Web Push; `urgent` ones are still sent by SMS / email as well. */
 const PUSH_KINDS: Record<string, { urgent: boolean; url: string }> = {
+  vehicle_issue_urgent: { urgent: true, url: "/?view=checklist&sub=vehicles" },
+  vehicle_issue: { urgent: false, url: "/?view=checklist&sub=vehicles" },
   schedule_published: { urgent: false, url: "/?view=mine" },
   time_off_decision: { urgent: false, url: "/?view=account&tab=timeoff" },
   time_off_request: { urgent: false, url: "/?view=admin&section=timeoff" },

@@ -24,6 +24,7 @@ import { closingTasksOf, closingAssignee } from "./closing.ts";
 import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { AUTO_DEPTS, parseAuto, validateAuto, nextMonday, autoDue, inAutoScope, autoNotice, autoReminder, reminderDue, type AutoSettings, type AutoResult } from "./autoschedule.ts";
+import { parseVehicleSettings, validateVehicleSettings, currentSeason, tireReminderDue, tireNotice, issueNotice, VEHICLE_CATEGORIES, type SeasonNow } from "./vehicles.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
@@ -175,10 +176,12 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
+  vehicle: "SELECT 1 FROM vehicles v JOIN restaurants r ON r.id = v.restaurant_id WHERE v.id = ?1 AND r.client_id = ?2",
+  vehicle_issue: "SELECT 1 FROM vehicle_issues i JOIN vehicles v ON v.id = i.vehicle_id JOIN restaurants r ON r.id = v.restaurant_id WHERE i.id = ?1 AND r.client_id = ?2",
   restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
   shift: "SELECT 1 FROM shifts sh JOIN restaurants r ON r.id = sh.restaurant_id WHERE sh.id = ?1 AND r.client_id = ?2",
   target_set: "SELECT 1 FROM target_sets t JOIN restaurants r ON r.id = t.restaurant_id WHERE t.id = ?1 AND r.client_id = ?2",
@@ -199,7 +202,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -2076,12 +2079,12 @@ async function runAutoSchedule(env: Env, clientId: number, week: string, auto0: 
 }
 
 /** Sends one message to the chosen people (null = every administrator), by the ticked channels, or the way each person's file says when none is ticked. */
-async function notifyPeople(env: Env, clientId: number, ids: number[] | null, ch: { email: boolean; sms: boolean }, build: (lang: Lang, sms: boolean, c: { url: string; brand: string }) => { subject: string; text: string }, kind: string) {
+async function notifyPeople(env: Env, clientId: number, ids: number[] | null, ch: { email: boolean; sms: boolean }, build: (lang: Lang, sms: boolean, c: { url: string; brand: string }) => { subject: string; text: string }, kind: string, path = "/?view=schedule") {
   const db = env.DB;
   const people = (await db.prepare("SELECT id, name, email, phone, lang, notify_channel, is_admin FROM staff WHERE client_id = ? AND active = 1").bind(clientId).all<StaffContact & { is_admin: number }>()).results;
   const chosen = ids === null ? people.filter((p) => p.is_admin === 1) : people.filter((p) => ids.includes(p.id));
   const { conn, brand } = await mailConn(env, clientId);
-  const ctx = { url: `${conn.appUrl}/?view=schedule`, brand: brand.name };
+  const ctx = { url: `${conn.appUrl}${path}`, brand: brand.name };
   for (const p of chosen) {
     const lang: Lang = p.lang === "en" ? "en" : "fr";
     if (!ch.email && !ch.sms) { await notifyStaff(db, conn, p, (_l, c2) => build(lang, c2 === "sms", ctx), kind); continue; } // each person's own preference
@@ -2691,7 +2694,8 @@ app.get("/api/shifts/:id/checklist", async (c) => {
   const bfOk = kitchen && (await breakfastRelevant(ctx.db, ctx.sh.restaurant_id, ctx.sh.start_at, ctx.sh.end_at));
   const posts = kitchen ? (await ctx.db.prepare("SELECT p.id, p.name_fr, p.name_en, p.kind FROM posts p JOIN checklists c ON c.target_id = p.id AND c.kind = 'post' AND c.client_id = ? WHERE p.all_posts = 0 ORDER BY p.sort").bind(ctx.me.client_id).all<{ id: number; name_fr: string; name_en: string; kind: string }>()).results.filter((p) => p.kind !== "breakfast" || picked.has(p.id) || bfOk).map((p) => ({ id: p.id, name_fr: p.name_fr, name_en: p.name_en, picked: picked.has(p.id) })) : [];
   const submitted = !!(await ctx.db.prepare("SELECT 1 FROM shift_checklist_submitted WHERE shift_id = ?").bind(ctx.sh.id).first());
-  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts, submitted });
+  const delivery = !!(await ctx.db.prepare("SELECT 1 FROM roles WHERE department_id = 'delivery' AND id IN (SELECT ?1 UNION SELECT role_id FROM shift_roles WHERE shift_id = ?2 UNION SELECT role_id FROM shift_segments WHERE shift_id = ?2) LIMIT 1").bind(ctx.sh.role_id, ctx.sh.id).first());
+  return c.json({ shift: { id: ctx.sh.id, start_at: ctx.sh.start_at, end_at: ctx.sh.end_at, staff_name: ctx.sh.staff_name }, lists, posts, submitted, vehicle_report: delivery ? { restaurant_id: ctx.sh.restaurant_id } : null });
 });
 app.post("/api/shifts/:id/checklist/posts", async (c) => {
   const id = intParam(c.req.param("id"));
@@ -3112,7 +3116,7 @@ app.get("/api/my-checklist", async (c) => {
       next_due: p.lists.filter((l) => l.items.some((i) => !i.done && !i.issue)).map((l) => l.due_at).sort()[0] ?? null };
   }));
   const out = entries.filter((x) => x !== null);
-  return c.json({ test, shifts: out, restock: await restockRestaurants(db, me) });
+  return c.json({ test, shifts: out, restock: await restockRestaurants(db, me), vehicle_restaurants: (await vehicleAccess(db, me)).ids });
 });
 
 // Administration: edit the lists. Items keep their id when edited, so the history of past shifts stays right.
@@ -3614,6 +3618,164 @@ app.post("/api/messages/threads/:id/leave", async (c) => {
   await db.prepare("UPDATE dm_members SET left_at = ? WHERE thread_id = ? AND staff_id = ?").bind(Date.now(), id, me.id).run();
   return c.json({ ok: true });
 });
+
+// ---------- Delivery vehicles: tires, problems reported by drivers, reminders ----------
+/** The restaurants whose vehicles one may see (administrators: all; others: where they hold a delivery role or manage delivery) and manage (administrators and delivery managers). */
+async function vehicleAccess(db: D1Database, me: Me): Promise<{ ids: number[]; manage: number[] }> {
+  if (me.is_admin) { const ids = (await db.prepare("SELECT id FROM restaurants WHERE client_id = ? ORDER BY name").bind(me.client_id).all<{ id: number }>()).results.map((r) => r.id); return { ids, manage: ids }; }
+  const roles = (await db.prepare("SELECT DISTINCT sr.restaurant_id AS id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN restaurants r ON r.id = sr.restaurant_id WHERE sr.staff_id = ? AND ro.department_id = 'delivery' AND r.client_id = ?").bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
+  const manage = (await db.prepare("SELECT DISTINCT m.restaurant_id AS id FROM managers m JOIN restaurants r ON r.id = m.restaurant_id WHERE m.staff_id = ? AND m.department_id = 'delivery' AND r.client_id = ?").bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
+  return { ids: [...new Set([...roles, ...manage])], manage };
+}
+const vClean = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim().slice(0, max) : "");
+const vehicleLabel = (v: { name: string; plate: string | null }) => (v.plate ? `${v.name} · ${v.plate}` : v.name);
+type VehicleRow = { id: number; restaurant_id: number; name: string; plate: string | null; notes: string | null; tires: string; tires_changed_on: string | null; active: number };
+
+app.get("/api/vehicles", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const access = await vehicleAccess(db, me);
+  if (!access.ids.length) return c.json({ error: "forbidden" }, 403);
+  const asked = intParam(c.req.query("restaurant"));
+  const rid = asked && access.ids.includes(asked) ? asked : access.ids[0];
+  const restaurants = (await db.prepare(`SELECT id, name FROM restaurants WHERE id IN (${access.ids.map(() => "?").join(",")}) ORDER BY name`).bind(...access.ids).all<{ id: number; name: string }>()).results;
+  const vehicles = (await db.prepare("SELECT id, restaurant_id, name, plate, notes, tires, tires_changed_on, active FROM vehicles WHERE restaurant_id = ? ORDER BY active DESC, name").bind(rid).all<VehicleRow>()).results;
+  const issues = vehicles.length ? (await db.prepare(
+    `SELECT i.id, i.vehicle_id, i.severity, i.category, i.description, i.status, i.created_at, i.resolved_at, i.resolution_note, s.first_name AS by_first, s.name AS by_name
+     FROM vehicle_issues i JOIN staff s ON s.id = i.staff_id WHERE i.vehicle_id IN (${vehicles.map(() => "?").join(",")}) AND (i.status != 'resolved' OR i.resolved_at > ?) ORDER BY i.id DESC`,
+  ).bind(...vehicles.map((v) => v.id), Date.now() - 30 * 86_400_000).all<{ id: number; vehicle_id: number; severity: string; category: string; description: string; status: string; created_at: number; resolved_at: number | null; resolution_note: string | null; by_first: string | null; by_name: string }>()).results : [];
+  const today = localNow(c.env.TIMEZONE).slice(0, 10);
+  const settings = parseVehicleSettings(await getSetting(db, me.client_id, "vehicle_maintenance"));
+  const season = currentSeason(today, settings);
+  const canManage = access.manage.includes(rid);
+  return c.json({
+    restaurants, restaurant_id: rid, can_manage: canManage, can_configure: me.is_admin, categories: VEHICLE_CATEGORIES,
+    season: { ...season, pending: vehicles.filter((v) => v.active && v.tires !== season.target).length, in_window: !season.opens || today >= season.opens },
+    vehicles: vehicles.map((v) => ({ ...v, active: v.active === 1, issues: issues.filter((i) => i.vehicle_id === v.id).map((i) => ({ ...i, by: i.by_first || i.by_name })) })),
+  });
+});
+
+app.post("/api/vehicles", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; name?: unknown; plate?: unknown; notes?: unknown; tires?: unknown }>().catch(() => ({} as { restaurant_id?: number; name?: unknown; plate?: unknown; notes?: unknown; tires?: unknown }));
+  const access = await vehicleAccess(db, me);
+  if (!b.restaurant_id || !access.manage.includes(b.restaurant_id)) return c.json({ error: "forbidden" }, 403);
+  const name = vClean(b.name, 80);
+  if (!name) return c.json({ error: "name_required" }, 400);
+  const r = await db.prepare("INSERT INTO vehicles (restaurant_id, name, plate, notes, tires, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(b.restaurant_id, name, vClean(b.plate, 20).toUpperCase() || null, vClean(b.notes, 300) || null, b.tires === "winter" ? "winter" : "summer", Date.now()).run();
+  return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+async function vehicleOf(c: Context<any>, id: number, needManage: boolean): Promise<VehicleRow | null> {
+  const db = c.env.DB as D1Database, me = c.get("me") as Me;
+  const v = await db.prepare("SELECT id, restaurant_id, name, plate, notes, tires, tires_changed_on, active FROM vehicles WHERE id = ?").bind(id).first<VehicleRow>();
+  if (!v) return null;
+  const access = await vehicleAccess(db, me);
+  return (needManage ? access.manage : access.ids).includes(v.restaurant_id) ? v : null;
+}
+
+app.put("/api/vehicles/:id", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const v = id ? await vehicleOf(c, id, true) : null;
+  if (!id || !v) return c.json({ error: "forbidden" }, 403);
+  const b = await c.req.json<{ name?: unknown; plate?: unknown; notes?: unknown; active?: unknown }>().catch(() => ({} as { name?: unknown; plate?: unknown; notes?: unknown; active?: unknown }));
+  const name = b.name === undefined ? v.name : vClean(b.name, 80);
+  if (!name) return c.json({ error: "name_required" }, 400);
+  await c.env.DB.prepare("UPDATE vehicles SET name = ?, plate = ?, notes = ?, active = ? WHERE id = ?").bind(name, b.plate === undefined ? v.plate : vClean(b.plate, 20).toUpperCase() || null, b.notes === undefined ? v.notes : vClean(b.notes, 300) || null, typeof b.active === "boolean" ? (b.active ? 1 : 0) : v.active, id).run();
+  return c.json({ ok: true });
+});
+
+// the tires were changed: winter or summer, today or on the given date
+app.post("/api/vehicles/:id/tires", async (c) => {
+  const id = intParam(c.req.param("id"));
+  const v = id ? await vehicleOf(c, id, true) : null;
+  if (!id || !v) return c.json({ error: "forbidden" }, 403);
+  const b = await c.req.json<{ to?: unknown; changed_on?: unknown; note?: unknown }>().catch(() => ({} as { to?: unknown; changed_on?: unknown; note?: unknown }));
+  if (b.to !== "winter" && b.to !== "summer") return c.json({ error: "invalid_tires" }, 400);
+  const today = localNow(c.env.TIMEZONE).slice(0, 10);
+  const on = typeof b.changed_on === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.changed_on) && b.changed_on <= today ? b.changed_on : today;
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE vehicles SET tires = ?, tires_changed_on = ? WHERE id = ?").bind(b.to, on, id),
+    c.env.DB.prepare("INSERT INTO vehicle_tire_changes (vehicle_id, to_tires, changed_on, staff_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, b.to, on, c.get("me").id, vClean(b.note, 200) || null, Date.now()),
+  ]);
+  return c.json({ ok: true, tires: b.to, tires_changed_on: on });
+});
+
+// a driver (or a manager) reports a problem: the people who look after the vehicles are told at once
+app.post("/api/vehicles/:id/issues", async (c) => {
+  const id = intParam(c.req.param("id")), me = c.get("me"), db = c.env.DB;
+  const v = id ? await vehicleOf(c, id, false) : null;
+  if (!id || !v) return c.json({ error: "forbidden" }, 403);
+  const b = await c.req.json<{ severity?: unknown; category?: unknown; description?: unknown }>().catch(() => ({} as { severity?: unknown; category?: unknown; description?: unknown }));
+  const severity = b.severity === "urgent" ? "urgent" : b.severity === "normal" ? "normal" : null;
+  const category = (VEHICLE_CATEGORIES as readonly string[]).includes(b.category as string) ? (b.category as string) : null;
+  const description = vClean(b.description, 1000);
+  if (!severity || !category || description.length < 3) return c.json({ error: "invalid_issue" }, 400);
+  const recent = await db.prepare("SELECT count(*) AS n FROM vehicle_issues WHERE staff_id = ? AND created_at > ?").bind(me.id, Date.now() - 3600_000).first<{ n: number }>();
+  if ((recent?.n ?? 0) >= 10) return c.json({ error: "too_many_requests" }, 429);
+  const r = await db.prepare("INSERT INTO vehicle_issues (vehicle_id, staff_id, severity, category, description, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, me.id, severity, category, description, Date.now()).run();
+  const issueId = r.meta.last_row_id as number;
+  c.executionCtx.waitUntil((async () => {
+    try {
+      const resto = (await db.prepare("SELECT name FROM restaurants WHERE id = ?").bind(v.restaurant_id).first<{ name: string }>())?.name ?? "";
+      const people = (await db.prepare("SELECT id FROM staff WHERE client_id = ? AND active = 1 AND id != ? AND (is_admin = 1 OR id IN (SELECT staff_id FROM managers WHERE restaurant_id = ? AND department_id = 'delivery'))").bind(me.client_id, me.id, v.restaurant_id).all<{ id: number }>()).results.map((x) => x.id);
+      await notifyPeople(c.env as Env, me.client_id, people, { email: false, sms: false }, (lang, sms, k) => issueNotice(lang, { vehicle: vehicleLabel(v), restaurant: resto, by: me.name.split(" ")[0], severity, category: category!, description, url: k.url, brand: k.brand, sms }), severity === "urgent" ? "vehicle_issue_urgent" : "vehicle_issue", "/?view=checklist&sub=vehicles");
+    } catch { /* the report is saved whatever happens to the notice */ }
+  })());
+  return c.json({ id: issueId }, 201);
+});
+
+app.put("/api/vehicle-issues/:id", async (c) => {
+  const id = intParam(c.req.param("id")), me = c.get("me"), db = c.env.DB;
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const row = await db.prepare("SELECT i.id, v.restaurant_id FROM vehicle_issues i JOIN vehicles v ON v.id = i.vehicle_id WHERE i.id = ?").bind(id).first<{ id: number; restaurant_id: number }>();
+  if (!row || !(await vehicleAccess(db, me)).manage.includes(row.restaurant_id)) return c.json({ error: "forbidden" }, 403);
+  const b = await c.req.json<{ status?: unknown; note?: unknown }>().catch(() => ({} as { status?: unknown; note?: unknown }));
+  if (b.status !== "open" && b.status !== "in_progress" && b.status !== "resolved") return c.json({ error: "invalid_status" }, 400);
+  const done = b.status === "resolved";
+  await db.prepare("UPDATE vehicle_issues SET status = ?, resolved_at = ?, resolved_by = ?, resolution_note = ? WHERE id = ?").bind(b.status, done ? Date.now() : null, done ? me.id : null, vClean(b.note, 300) || null, id).run();
+  return c.json({ ok: true });
+});
+
+// settings of the tire reminders (administrators)
+app.get("/api/admin/vehicle-settings", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const settings = parseVehicleSettings(await getSetting(db, cid, "vehicle_maintenance"));
+  const staff = (await db.prepare("SELECT s.id, s.name, s.email, s.phone, s.is_admin, EXISTS (SELECT 1 FROM managers m WHERE m.staff_id = s.id AND m.department_id = 'delivery') AS delivery_manager FROM staff s WHERE s.client_id = ? AND s.active = 1 ORDER BY s.name").bind(cid).all<{ id: number; name: string; email: string | null; phone: string | null; is_admin: number; delivery_manager: number }>()).results;
+  const candidates = staff.filter((x) => x.is_admin === 1 || x.delivery_manager === 1).map((x) => ({ id: x.id, name: x.name, email: x.email, phone: x.phone, is_admin: x.is_admin === 1 }));
+  const defaults = candidates.map((x) => x.id);
+  return c.json({ settings, recipients_now: settings.recipients ?? defaults, candidates, season: currentSeason(localNow(c.env.TIMEZONE).slice(0, 10), settings) });
+});
+app.put("/api/admin/vehicle-settings", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const v = validateVehicleSettings(await c.req.json().catch(() => null));
+  if ("error" in v) return c.json({ error: "invalid", field: v.error }, 400);
+  const people = new Set((await db.prepare("SELECT id FROM staff WHERE client_id = ? AND active = 1").bind(cid).all<{ id: number }>()).results.map((x) => x.id));
+  const value = { ...v.value, recipients: v.value.recipients === null ? null : v.value.recipients.filter((id) => people.has(id)) };
+  await putSettingStmt(db, cid, "vehicle_maintenance", JSON.stringify(value)).run();
+  return c.json({ ok: true, settings: value });
+});
+
+/** Every five minutes: the tire reminders that are due (once for each "days before" mark, only while some vehicle still has the wrong tires). */
+async function vehicleTick(env: Env) {
+  await ensureMigrated(env.DB);
+  const db = env.DB, now = localNow(env.TIMEZONE), today = now.slice(0, 10), hour = Number(now.slice(11, 13));
+  for (const cl of (await db.prepare("SELECT id FROM clients WHERE active = 1").all<{ id: number }>()).results) {
+    const s = parseVehicleSettings(await getSetting(db, cl.id, "vehicle_maintenance"));
+    const key = currentSeason(today, s).key;
+    const sent = (await db.prepare("SELECT offset_days FROM vehicle_notices WHERE client_id = ? AND season_key = ?").bind(cl.id, key).all<{ offset_days: number }>()).results.map((r) => r.offset_days);
+    const due = tireReminderDue(today, hour, s, sent);
+    if (!due) continue;
+    // claim: the first writer wins, so two runs never send the same reminder
+    const claim = await db.batch(due.mark.filter((m) => !sent.includes(m)).map((m) => db.prepare("INSERT OR IGNORE INTO vehicle_notices (client_id, season_key, offset_days, sent_at) VALUES (?, ?, ?, ?)").bind(cl.id, due.season.key, m, Date.now())));
+    if (!claim.some((r) => r.meta.changes)) continue;
+    const pending = (await db.prepare("SELECT v.id, v.restaurant_id, v.name, v.plate, r.name AS restaurant FROM vehicles v JOIN restaurants r ON r.id = v.restaurant_id WHERE r.client_id = ? AND v.active = 1 AND v.tires != ? ORDER BY r.name, v.name").bind(cl.id, due.season.target).all<{ id: number; restaurant_id: number; name: string; plate: string | null; restaurant: string }>()).results;
+    if (!pending.length) continue;
+    const many = new Set(pending.map((x) => x.restaurant_id)).size > 1;
+    const labels = pending.map((x) => `${vehicleLabel(x)}${many ? ` (${x.restaurant})` : ""}`);
+    const ids = s.recipients ?? (await db.prepare("SELECT id FROM staff WHERE client_id = ? AND active = 1 AND (is_admin = 1 OR id IN (SELECT staff_id FROM managers WHERE department_id = 'delivery' AND restaurant_id IN (" + [...new Set(pending.map((x) => x.restaurant_id))].join(",") + ")))").bind(cl.id).all<{ id: number }>()).results.map((x) => x.id);
+    await notifyPeople(env, cl.id, ids, { email: s.email, sms: s.sms }, (lang, sms, k) => tireNotice(lang, { season: due.season, pending: labels, url: k.url, brand: k.brand, offset: due.offset, sms }), "tire_reminder", "/?view=checklist&sub=vehicles").catch(() => {});
+  }
+}
 
 // Transcripts cost money (AI): they are made only when someone is going to read them: a deaf and mute member of the community, or everybody when the owner turned that on.
 const transcriptsForAll = async (db: D1Database, clientId: number) => (await getSetting(db, clientId, "community_transcripts_all")) === "1";
@@ -4191,6 +4353,7 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(vehicleTick(env).catch(() => {}));
     ctx.waitUntil(autoScheduleTick(env).catch(() => {})); // on its own: creating schedules takes minutes and must not hold back the reminders
     ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await fillTwilioPrices(env.DB, async (cid) => (await loadConnections(env, env.DB, cid)).twilio).catch(() => 0); await flushDeliveries(env.DB); })());
   },

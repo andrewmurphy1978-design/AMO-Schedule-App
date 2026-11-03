@@ -1109,3 +1109,8 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .dm-text{white-space:pre-wrap}.dm-time{font-size:.75rem}.dm-msg.deleted{opacity:.6}.dm-from{font-size:.8rem}.dm-del{position:absolute;top:2px;right:6px;border:0;background:transparent;color:inherit;opacity:.0;cursor:pointer}.dm-msg:hover .dm-del,.dm-del:focus{opacity:.8}
 .dm-compose textarea{width:100%}.dm-compose .actions{justify-content:space-between}
 @media (hover:none){.dm-del{opacity:.6}}
+.cl-vehicle{margin:.75rem 0;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}
+.veh-season{margin:.75rem 0}.veh-season.soon{border-left:4px solid #e0a800}.veh-card{margin:.75rem 0}.veh-card.out{border-left:4px solid #c0392b}.veh-card.inactive{opacity:.6}
+.veh-head{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}.veh-head h3{margin:0;flex:1 1 auto}.veh-out{background:#c0392b;color:#fff}
+.veh-issue{padding:.5rem .75rem;margin:.4rem 0;border-radius:10px;background:rgba(128,128,128,.12)}.veh-issue.urgent{background:rgba(192,57,43,.14)}.veh-issue.resolved{opacity:.75}.veh-desc{margin:.3rem 0;white-space:pre-wrap}
+.veh-dialog .modal-body{display:grid;gap:.75rem;min-width:min(92vw,460px)}.veh-dialog textarea{width:100%}.veh-settings{margin-top:1.5rem;padding:.75rem 1rem;border:1px solid rgba(128,128,128,.35);border-radius:10px}.veh-settings summary{cursor:pointer;font-weight:600}
