@@ -3041,6 +3041,35 @@ app.post("/api/orders", async (c) => {
   })());
   return c.json({ ok: true, name: final, created: !!r.meta.changes }, 201);
 });
+app.post("/api/orders/email", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; supplier_id?: number }>().catch(() => ({} as { restaurant_id?: number; supplier_id?: number }));
+  const rid = Number(b.restaurant_id), sid = Number(b.supplier_id);
+  if (!rid || !sid) return c.json({ error: "bad_request" }, 400);
+  if (!(await canManage(db, me, rid, "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  const sup = await db.prepare("SELECT id, name, email, customer_number FROM suppliers WHERE id = ? AND client_id = ?").bind(sid, me.client_id).first<{ id: number; name: string; email: string | null; customer_number: string | null }>();
+  if (!sup) return c.json({ error: "not_found" }, 404);
+  if (!sup.email) return c.json({ error: "no_supplier_email" }, 422);
+  const items = (await db.prepare("SELECT o.id, o.name, o.note FROM order_requests o WHERE o.restaurant_id = ?1 AND o.ordered_at IS NULL AND EXISTS (SELECT 1 FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE l.supplier_id = ?2 AND g.restaurant_id = ?1 AND lower(i.name) = lower(o.name)) ORDER BY o.name").bind(rid, sid).all<{ id: number; name: string; note: string | null }>()).results;
+  if (!items.length) return c.json({ error: "nothing_to_order" }, 422);
+  let conn = await loadConnections(c.env, db, me.client_id);
+  if (!conn.smtp && me.client_id !== 1) conn = { ...conn, smtp: (await loadConnections(c.env, db, 1)).smtp };
+  if (!conn.smtp) return c.json({ error: "email_not_configured" }, 422);
+  const brand = await loadBrand(db, me.client_id);
+  const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } };
+  const resto = (await db.prepare("SELECT name FROM restaurants WHERE id = ?").bind(rid).first<{ name: string }>())?.name ?? brand.name;
+  const me2 = await db.prepare("SELECT name, email, phone FROM staff WHERE id = ?").bind(me.id).first<{ name: string; email: string | null; phone: string | null }>();
+  const en = (await db.prepare("SELECT lang FROM staff WHERE id = ?").bind(me.id).first<{ lang: string | null }>())?.lang === "en";
+  const lines = items.map((o) => `- ${o.name}${o.note ? ` (${o.note})` : ""}`).join("\n");
+  const text = en
+    ? `Hello,\n\nPlease find our order for ${resto}${sup.customer_number ? ` (customer no. ${sup.customer_number})` : ""}:\n\n${lines}\n\nThank you!\n${me2?.name ?? ""}${me2?.phone ? `\n${me2.phone}` : ""}${me2?.email ? `\n${me2.email}` : ""}`
+    : `Bonjour,\n\nVoici notre commande pour ${resto}${sup.customer_number ? ` (n° de client ${sup.customer_number})` : ""} :\n\n${lines}\n\nMerci!\n${me2?.name ?? ""}${me2?.phone ? `\n${me2.phone}` : ""}${me2?.email ? `\n${me2.email}` : ""}`;
+  const r = await deliver(db, smtp, "email", sup.email, { subject: en ? `Order – ${resto}` : `Commande – ${resto}`, text }, "supplier_order", me.id);
+  if (!r.ok) return c.json({ error: "send_failed", detail: r.error ?? null }, 502);
+  const now = Date.now();
+  await db.batch(items.map((o) => db.prepare("UPDATE order_requests SET ordered_at = ?, ordered_by = ?, supplier_id = ? WHERE id = ? AND ordered_at IS NULL").bind(now, me.id, sid, o.id)));
+  return c.json({ ok: true, count: items.length });
+});
 app.put("/api/orders/:id/ordered", async (c) => {
   const me = c.get("me"), db = c.env.DB, id = intParam(c.req.param("id"));
   const b = await c.req.json<{ supplier_id?: number | null }>().catch(() => ({} as { supplier_id?: number | null }));
