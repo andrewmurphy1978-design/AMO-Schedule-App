@@ -2550,7 +2550,9 @@ async function renderMessages(box) {
   }
   if (state.dmThread) { box.replaceChildren(pane); await renderPane(); return; }
   setOpen(false);
-  box.replaceChildren(...sideHead()); paintList();
+  // phone: the conversations start at the top; "new message" (and "new group") are round buttons at the bottom of the screen, like Messenger
+  box.replaceChildren(search, listEl, h("p", { class: "meta dm-privacy" }, t("dmPrivacy")),
+    h("div", { class: "dm-fab" }, groupBtn, newBtn)); paintList();
   state.dmListTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmListTimer); return; } if (!document.hidden && !state.dmThread) loadThreads().then(paintList).catch(() => {}); }, 20000);
 }
 
@@ -2717,11 +2719,11 @@ async function renderCommunity() {
     try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value, media_ids: attached.map((m) => m.id) } }); body.value = ""; attached = []; drawPreviews(); await load(); } catch (err) { toast(errorText(err)); }
   } }, body, previews,
     h("div", { class: "comm-compose-actions" },
-      h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", onClick: () => picker.click() }, `📎 ${t("addMedia")}`), picker,
+      h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", "aria-label": t("addMedia"), title: t("addMedia"), onClick: () => picker.click() }, h("span", { "aria-hidden": "true" }, "📎"), h("span", { class: "btn-tx" }, ` ${t("addMedia")}`)), picker,
         h("button", { class: "btn", type: "button", "aria-label": t("recVoice"), title: t("recVoice"), onClick: () => record(false) }, "🎤"),
         h("button", { class: "btn", type: "button", "aria-label": t("recVideo"), title: t("recVideo"), onClick: () => record(true) }, "🎥"),
         h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(body, em)) }, "😊")),
-      h("button", { class: "btn primary", type: "submit" }, t("publishPost"))));
+      h("button", { class: "btn primary", type: "submit", "aria-label": t("publishPost"), title: t("publishPost") }, h("span", { class: "btn-ic", "aria-hidden": "true" }, "➤"), h("span", { class: "btn-tx" }, t("publishPost")))));
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
   const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
   const reactionBar = (x) => {

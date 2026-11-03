@@ -1156,3 +1156,21 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
   .community.dm-open{padding-top:0}
 }
 .dm-new-btn{white-space:nowrap}@media (min-width:900px){.dm-side .dm-head{flex-wrap:wrap;gap:.4rem}.dm-side .dm-head-btns{width:100%}.dm-side .dm-head-btns .btn{flex:1;padding:.45rem .6rem;font-size:.9rem}}
+
+/* ---- Communities screen: everything fits the width; icons only on a phone ---- */
+.community,.community .comm-compose,.community .comm-feed,.community .post,.community .comm-pills{min-width:0;max-width:100%}
+.comm-compose textarea{box-sizing:border-box;max-width:100%}
+.comm-compose-actions{min-width:0}.comm-tools{min-width:0}
+.comm-compose .btn-ic{display:none}
+.post-body,.reply .post-body{overflow-wrap:anywhere}
+@media (max-width:899px){
+  .comm-compose .btn-tx{display:none}.comm-compose .btn-ic{display:inline}
+  .comm-compose-actions .btn{min-width:44px;min-height:44px;padding:.4rem .6rem}
+  .comm-compose-actions>.btn.primary{min-width:52px}
+  .community>h2{display:none}                                  /* the tabs say where we are: more room for the content */
+  .dm-fab{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;align-items:flex-end;gap:.6rem;z-index:20}
+  .dm-fab .dm-new-btn{width:56px;height:56px;border-radius:50%;padding:0;font-size:1.4rem;box-shadow:0 3px 10px rgba(0,0,0,.3);display:inline-flex;align-items:center;justify-content:center}
+  .dm-fab .dm-new-btn:not(.primary){width:44px;height:44px;font-size:1.15rem;background:var(--card,#fff)}
+  .community .dm>.dm-list{padding-bottom:.5rem}
+  .community .dm>.dm-privacy{padding-bottom:5rem}
+}
