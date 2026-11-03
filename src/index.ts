@@ -1214,6 +1214,7 @@ app.post("/api/staff", requireAdmin, async (c) => {
       .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null, c.get("me").client_id)
       .run();
     emit(c, "staff.created", () => staffData(c.env.DB, r.meta.last_row_id as number));
+    if (b.email?.trim()) c.executionCtx.waitUntil(sendWelcome(c.env, r.meta.last_row_id as number));
     return c.json({ id: r.meta.last_row_id }, 201);
   } catch {
     return c.json({ error: "email_taken" }, 409);
@@ -3511,6 +3512,28 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   });
 });
 
+/** Welcome email with the link and the first-time procedure, in the language of the employee's file. Never throws. */
+async function sendWelcome(env: Env, staffId: number): Promise<void> {
+  try {
+    const db = env.DB;
+    const st = await db.prepare("SELECT id, name, first_name, email, lang, active, client_id FROM staff WHERE id = ?").bind(staffId).first<{ id: number; name: string; first_name: string | null; email: string | null; lang: string | null; active: number | null; client_id: number }>();
+    if (!st?.email || st.active === 0) return;
+    let conn = await loadConnections(env, db, st.client_id);
+    if (!conn.smtp && st.client_id !== 1) conn = { ...conn, smtp: (await loadConnections(env, db, 1)).smtp };
+    if (!conn.smtp) return;
+    const brand = await loadBrand(db, st.client_id);
+    const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } };
+    await deliver(db, smtp, "email", st.email, T.welcome(st.lang === "en" ? "en" : "fr", { name: st.first_name || st.name, brand: brand.name, url: conn.appUrl, email: st.email }), "welcome", st.id);
+  } catch { /* the welcome email is a courtesy */ }
+}
+
+app.post("/api/staff/:id/welcome", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  c.executionCtx.waitUntil(sendWelcome(c.env, id));
+  return c.json({ ok: true });
+});
+
 app.put("/api/staff/:id", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
@@ -3539,6 +3562,7 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   if (oldEmail && oldEmail !== newEmail) {
     await c.env.DB.batch(["sessions", "login_passwords", "passkeys", "login_codes"].map((t) => c.env.DB.prepare(`DELETE FROM ${t} WHERE email = ?`).bind(oldEmail)));
   }
+  if (newEmail && newEmail !== oldEmail) c.executionCtx.waitUntil(sendWelcome(c.env, id)); // an address was added or changed
   emit(c, "staff.updated", () => staffData(c.env.DB, id));
   return c.json({ ok: true });
 });

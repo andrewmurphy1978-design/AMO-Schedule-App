@@ -68,3 +68,15 @@ test("message body is base64 and wrapped", () => {
   assert.ok(body.split("\r\n").every((l) => l.length <= 76));
   assert.equal(atob(body.replace(/\r\n/g, "").trim()), "x".repeat(300));
 });
+
+test("the welcome email carries the link, the address and the procedure, in the employee's language", async () => {
+  const { T } = await import("../src/templates.ts");
+  const fr = T.welcome("fr", { name: "Haley", brand: "Mikes", url: "https://mikes.andrewmurphy.online", email: "haley@exemple.com" });
+  assert.match(fr.subject, /Bienvenue/);
+  assert.ok(fr.text.includes("https://mikes.andrewmurphy.online") && fr.text.includes("haley@exemple.com") && fr.text.includes("Haley"));
+  assert.match(fr.text, /biométrie/);
+  const en = T.welcome("en", { name: "Haley", brand: "Mikes", url: "https://mikes.andrewmurphy.online", email: "haley@example.com" });
+  assert.match(en.subject, /Welcome/);
+  assert.ok(en.text.includes("https://mikes.andrewmurphy.online") && /biometrics/.test(en.text));
+  assert.ok(!T.welcome("fr", { name: "A", brand: "Mikes", url: "", email: "a@b.ca" }).text.includes("undefined"));
+});

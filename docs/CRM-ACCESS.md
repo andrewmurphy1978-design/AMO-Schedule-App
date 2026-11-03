@@ -208,6 +208,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | **Welcome email** (link + first-time procedure, in the language of the employee's file) sent when an email address is added to or changed on an employee (`POST /api/staff`, `PUT /api/staff/:id`); `POST /api/staff/:id/welcome` (admin) sends it again. Logged in `notifications` with kind `welcome`. |
 | 2026-11-03 | Changing an employee's email (`PUT /api/staff/:id`) now deletes the old address's sessions, password, passkeys and pending codes. |
 | 2026-11-03 | **First-time guidance**: install offer in the browser, then biometrics + required password in the installed app (`POST /api/account/installed`, migration 0084). |
 | 2026-11-03 | **Sign-in by password and by passkey/biometrics** (migration 0082), sign-in screen rebuilt, Account → Security tab; **signed-in indicator** on the employee list (`signed_in`, `last_seen_at`; migration 0083). Google/Apple sign-in deliberately not built (unknown emails would be refused anyway). |

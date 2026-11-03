@@ -118,6 +118,36 @@ export const T = {
       : { subject: `✅ Your shift ends in ${dur}`, short: `Remember your end-of-shift checklist · ${c.restaurant}`, text: `Mikes: your shift ends in ${dur}. Remember your end-of-shift checklist (${c.restaurant}).${c.sms || !c.url ? "" : `\n${c.url}`}` };
   },
 
+  /** Sent when an email address is added to (or changed on) an employee's file: the link and the first-time procedure. */
+  welcome: (l: Lang, c: { name: string; brand: string; url: string; email: string }): Msg =>
+    l === "fr"
+      ? {
+          subject: `Bienvenue dans l’application ${c.brand}`,
+          text: [
+            `Bonjour ${c.name},`, "",
+            `Ton compte ${c.brand} est prêt. Voici comment commencer :`, "",
+            ...(c.url ? [`1. Ouvre ce lien : ${c.url}`] : ["1. Ouvre le site de l’application."]),
+            `2. Entre ton courriel (${c.email}) et touche « Recevoir un code par courriel ». Un code à 6 chiffres t’est envoyé (regarde aussi dans tes pourriels la première fois).`,
+            "3. Entre le code. L’application te propose ensuite de s’installer sur ton téléphone ou ton ordinateur : fais-le.",
+            "4. Ouvre l’application depuis son icône (écran d’accueil ou bureau) et reconnecte-toi de la même façon.",
+            "5. Active la biométrie (visage, empreinte ou NIP Windows Hello) quand on te le propose, puis choisis ton mot de passe (au moins 10 caractères).", "",
+            "Ensuite, tu pourras te connecter en un seul geste. En cas de problème, contacte ton gestionnaire.",
+          ].join("\n"),
+        }
+      : {
+          subject: `Welcome to the ${c.brand} app`,
+          text: [
+            `Hi ${c.name},`, "",
+            `Your ${c.brand} account is ready. Here is how to get started:`, "",
+            ...(c.url ? [`1. Open this link: ${c.url}`] : ["1. Open the app’s website."]),
+            `2. Enter your email (${c.email}) and tap “Email me a code”. A 6-digit code is sent to you (check your spam folder the first time too).`,
+            "3. Enter the code. The app then offers to install itself on your phone or computer: do it.",
+            "4. Open the app from its icon (home screen or desktop) and sign in again the same way.",
+            "5. Turn on biometrics (face, fingerprint or Windows Hello PIN) when offered, then choose your password (at least 10 characters).", "",
+            "After that, you can sign in with a single gesture. If anything goes wrong, contact your manager.",
+          ].join("\n"),
+        },
+
   test: (l: Lang): Msg =>
     l === "fr" ? { subject: "Message test", text: "Mikes: ceci est un message test. La messagerie fonctionne!" } : { subject: "Test message", text: "Mikes: this is a test message. Messaging works!" },
 };
