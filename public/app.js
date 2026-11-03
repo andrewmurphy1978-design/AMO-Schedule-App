@@ -2473,10 +2473,15 @@ async function renderRestock(box, restaurantIds, mode = "restock") {
       [...INGREDIENT_CATEGORIES.map(([v, key]) => [v, t(key)]), [null, t("ingNoCategory")]].map(([cat, label]) => [label, g.items.filter((i) => (i.category || null) === cat || (cat === null && !INGREDIENT_CATEGORIES.some(([v]) => v === i.category)))]).filter(([, list]) => list.length).map(([label, list0]) => [label, ingredientTree(list0).map((x) => x.item)]).map(([label, list]) =>
         h("div", { class: "restock-cat" }, g.items.some((i) => i.category) ? h("h4", {}, label) : null,
           h("div", { class: "cl-posts", role: "group", "aria-label": `${gn(g)} · ${label}` }, list.map((i) => h("button", { type: "button", class: `chip-btn ${i.needed ? "on need" : ""}`, "aria-pressed": String(!!i.needed), title: `${LOCATION_INFO[i.location]?.[0] ?? ""} ${t(LOCATION_INFO[i.location]?.[1] ?? "locFridge")}`, onClick: () => setNeeded([i], !i.needed) }, `${i.needed ? "⚠ " : ""}${i.homemade ? "🏠 " : ""}${i.name}`))))))) : [h("div", { class: "empty" }, t("restockNoGroups"))];
-    holder.replaceChildren(h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups), toFetch);
+    // two tabs: one to choose the ingredients that are missing, one for the list to go and fetch
+    const tab = state.restockTab === "fetch" ? "fetch" : "choose";
+    const tabBar = h("div", { class: "subtabs restock-tabs", role: "tablist" }, [["choose", `✔ ${t("restockTabChoose")}`, missing.length], ["fetch", `🛒 ${t("restockTabFetch")}`, need.size]].map(([id, label, n]) =>
+      h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { state.restockTab = id; paint(); } }, label, n > 0 ? h("span", { class: "nav-badge" }, String(n)) : null)));
+    holder.replaceChildren(tabBar, ...(tab === "choose"
+      ? [h("p", { class: "meta" }, t("restockHelp")), h("h3", { class: "restock-title" }, t("restockMissingTitle")), h("div", { class: "restock-groups" }, groups)]
+      : [need.size ? toFetch : h("div", { class: "empty" }, `✓ ${t("restockNothingToFetch")}`)]));
   };
-  box.append(mode === "prep" ? null : h("p", { class: "meta" }, t("restockHelp")),
-    restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null, holder);
+  box.append(restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null, holder);
   paint();
 }
 async function checklistCard(shiftId, info, test = false) {

@@ -1267,3 +1267,5 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .veh-sum{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;cursor:pointer;list-style:none}.veh-sum::-webkit-details-marker{display:none}
 .veh-card h4{margin:1rem 0 .4rem}.veh-todo{display:grid;gap:.4rem}.veh-task{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem;padding:.5rem .75rem;border-radius:10px;background:rgba(128,128,128,.12)}.veh-task.soon{background:rgba(224,168,0,.18)}
 .veh-history{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}.veh-history li{display:flex;gap:.6rem;align-items:flex-start;padding:.4rem 0;border-bottom:1px solid rgba(128,128,128,.2)}.veh-ev-ic{width:1.6rem;text-align:center;flex:none}
+.restock-tabs{margin:.25rem 0 .75rem}.restock-tabs button{flex:1}.restock-tabs .nav-badge{margin-left:.4rem}
+.restock-tabs button{white-space:nowrap;padding:.5rem .3rem}@media (max-width:899px){.restock-tabs button{font-size:.92rem}}
