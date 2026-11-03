@@ -1288,3 +1288,27 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .inv-qty .inv-unit { width: 5.2rem; text-align: left; }
 .inv-hist summary { cursor: pointer; font-weight: 600; }
 .inv-hrow { display: flex; justify-content: space-between; gap: .6rem; padding: .25rem 0; border-bottom: 1px solid var(--line, #e5e0d8); }
+
+/* stock taking: several quantities per product, families */
+.inv-family { margin: .8rem 0 .1rem; font-size: .95rem; color: var(--brand, #da291c); text-transform: uppercase; letter-spacing: .03em; }
+.inv-row { flex-direction: column; align-items: stretch; }
+.inv-parts { display: flex; flex-direction: column; gap: .35rem; margin-top: .35rem; }
+.inv-part { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+.inv-part input[type=number] { width: 4.4rem; text-align: center; min-height: 40px; }
+.inv-part select { min-height: 40px; max-width: 9rem; }
+.inv-total { min-height: 1.2rem; margin-top: .3rem; }
+.inv-low { color: #b42318; font-weight: 700; }
+.inv-row.low { border-color: #b42318; box-shadow: inset 3px 0 0 #b42318; }
+.inv-row > .btn.small { align-self: flex-start; margin-top: .35rem; }
+.ing-pack { margin: .6rem 0; border: 1px solid var(--line, #c9c4bc); border-radius: var(--radius, 10px); padding: .5rem .7rem; }
+.ing-pack summary { cursor: pointer; font-weight: 700; }
+.inv-row .inv-name { flex: 0 0 auto; }
+.inv-part { flex-wrap: nowrap; }
+.inv-part input[type=number] { width: 3.6rem; flex: 0 0 auto; }
+.inv-part select { flex: 1 1 5rem; min-width: 0; max-width: none; }
+.inv-part .inv-unit { flex: 1 1 4rem; min-width: 0; width: auto; }
+.inv-part { display: grid; grid-template-columns: 2.2rem 3.4rem 2.2rem minmax(0, 1fr) 2.2rem; gap: .25rem; align-items: center; }
+.inv-part .icon-btn { width: 2.2rem; min-width: 0; padding: 0; height: 40px; }
+.inv-part input[type=number] { width: 100%; }
+.inv-part select { width: 100%; min-width: 0; }
+.inv-part .inv-unit { grid-column: 1 / -1; width: 100%; }

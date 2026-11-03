@@ -1,3 +1,4 @@
+import { cleanInv, parseInv, cleanParts, partsTotal, type InvSpec, type Part } from "./inventory.ts";
 import { Hono, type Context } from "hono";
 import { ensureMigrated } from "./migrate.ts";
 import { fetchAccessKeys, verifyAccessJwt } from "./access.ts";
@@ -2911,14 +2912,14 @@ async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
      JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
   ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
 }
-type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; fridge_open: boolean; homemade: boolean; components: string[]; component_qty: Record<string, { qty: number; unit: string }>; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; supplier_ids: number[]; needed?: boolean }[] };
+type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; fridge_open: boolean; homemade: boolean; components: string[]; component_qty: Record<string, { qty: number; unit: string }>; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: InvSpec | null; supplier_ids: number[]; needed?: boolean }[] };
 async function ingredientGroups(db: D1Database, restaurantId: number, needs = false): Promise<IngGroup[]> {
   const groups = (await db.prepare("SELECT id, name_fr, name_en, post_id, position FROM ingredient_groups WHERE restaurant_id = ? ORDER BY position, id").bind(restaurantId).all<Omit<IngGroup, "items">>()).results;
   if (!groups.length) return [];
-  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; fridge_open: number; homemade: number; components: string | null; component_qty: string | null; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null }>()).results;
+  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, inv FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; fridge_open: number; homemade: number; components: string | null; component_qty: string | null; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: string | null }>()).results;
   const links = (await db.prepare("SELECT l.ingredient_id, l.supplier_id FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number; supplier_id: number }>()).results;
   const need = needs ? new Set((await db.prepare("SELECT ingredient_id FROM restock_needs WHERE restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number }>()).results.map((r) => r.ingredient_id)) : null;
-  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, fridge_open: i.fridge_open === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), component_qty: (() => { try { const v = JSON.parse(i.component_qty ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } })(), prep_note: i.prep_note, portion_g: i.portion_g, portion_qty: i.portion_qty, portion_unit: i.portion_unit, supplier_ids: links.filter((l) => l.ingredient_id === i.id).map((l) => l.supplier_id), ...(need ? { needed: need.has(i.id) } : {}) })) }));
+  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, fridge_open: i.fridge_open === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), component_qty: (() => { try { const v = JSON.parse(i.component_qty ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } })(), prep_note: i.prep_note, portion_g: i.portion_g, portion_qty: i.portion_qty, portion_unit: i.portion_unit, inv: parseInv(i.inv), supplier_ids: links.filter((l) => l.ingredient_id === i.id).map((l) => l.supplier_id), ...(need ? { needed: need.has(i.id) } : {}) })) }));
 }
 app.get("/api/restock", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
@@ -2946,7 +2947,7 @@ app.get("/api/admin/ingredients", requireAdmin, async (c) => {
   const posts = (await db.prepare("SELECT id, code, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
   return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
 });
-type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; fridge_open?: boolean; homemade?: boolean; components?: string[]; component_qty?: Record<string, { qty?: number; unit?: string }>; prep_note?: string | null; portion_g?: number | null; portion_qty?: number | null; portion_unit?: string | null; supplier_ids?: number[] };
+type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; fridge_open?: boolean; homemade?: boolean; components?: string[]; component_qty?: Record<string, { qty?: number; unit?: string }>; prep_note?: string | null; portion_g?: number | null; portion_qty?: number | null; portion_unit?: string | null; supplier_ids?: number[]; inv?: unknown };
 app.put("/api/admin/ingredients", requireAdmin, async (c) => {
   const db = c.env.DB;
   const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }));
@@ -2956,7 +2957,7 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
       thaw: i.thaw && i.location === "freezer" ? 1 : 0, fopen: i.fridge_open && i.location === "backstore" ? 1 : 0, home: i.homemade ? 1 : 0, comps: i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : [], note: i.homemade ? (i.prep_note ?? "").trim().slice(0, 200) || null : null,
       cqty: ((comps: string[]) => { const o: Record<string, { qty: number; unit: string }> = {}; if (i.homemade && i.component_qty && typeof i.component_qty === "object") for (const n of comps) { const q = i.component_qty[n]; if (q && typeof q.qty === "number" && q.qty > 0 && q.qty <= 100000) o[n] = { qty: Math.round(q.qty * 1000) / 1000, unit: String(q.unit ?? "").trim().slice(0, 20) }; } return o; })(i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : []),
       portion: i.homemade && typeof i.portion_g === "number" && i.portion_g > 0 && i.portion_g <= 100000 ? Math.round(i.portion_g * 10) / 10 : null,
-      pqty: i.homemade && typeof i.portion_qty === "number" && i.portion_qty > 0 && i.portion_qty <= 10000 && (i.portion_unit ?? "").trim() ? Math.round(i.portion_qty * 100) / 100 : null, punit: i.homemade && (i.portion_unit ?? "").trim() && typeof i.portion_qty === "number" && i.portion_qty > 0 ? (i.portion_unit ?? "").trim().slice(0, 30) : null })).filter((i) => i.name) })).filter((g) => g.fr);
+      pqty: i.homemade && typeof i.portion_qty === "number" && i.portion_qty > 0 && i.portion_qty <= 10000 && (i.portion_unit ?? "").trim() ? Math.round(i.portion_qty * 100) / 100 : null, punit: i.homemade && (i.portion_unit ?? "").trim() && typeof i.portion_qty === "number" && i.portion_qty > 0 ? (i.portion_unit ?? "").trim().slice(0, 30) : null, inv: (() => { const v = cleanInv(i.inv); return v ? JSON.stringify(v) : null; })() })).filter((i) => i.name) })).filter((g) => g.fr);
   if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80 || i.comps.some((x) => x.length > 80)))) return c.json({ error: "invalid_ingredients" }, 400);
   const rid = b.restaurant_id;
   const curGroups = (await db.prepare("SELECT id FROM ingredient_groups WHERE restaurant_id = ?").bind(rid).all<{ id: number }>()).results.map((r) => r.id);
@@ -2973,8 +2974,8 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
     let gid = g.id && keepG.has(g.id) ? g.id : 0;
     if (!gid) gid = (await db.prepare("INSERT INTO ingredient_groups (restaurant_id, name_fr, name_en, post_id, position) VALUES (?, ?, ?, ?, ?)").bind(rid, g.fr, g.en || g.fr, g.post, gi + 1).run()).meta.last_row_id as number;
     await db.batch(g.items.map((i, pos) => i.id && keepI.has(i.id)
-      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, fridge_open = ?, homemade = ?, components = ?, component_qty = ?, prep_note = ?, portion_g = ?, portion_qty = ?, portion_unit = ?, position = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.id)
-      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1)));
+      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, fridge_open = ?, homemade = ?, components = ?, component_qty = ?, prep_note = ?, portion_g = ?, portion_qty = ?, portion_unit = ?, position = ?, inv = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv, i.id)
+      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, position, inv) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv)));
   }
   // suppliers: by ingredient name (the same ingredient in several posts has the same suppliers)
   const mySuppliers = new Set((await db.prepare("SELECT id FROM suppliers WHERE client_id = ?").bind(c.get("me").client_id).all<{ id: number }>()).results.map((r) => r.id));
@@ -3017,9 +3018,9 @@ type InvLine = { key: string; name: string; location: string | null; category: s
 app.get("/api/inventory", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
   if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
-  const items = (await db.prepare("SELECT min(i.name) AS name, lower(i.name) AS key, min(i.location) AS location, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name) ORDER BY min(i.location), min(i.name)").bind(rid).all<{ name: string; key: string; location: string; category: string | null }>()).results;
+  const items = (await db.prepare("SELECT min(i.name) AS name, lower(i.name) AS key, min(i.location) AS location, min(i.category) AS category, max(i.inv) AS inv FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name) ORDER BY min(i.location), min(i.name)").bind(rid).all<{ name: string; key: string; location: string; category: string | null; inv: string | null }>()).results.map((r) => ({ ...r, inv: parseInv(r.inv) }));
   const open = await db.prepare("SELECT n.id, n.started_at, s.name AS started_by FROM inventory_counts n LEFT JOIN staff s ON s.id = n.started_by WHERE n.restaurant_id = ? AND n.completed_at IS NULL ORDER BY n.id DESC LIMIT 1").bind(rid).first<{ id: number; started_at: number; started_by: string | null }>();
-  const lines = open ? (await db.prepare("SELECT key, qty, unit FROM inventory_lines WHERE count_id = ?").bind(open.id).all<{ key: string; qty: number; unit: string | null }>()).results : [];
+  const lines = open ? (await db.prepare("SELECT key, qty, unit, parts FROM inventory_lines WHERE count_id = ?").bind(open.id).all<{ key: string; qty: number; unit: string | null; parts: string | null }>()).results.map((l) => ({ key: l.key, qty: l.qty, unit: l.unit, parts: ((): Part[] => { try { return cleanParts(JSON.parse(l.parts ?? "null")) ?? [{ q: l.qty, u: "unit" }]; } catch { return [{ q: l.qty, u: "unit" }]; } })() })) : [];
   const last = await db.prepare("SELECT id, completed_at FROM inventory_counts WHERE restaurant_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC, id DESC LIMIT 1").bind(rid).first<{ id: number; completed_at: number }>();
   const lastLines = last ? (await db.prepare("SELECT key, qty, unit FROM inventory_lines WHERE count_id = ?").bind(last.id).all<{ key: string; qty: number; unit: string | null }>()).results : [];
   const history = (await db.prepare("SELECT n.id, n.started_at, n.completed_at, s.name AS completed_by, n.note, (SELECT count(*) FROM inventory_lines l WHERE l.count_id = n.id) AS counted FROM inventory_counts n LEFT JOIN staff s ON s.id = n.completed_by WHERE n.restaurant_id = ? AND n.completed_at IS NOT NULL ORDER BY n.completed_at DESC, n.id DESC LIMIT 15").bind(rid).all()).results;
@@ -3045,16 +3046,24 @@ async function openInventory(c: Context<any>): Promise<{ id: number; restaurant_
 }
 app.put("/api/inventory/:id/lines", async (c) => {
   const n = await openInventory(c); if (n instanceof Response) return n;
-  const b = await c.req.json<{ lines?: { key?: string; name?: string; location?: string; category?: string; qty?: number | null; unit?: string }[] }>().catch(() => ({} as { lines?: [] }));
+  const b = await c.req.json<{ lines?: { key?: string; name?: string; location?: string; category?: string; qty?: number | null; unit?: string; parts?: unknown }[] }>().catch(() => ({} as { lines?: [] }));
   if (!Array.isArray(b.lines) || b.lines.length > 500) return c.json({ error: "invalid_lines" }, 400);
+  // how each product is packaged (to turn "3 bundles + 40 boxes" into a total)
+  const specs = new Map((await c.env.DB.prepare("SELECT lower(i.name) AS k, max(i.inv) AS inv FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name)").bind(n.restaurant_id).all<{ k: string; inv: string | null }>()).results.map((r) => [r.k, parseInv(r.inv)] as const));
   const st: D1PreparedStatement[] = [];
   for (const l of b.lines) {
     const key = (l.key ?? "").trim().toLowerCase().slice(0, 120);
     if (!key) return c.json({ error: "invalid_lines" }, 400);
-    if (l.qty === null || l.qty === undefined) { st.push(c.env.DB.prepare("DELETE FROM inventory_lines WHERE count_id = ? AND key = ?").bind(n.id, key)); continue; }
-    if (typeof l.qty !== "number" || !Number.isFinite(l.qty) || l.qty < 0 || l.qty > 1_000_000) return c.json({ error: "invalid_lines" }, 400);
-    st.push(c.env.DB.prepare("INSERT INTO inventory_lines (count_id, key, name, location, category, qty, unit) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (count_id, key) DO UPDATE SET qty = ?6, unit = ?7")
-      .bind(n.id, key, (l.name ?? key).trim().slice(0, 120), (l.location ?? "").slice(0, 20) || null, (l.category ?? "").slice(0, 40) || null, l.qty, (l.unit ?? "").trim().slice(0, 20) || null));
+    const empty = l.qty === null || l.qty === undefined;
+    let parts: Part[] | null = null;
+    if (l.parts !== undefined && l.parts !== null) { parts = cleanParts(l.parts); if (!parts) { if (Array.isArray(l.parts) && !l.parts.length) { st.push(c.env.DB.prepare("DELETE FROM inventory_lines WHERE count_id = ? AND key = ?").bind(n.id, key)); continue; } return c.json({ error: "invalid_lines" }, 400); } }
+    else if (empty) { st.push(c.env.DB.prepare("DELETE FROM inventory_lines WHERE count_id = ? AND key = ?").bind(n.id, key)); continue; }
+    else { if (typeof l.qty !== "number" || !Number.isFinite(l.qty) || l.qty < 0 || l.qty > 1_000_000) return c.json({ error: "invalid_lines" }, 400); parts = [{ q: l.qty, u: "unit" }]; }
+    const spec = specs.get(key) ?? null;
+    parts = parts.map((p) => (p.u === "pack" && spec?.pack_unit ? { ...p, label: spec.pack_unit } : p.u === "unit" && spec?.base_unit ? { ...p, label: spec.base_unit } : p)); // names kept with the count, for the history
+    const total = partsTotal(parts, spec);
+    st.push(c.env.DB.prepare("INSERT INTO inventory_lines (count_id, key, name, location, category, qty, unit, parts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (count_id, key) DO UPDATE SET qty = ?6, unit = ?7, parts = ?8")
+      .bind(n.id, key, (l.name ?? key).trim().slice(0, 120), (l.location ?? "").slice(0, 20) || null, (l.category ?? "").slice(0, 40) || null, total, (spec?.base_unit ?? (l.unit ?? "").trim()).slice(0, 20) || null, JSON.stringify(parts)));
   }
   if (st.length) await c.env.DB.batch(st);
   return c.json({ ok: true });
@@ -3076,7 +3085,7 @@ app.get("/api/inventory/:id", async (c) => {
   const n = id ? await db.prepare("SELECT n.id, n.restaurant_id, n.started_at, n.completed_at, n.note, s.name AS completed_by FROM inventory_counts n LEFT JOIN staff s ON s.id = n.completed_by WHERE n.id = ?").bind(id).first<{ restaurant_id: number }>() : null;
   if (!n) return c.json({ error: "not_found" }, 404);
   if (!(await restockRestaurants(db, me)).includes(n.restaurant_id)) return c.json({ error: "forbidden" }, 403);
-  const lines = (await db.prepare("SELECT key, name, location, category, qty, unit FROM inventory_lines WHERE count_id = ? ORDER BY location, name").bind(id).all<InvLine>()).results;
+  const lines = (await db.prepare("SELECT key, name, location, category, qty, unit, parts FROM inventory_lines WHERE count_id = ? ORDER BY location, name").bind(id).all<InvLine & { parts: string | null }>()).results.map((l) => ({ ...l, parts: ((): Part[] | null => { try { return cleanParts(JSON.parse(l.parts ?? "null")); } catch { return null; } })() }));
   return c.json({ ...n, lines });
 });
 

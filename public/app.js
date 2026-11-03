@@ -2391,7 +2391,7 @@ async function renderInventory(box, restaurantIds) {
       if (!e.currentTarget.open || body.dataset.loaded) return; body.dataset.loaded = "1";
       try {
         const x = await api(`/inventory/${n.id}`);
-        body.replaceChildren(...(x.note ? [h("p", { class: "meta" }, x.note)] : []), ...x.lines.map((l) => h("div", { class: "inv-hrow" }, h("span", {}, `${LOCATION_INFO[l.location]?.[0] ?? ""} ${l.name}`), h("b", {}, fmt(l)))));
+        body.replaceChildren(...(x.note ? [h("p", { class: "meta" }, x.note)] : []), ...x.lines.map((l) => h("div", { class: "inv-hrow" }, h("span", {}, `${LOCATION_INFO[l.location]?.[0] ?? ""} ${l.name}`), h("b", {}, l.parts?.length && (l.parts.length > 1 || l.parts[0].u !== "unit") ? `${l.parts.map((p) => `${p.q} ${p.label ?? ""}`.trim()).join(" + ")} = ${fmt(l)}` : fmt(l)))));
       } catch (err) { body.textContent = errorText(err); }
     } }, h("summary", {}, `${stamp(n.completed_at)} · ${n.counted} ${t("invCounted")}${n.completed_by ? ` · ${n.completed_by}` : ""}`), body);
   })] : [];
@@ -2403,10 +2403,19 @@ async function renderInventory(box, restaurantIds) {
     return;
   }
   // ---- a count in progress ----
-  const counted = new Map(d.open.lines.map((l) => [l.key, { qty: l.qty, unit: l.unit ?? "" }]));
+  // a product's count is a list of quantities: { q, u: "pack" | "unit" | "other", label }  (3 bundles + 40 boxes)
+  const specOf = (it) => it.inv ?? {};
+  const baseLabel = (it) => specOf(it).base_unit || t("invUnitPiece");
+  const hasPack = (it) => !!(specOf(it).pack_unit && specOf(it).pack_qty);
+  const totalOf = (it, parts) => Math.round(parts.reduce((a, p) => a + (p.u === "pack" ? (Number(p.q) || 0) * (specOf(it).pack_qty || 1) : p.u === "unit" ? Number(p.q) || 0 : 0), 0) * 1000) / 1000;
+  const weightOf = (it, parts) => { const sp = specOf(it), per = sp.unit_weight ?? (sp.pack_weight && sp.pack_qty ? sp.pack_weight / sp.pack_qty : null); let w = 0, k = false;
+    for (const p of parts) { const q = Number(p.q) || 0; if (p.u === "pack" && sp.pack_weight) { w += q * sp.pack_weight; k = true; } else if (p.u === "pack" && per && sp.pack_qty) { w += q * sp.pack_qty * per; k = true; } else if (p.u === "unit" && per) { w += q * per; k = true; } }
+    return k ? Math.round(w * 100) / 100 : null; };
+  const labelOf = (it, p) => (p.u === "pack" ? specOf(it).pack_unit : p.u === "other" ? p.label || "?" : baseLabel(it));
+  const fmtParts = (it, parts) => parts.map((p) => `${p.q} ${labelOf(it, p)}`).join(" + ");
+  const filled = (parts) => parts.filter((p) => p.q !== "" && p.q !== null && Number.isFinite(Number(p.q)) && Number(p.q) >= 0).map((p) => ({ q: Number(p.q), u: p.u, ...(p.u === "other" && p.label ? { label: p.label } : {}) }));
+  const counted = new Map(d.open.lines.map((l) => [l.key, l.parts]));
   const lastBy = new Map((d.last?.lines ?? []).map((l) => [l.key, l]));
-  const units = ["kg", "g", "L", "mL", t("invUnitPiece"), t("invUnitCase"), t("invUnitBox"), t("invUnitBag")];
-  const listId = `inv-units-${rid}`;
   const progress = h("strong", {});
   const paintProgress = () => { progress.textContent = `${counted.size} / ${d.items.length} ${t("invCounted")}`; };
   const locs = [...new Set(d.items.map((i) => i.location))];
@@ -2415,36 +2424,49 @@ async function renderInventory(box, restaurantIds) {
   const rows = h("div", { class: "inv-rows" });
   const q = h("input", { type: "search", placeholder: t("invSearch"), "aria-label": t("invSearch"), onInput: () => paintRows() });
   const timers = new Map();
+  const lineOf = (it) => ({ key: it.key, name: it.name, location: it.location, category: it.category, parts: counted.get(it.key) ?? [] });
   const save = (it) => {
     clearTimeout(timers.get(it.key));
-    timers.set(it.key, setTimeout(async () => {
-      const c = counted.get(it.key);
-      try { await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: [{ key: it.key, name: it.name, location: it.location, category: it.category, qty: c ? c.qty : null, unit: c?.unit ?? "" }] } }); }
-      catch (err) { toast(errorText(err)); }
-    }, 500));
+    timers.set(it.key, setTimeout(async () => { try { await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: [lineOf(it)] } }); } catch (err) { toast(errorText(err)); } }, 500));
   };
   const paintChips = () => chips.replaceChildren(...[["all", "📋", t("invAll")], ...locs.map((l) => [l, LOCATION_INFO[l]?.[0] ?? "📍", LOCATION_INFO[l] ? t(LOCATION_INFO[l][1]) : l])].map(([id, ic, label]) => {
     const n = d.items.filter((i) => id === "all" || i.location === id), done = n.filter((i) => counted.has(i.key)).length;
     return h("button", { type: "button", class: `chip-btn${state.invLoc === id ? " on" : ""}`, "aria-pressed": String(state.invLoc === id), onClick: () => { state.invLoc = id; paintChips(); paintRows(); } }, `${ic} ${label} ${done}/${n.length}`);
   }));
+  const productRow = (it) => {
+    const prev = lastBy.get(it.key), sp = specOf(it);
+    let parts = (counted.get(it.key) ?? []).map((p) => ({ ...p }));
+    if (!parts.length) parts = [{ q: "", u: hasPack(it) ? "pack" : "unit" }];
+    const row = h("div", { class: "inv-row" }), list = h("div", { class: "inv-parts" }), total = h("div", { class: "inv-total" });
+    const commit = () => { const f = filled(parts); if (f.length) counted.set(it.key, f); else counted.delete(it.key); paintTotal(); paintProgress(); paintChips(); save(it); };
+    const paintTotal = () => {
+      const f = filled(parts), tot = totalOf(it, f), w = weightOf(it, f);
+      row.classList.toggle("done", f.length > 0);
+      row.classList.toggle("low", f.length > 0 && !!sp.min_qty && tot < sp.min_qty);
+      total.replaceChildren(...(f.length ? [h("b", {}, `= ${tot} ${baseLabel(it)}`), w !== null ? h("span", { class: "meta" }, ` · ≈ ${w} kg`) : null, sp.min_qty && tot < sp.min_qty ? h("span", { class: "inv-low" }, ` ⚠ ${t("invBelowMin")} (${sp.min_qty})`) : null] : []));
+    };
+    const paintParts = () => list.replaceChildren(...parts.map((p, idx) => {
+      const qty = h("input", { type: "number", inputmode: "decimal", min: "0", step: "any", value: p.q === "" ? "" : String(p.q), placeholder: "—", "aria-label": `${it.name} — ${t("invQty")}`, onInput: () => { p.q = qty.value.trim() === "" ? "" : Number(qty.value); commit(); } });
+      const step = (dx) => { p.q = Math.max(0, Math.round(((Number(p.q) || 0) + dx) * 100) / 100); qty.value = String(p.q); commit(); };
+      const kinds = [...(hasPack(it) ? [["pack", sp.pack_unit]] : []), ["unit", baseLabel(it)], ["other", t("invOther")]];
+      const sel = h("select", { "aria-label": t("invUnit"), onChange: () => { p.u = sel.value; if (p.u !== "other") delete p.label; paintParts(); commit(); } }, kinds.map(([v, l]) => h("option", { value: v, selected: p.u === v }, l)));
+      const other = p.u === "other" ? h("input", { class: "inv-unit", maxLength: 20, value: p.label ?? "", placeholder: t("invOtherLabel"), "aria-label": t("invOtherLabel"), onInput: () => { p.label = other.value; commit(); } }) : null;
+      return h("div", { class: "inv-part" }, h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), qty, h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+"), sel,
+        parts.length > 1 ? h("button", { type: "button", class: "icon-btn", "aria-label": t("invRemovePart"), title: t("invRemovePart"), onClick: () => { parts.splice(idx, 1); paintParts(); commit(); } }, "✕") : h("span", {}), other);
+    }));
+    const add = h("button", { type: "button", class: "btn small", onClick: () => { const used = new Set(parts.map((x) => x.u)); parts.push({ q: "", u: hasPack(it) && !used.has("pack") ? "pack" : !used.has("unit") ? "unit" : "other" }); paintParts(); list.querySelector(".inv-part:last-child input")?.focus(); } }, `+ ${t("invAddQty")}`);
+    row.append(h("div", { class: "inv-name" }, h("b", {}, it.name), hasPack(it) ? h("small", { class: "meta" }, `1 ${sp.pack_unit} = ${sp.pack_qty} ${baseLabel(it)}`) : null,
+      prev ? h("small", { class: "meta" }, `${t("invPrev")} : ${prev.parts?.length ? fmtParts(it, prev.parts) : `${prev.qty} ${prev.unit ?? ""}`}${prev.parts?.length > 1 || (prev.parts?.[0] && prev.parts[0].u !== "unit") ? ` (= ${prev.qty} ${prev.unit ?? baseLabel(it)})` : ""}`) : null), list, add, total);
+    paintParts(); paintTotal();
+    return row;
+  };
   const paintRows = () => {
     const term = q.value.trim().toLowerCase();
-    rows.replaceChildren(...d.items.filter((i) => (state.invLoc === "all" || i.location === state.invLoc) && (!term || i.name.toLowerCase().includes(term))).map((it) => {
-      const prev = lastBy.get(it.key), cur = counted.get(it.key);
-      const qty = h("input", { type: "number", inputmode: "decimal", min: "0", step: "any", value: cur ? String(cur.qty) : "", placeholder: "—", "aria-label": `${it.name} — ${t("invQty")}` });
-      const unit = h("input", { class: "inv-unit", list: listId, maxLength: 20, value: cur?.unit ?? prev?.unit ?? "", placeholder: t("invUnit"), "aria-label": `${it.name} — ${t("invUnit")}` });
-      const row = h("div", { class: `inv-row${cur ? " done" : ""}` });
-      const update = () => {
-        const v = qty.value.trim() === "" ? null : Number(qty.value);
-        if (v === null || !Number.isFinite(v) || v < 0) { counted.delete(it.key); } else counted.set(it.key, { qty: v, unit: unit.value.trim() });
-        row.classList.toggle("done", counted.has(it.key)); paintProgress(); paintChips(); save(it);
-      };
-      qty.addEventListener("input", update); unit.addEventListener("input", () => { if (counted.has(it.key)) update(); });
-      const step = (dx) => { qty.value = String(Math.max(0, Math.round(((Number(qty.value) || 0) + dx) * 100) / 100)); update(); };
-      row.append(h("div", { class: "inv-name" }, h("b", {}, it.name), prev ? h("small", { class: "meta" }, `${t("invPrev")} : ${fmt(prev)}`) : null),
-        h("div", { class: "inv-qty" }, h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), qty, h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+"), unit));
-      return row;
-    }));
+    const list = d.items.filter((i) => (state.invLoc === "all" || i.location === state.invLoc) && (!term || i.name.toLowerCase().includes(term) || (i.inv?.family ?? "").toLowerCase().includes(term)))
+      .sort((a, b) => (a.inv?.family ?? "").localeCompare(b.inv?.family ?? "", getLang()) || a.name.localeCompare(b.name, getLang()));
+    const out = []; let fam = null;
+    for (const it of list) { const f = it.inv?.family ?? null; if (f && f !== fam) out.push(h("h4", { class: "inv-family" }, f)); fam = f; out.push(productRow(it)); }
+    rows.replaceChildren(...out);
     if (!rows.children.length) rows.append(h("p", { class: "meta" }, t("invNoMatch")));
   };
   const finish = h("button", { class: "btn primary", type: "button", onClick: async () => {
@@ -2453,13 +2475,13 @@ async function renderInventory(box, restaurantIds) {
     if (!(await ask(left > 0 ? t("invFinishMissing").replace("{n}", left) : t("invFinishConfirm"), t("invFinish")))) return;
     timers.forEach((tm) => clearTimeout(tm));
     try {
-      await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: d.items.filter((i) => counted.has(i.key)).map((it) => ({ key: it.key, name: it.name, location: it.location, category: it.category, qty: counted.get(it.key).qty, unit: counted.get(it.key).unit })) } });
+      await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: d.items.filter((i) => counted.has(i.key)).map(lineOf) } });
       await api(`/inventory/${d.open.id}/complete`, { method: "POST", body: {} }); toast(t("invDone")); render();
     } catch (err) { toast(errorText(err)); }
   } }, `✔ ${t("invFinish")}`);
   const cancel = h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("invCancelConfirm")))) return; try { await api(`/inventory/${d.open.id}`, { method: "DELETE" }); render(); } catch (err) { toast(errorText(err)); } } }, t("invCancel"));
   box.append(h("section", { class: "card inv-head" }, h("div", {}, h("b", {}, `🧮 ${t("invInProgress")}`), h("small", { class: "meta", style: "display:block" }, `${d.open.started_by ?? "—"} · ${stamp(d.open.started_at)}`)), progress),
-    h("datalist", { id: listId }, units.map((u) => h("option", { value: u }))), chips, q, rows, h("div", { class: "actions" }, finish, cancel), ...hist);
+    chips, q, rows, h("div", { class: "actions" }, finish, cancel), ...hist);
   paintProgress(); paintChips(); paintRows();
 }
 
@@ -4467,6 +4489,18 @@ function ingredientsPanel() {
     const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer", "sacs", "paquets", "caisses", "boîtes", "bouteilles"].map((u) => h("option", { value: u })));
     const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
     const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, qtyBox, h("datalist", { id: "ing-qty-units" }, ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé", "unité", "tranche", "sac", "paquet", "caisse", "boîte", "bouteille"].map((u) => h("option", { value: u }))), note, portion, portionCount);
+    // how it is packaged and counted (used by the Inventory screen)
+    const iv = cur.inv ?? {};
+    const ivIn = (key, extra = {}) => h("input", { value: iv[key] ?? "", "aria-label": t(`invF_${key}`), autocomplete: "off", ...extra });
+    const ivf = { family: ivIn("family", { maxLength: 60, list: "ing-families" }), sku: ivIn("sku", { maxLength: 40 }), base_unit: ivIn("base_unit", { maxLength: 20, list: "ing-units" }), pack_unit: ivIn("pack_unit", { maxLength: 20, list: "ing-units" }),
+      pack_qty: ivIn("pack_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_weight: ivIn("pack_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }), unit_weight: ivIn("unit_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }),
+      min_qty: ivIn("min_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_cost: ivIn("pack_cost", { type: "number", min: "0", step: "0.01", inputmode: "decimal" }) };
+    const families = [...new Set(st.groups.flatMap((g) => g.items.map((i) => i.inv?.family)).filter(Boolean))];
+    const lab = (k) => h("label", { class: "field" }, h("span", {}, t(`invF_${k}`)), ivf[k]);
+    const packBox = h("details", { class: "ing-pack", open: Object.values(iv).some((v) => v) }, h("summary", {}, `📦 ${t("ingPackTitle")}`), h("p", { class: "meta" }, t("ingPackHelp")),
+      h("datalist", { id: "ing-families" }, families.map((f) => h("option", { value: f }))),
+      lab("family"), h("div", { class: "ing-two" }, lab("base_unit"), lab("sku")), h("div", { class: "ing-two" }, lab("pack_unit"), lab("pack_qty")),
+      h("div", { class: "ing-two" }, lab("pack_weight"), lab("unit_weight")), h("div", { class: "ing-two" }, lab("min_qty"), lab("pack_cost")));
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); drawQty(); };
@@ -4482,7 +4516,7 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
+        const fields = { inv: Object.fromEntries(Object.entries(ivf).map(([k, el]) => [k, el.value.trim()])), name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
           portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
@@ -4501,6 +4535,7 @@ function ingredientsPanel() {
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCategory")), cat), h("label", { class: "field" }, h("span", {}, t("ingLocation")), loc)),
       thawRow, fopenRow,
       h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
+      packBox,
       h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
       h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
       err,
