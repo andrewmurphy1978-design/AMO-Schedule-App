@@ -90,6 +90,7 @@ import m0087 from "../migrations/0087_vehicles.sql";
 import m0088 from "../migrations/0088_session_devices.sql";
 import m0089 from "../migrations/0089_dm_media_reactions.sql";
 import m0090 from "../migrations/0090_voice_contacts.sql";
+import m0091 from "../migrations/0091_inventory.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -182,6 +183,7 @@ const MIGRATIONS: [string, string][] = [
   ["0088_session_devices", m0088],
   ["0089_dm_media_reactions", m0089],
   ["0090_voice_contacts", m0090],
+  ["0091_inventory", m0091],
 ];
 
 const statements = (sql: string) =>

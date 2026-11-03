@@ -2161,15 +2161,16 @@ async function renderChecklist() {
   state.restock = restock;
   const hasEnd = shifts.length > 0 || (test && state.me.me.is_admin);
   let sub = state.listsSub ?? (hasEnd ? "end" : "restock");
-  if ((sub === "restock" || sub === "prep" || sub === "orders") && !restock.length) sub = "end";
+  if ((sub === "restock" || sub === "prep" || sub === "orders" || sub === "inventory") && !restock.length) sub = "end";
   if (sub === "vehicles" && !vehicleIds.length) sub = "end";
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
   // on a phone the tabs are icons only, so all of them show on the screen (the name stays as tooltip and for screen readers)
-  if (restock.length || vehicleIds.length) box.append(h("div", { class: "subtabs lists-tabs", role: "tablist" }, [["end", t("listsEndOfShift"), "✅"], ...(restock.length ? [["restock", t("listsRestock"), "📦"], ["prep", t("listsPrep"), "🥣"], ["orders", t("listsOrders"), "🛒"]] : []), ...(vehicleIds.length ? [["vehicles", t("vehTab"), "🚗"]] : [])].map(([id, label, icon]) =>
+  if (restock.length || vehicleIds.length) box.append(h("div", { class: "subtabs lists-tabs", role: "tablist" }, [["end", t("listsEndOfShift"), "✅"], ...(restock.length ? [["restock", t("listsRestock"), "📦"], ["prep", t("listsPrep"), "🥣"], ["orders", t("listsOrders"), "🛒"], ["inventory", t("listsInventory"), "🧮"]] : []), ...(vehicleIds.length ? [["vehicles", t("vehTab"), "🚗"]] : [])].map(([id, label, icon]) =>
     h("button", { type: "button", role: "tab", title: label, "aria-label": label, "aria-selected": String(sub === id), onClick: () => { state.listsSub = id; render(); } }, h("span", { class: "tab-ic", "aria-hidden": "true" }, icon), h("span", { class: "tab-tx" }, label)))));
   if (sub === "vehicles") { await renderVehicles(box, vehicleIds); return; }
   if (sub === "orders") { await renderOrders(box, restock); return; }
+  if (sub === "inventory") { await renderInventory(box, restock); return; }
   if (sub === "restock" || sub === "prep") { await renderRestock(box, restock, sub); return; }
   if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
   if (!shifts.length) {
@@ -2371,6 +2372,95 @@ function vehicleSettingsPanel() {
     } catch (e) { loaded = false; box.replaceChildren(h("summary", {}, `⚙ ${t("vehSettings")}`), h("p", { class: "meta" }, errorText(e))); }
   });
   return box;
+}
+
+// Stock taking: count what is in each place (fridge, freezer, back store...); the count is saved as you type and kept in the history.
+async function renderInventory(box, restaurantIds) {
+  const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
+  if (!restos.some((r) => r.id === state.restockRestaurant)) state.restockRestaurant = (restos.find((r) => r.id === state.sel.restaurant) ?? restos[0])?.id ?? null;
+  const rid = state.restockRestaurant;
+  if (!rid) { box.append(h("div", { class: "empty" }, t("noSchedules"))); return; }
+  const d = await api(`/inventory?restaurant=${rid}`);
+  const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
+  const fmt = (l) => (l ? `${l.qty}${l.unit ? ` ${l.unit}` : ""}` : "");
+  const head = [h("p", { class: "meta" }, t("invHelp")),
+    restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; state.invLoc = null; render(); } })) : null];
+  const hist = d.history.length ? [h("h3", { class: "restock-title" }, t("invHistory")), ...d.history.map((n) => {
+    const body = h("div", { class: "inv-detail" });
+    return h("details", { class: "card inv-hist", onToggle: async (e) => {
+      if (!e.currentTarget.open || body.dataset.loaded) return; body.dataset.loaded = "1";
+      try {
+        const x = await api(`/inventory/${n.id}`);
+        body.replaceChildren(...(x.note ? [h("p", { class: "meta" }, x.note)] : []), ...x.lines.map((l) => h("div", { class: "inv-hrow" }, h("span", {}, `${LOCATION_INFO[l.location]?.[0] ?? ""} ${l.name}`), h("b", {}, fmt(l)))));
+      } catch (err) { body.textContent = errorText(err); }
+    } }, h("summary", {}, `${stamp(n.completed_at)} · ${n.counted} ${t("invCounted")}${n.completed_by ? ` · ${n.completed_by}` : ""}`), body);
+  })] : [];
+  box.append(...head);
+  if (!d.items.length) { box.append(h("div", { class: "empty" }, t("invNoItems")), ...hist); return; }
+  if (!d.open) {
+    box.append(h("section", { class: "card" }, h("p", {}, d.last ? `${t("invLast")} : ${stamp(d.last.completed_at)}` : t("invNever")),
+      h("button", { class: "btn primary big", type: "button", onClick: async (e) => { e.currentTarget.disabled = true; try { await api("/inventory/start", { method: "POST", body: { restaurant_id: rid } }); render(); } catch (err) { e.currentTarget.disabled = false; toast(errorText(err)); } } }, `🧮 ${t("invStart")}`)), ...hist);
+    return;
+  }
+  // ---- a count in progress ----
+  const counted = new Map(d.open.lines.map((l) => [l.key, { qty: l.qty, unit: l.unit ?? "" }]));
+  const lastBy = new Map((d.last?.lines ?? []).map((l) => [l.key, l]));
+  const units = ["kg", "g", "L", "mL", t("invUnitPiece"), t("invUnitCase"), t("invUnitBox"), t("invUnitBag")];
+  const listId = `inv-units-${rid}`;
+  const progress = h("strong", {});
+  const paintProgress = () => { progress.textContent = `${counted.size} / ${d.items.length} ${t("invCounted")}`; };
+  const locs = [...new Set(d.items.map((i) => i.location))];
+  if (state.invLoc !== "all" && !locs.includes(state.invLoc)) state.invLoc = locs[0];
+  const chips = h("div", { class: "cl-posts inv-locs", role: "group", "aria-label": t("invWhere") });
+  const rows = h("div", { class: "inv-rows" });
+  const q = h("input", { type: "search", placeholder: t("invSearch"), "aria-label": t("invSearch"), onInput: () => paintRows() });
+  const timers = new Map();
+  const save = (it) => {
+    clearTimeout(timers.get(it.key));
+    timers.set(it.key, setTimeout(async () => {
+      const c = counted.get(it.key);
+      try { await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: [{ key: it.key, name: it.name, location: it.location, category: it.category, qty: c ? c.qty : null, unit: c?.unit ?? "" }] } }); }
+      catch (err) { toast(errorText(err)); }
+    }, 500));
+  };
+  const paintChips = () => chips.replaceChildren(...[["all", "📋", t("invAll")], ...locs.map((l) => [l, LOCATION_INFO[l]?.[0] ?? "📍", LOCATION_INFO[l] ? t(LOCATION_INFO[l][1]) : l])].map(([id, ic, label]) => {
+    const n = d.items.filter((i) => id === "all" || i.location === id), done = n.filter((i) => counted.has(i.key)).length;
+    return h("button", { type: "button", class: `chip-btn${state.invLoc === id ? " on" : ""}`, "aria-pressed": String(state.invLoc === id), onClick: () => { state.invLoc = id; paintChips(); paintRows(); } }, `${ic} ${label} ${done}/${n.length}`);
+  }));
+  const paintRows = () => {
+    const term = q.value.trim().toLowerCase();
+    rows.replaceChildren(...d.items.filter((i) => (state.invLoc === "all" || i.location === state.invLoc) && (!term || i.name.toLowerCase().includes(term))).map((it) => {
+      const prev = lastBy.get(it.key), cur = counted.get(it.key);
+      const qty = h("input", { type: "number", inputmode: "decimal", min: "0", step: "any", value: cur ? String(cur.qty) : "", placeholder: "—", "aria-label": `${it.name} — ${t("invQty")}` });
+      const unit = h("input", { class: "inv-unit", list: listId, maxLength: 20, value: cur?.unit ?? prev?.unit ?? "", placeholder: t("invUnit"), "aria-label": `${it.name} — ${t("invUnit")}` });
+      const row = h("div", { class: `inv-row${cur ? " done" : ""}` });
+      const update = () => {
+        const v = qty.value.trim() === "" ? null : Number(qty.value);
+        if (v === null || !Number.isFinite(v) || v < 0) { counted.delete(it.key); } else counted.set(it.key, { qty: v, unit: unit.value.trim() });
+        row.classList.toggle("done", counted.has(it.key)); paintProgress(); paintChips(); save(it);
+      };
+      qty.addEventListener("input", update); unit.addEventListener("input", () => { if (counted.has(it.key)) update(); });
+      const step = (dx) => { qty.value = String(Math.max(0, Math.round(((Number(qty.value) || 0) + dx) * 100) / 100)); update(); };
+      row.append(h("div", { class: "inv-name" }, h("b", {}, it.name), prev ? h("small", { class: "meta" }, `${t("invPrev")} : ${fmt(prev)}`) : null),
+        h("div", { class: "inv-qty" }, h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), qty, h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+"), unit));
+      return row;
+    }));
+    if (!rows.children.length) rows.append(h("p", { class: "meta" }, t("invNoMatch")));
+  };
+  const finish = h("button", { class: "btn primary", type: "button", onClick: async () => {
+    if (!counted.size) { toast(t("invEmptyCount")); return; }
+    const left = d.items.length - counted.size;
+    if (!(await ask(left > 0 ? t("invFinishMissing").replace("{n}", left) : t("invFinishConfirm"), t("invFinish")))) return;
+    timers.forEach((tm) => clearTimeout(tm));
+    try {
+      await api(`/inventory/${d.open.id}/lines`, { method: "PUT", body: { lines: d.items.filter((i) => counted.has(i.key)).map((it) => ({ key: it.key, name: it.name, location: it.location, category: it.category, qty: counted.get(it.key).qty, unit: counted.get(it.key).unit })) } });
+      await api(`/inventory/${d.open.id}/complete`, { method: "POST", body: {} }); toast(t("invDone")); render();
+    } catch (err) { toast(errorText(err)); }
+  } }, `✔ ${t("invFinish")}`);
+  const cancel = h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("invCancelConfirm")))) return; try { await api(`/inventory/${d.open.id}`, { method: "DELETE" }); render(); } catch (err) { toast(errorText(err)); } } }, t("invCancel"));
+  box.append(h("section", { class: "card inv-head" }, h("div", {}, h("b", {}, `🧮 ${t("invInProgress")}`), h("small", { class: "meta", style: "display:block" }, `${d.open.started_by ?? "—"} · ${stamp(d.open.started_at)}`)), progress),
+    h("datalist", { id: listId }, units.map((u) => h("option", { value: u }))), chips, q, rows, h("div", { class: "actions" }, finish, cancel), ...hist);
+  paintProgress(); paintChips(); paintRows();
 }
 
 // "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.

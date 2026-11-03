@@ -179,7 +179,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
@@ -195,6 +195,7 @@ const OWNER_SQL: Record<Owned, string> = {
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
+  inventory: "SELECT 1 FROM inventory_counts n JOIN restaurants r ON r.id = n.restaurant_id WHERE n.id = ?1 AND r.client_id = ?2",
   voice_contact: "SELECT 1 FROM voice_contacts WHERE id = ?1 AND client_id = ?2",
   voice_call: "SELECT 1 FROM voice_calls WHERE id = ?1 AND client_id = ?2",
   order_request: "SELECT 1 FROM order_requests o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ?1 AND r.client_id = ?2",
@@ -206,7 +207,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -3011,6 +3012,74 @@ app.put("/api/admin/suppliers", requireAdmin, async (c) => {
 });
 
 // ---------- Ingredients reported as missing, to be ordered ----------
+// ---------- Stock taking (inventory) ----------
+type InvLine = { key: string; name: string; location: string | null; category: string | null; qty: number; unit: string | null };
+app.get("/api/inventory", async (c) => {
+  const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
+  if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
+  const items = (await db.prepare("SELECT min(i.name) AS name, lower(i.name) AS key, min(i.location) AS location, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name) ORDER BY min(i.location), min(i.name)").bind(rid).all<{ name: string; key: string; location: string; category: string | null }>()).results;
+  const open = await db.prepare("SELECT n.id, n.started_at, s.name AS started_by FROM inventory_counts n LEFT JOIN staff s ON s.id = n.started_by WHERE n.restaurant_id = ? AND n.completed_at IS NULL ORDER BY n.id DESC LIMIT 1").bind(rid).first<{ id: number; started_at: number; started_by: string | null }>();
+  const lines = open ? (await db.prepare("SELECT key, qty, unit FROM inventory_lines WHERE count_id = ?").bind(open.id).all<{ key: string; qty: number; unit: string | null }>()).results : [];
+  const last = await db.prepare("SELECT id, completed_at FROM inventory_counts WHERE restaurant_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC, id DESC LIMIT 1").bind(rid).first<{ id: number; completed_at: number }>();
+  const lastLines = last ? (await db.prepare("SELECT key, qty, unit FROM inventory_lines WHERE count_id = ?").bind(last.id).all<{ key: string; qty: number; unit: string | null }>()).results : [];
+  const history = (await db.prepare("SELECT n.id, n.started_at, n.completed_at, s.name AS completed_by, n.note, (SELECT count(*) FROM inventory_lines l WHERE l.count_id = n.id) AS counted FROM inventory_counts n LEFT JOIN staff s ON s.id = n.completed_by WHERE n.restaurant_id = ? AND n.completed_at IS NOT NULL ORDER BY n.completed_at DESC, n.id DESC LIMIT 15").bind(rid).all()).results;
+  return c.json({ items, open: open ? { ...open, lines } : null, last: last ? { completed_at: last.completed_at, lines: lastLines } : null, history });
+});
+app.post("/api/inventory/start", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number }>().catch(() => ({} as { restaurant_id?: number }));
+  const rid = Number(b.restaurant_id);
+  if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
+  const open = await db.prepare("SELECT id FROM inventory_counts WHERE restaurant_id = ? AND completed_at IS NULL ORDER BY id DESC LIMIT 1").bind(rid).first<{ id: number }>();
+  if (open) return c.json({ id: open.id });
+  const r = await db.prepare("INSERT INTO inventory_counts (restaurant_id, started_by, started_at) VALUES (?, ?, ?) RETURNING id").bind(rid, me.id, Date.now()).first<{ id: number }>();
+  return c.json({ id: r!.id }, 201);
+});
+async function openInventory(c: Context<any>): Promise<{ id: number; restaurant_id: number } | Response> {
+  const me = c.get("me"), db: D1Database = c.env.DB, id = intParam(c.req.param("id"));
+  const n = id ? await db.prepare("SELECT id, restaurant_id, completed_at FROM inventory_counts WHERE id = ?").bind(id).first<{ id: number; restaurant_id: number; completed_at: number | null }>() : null;
+  if (!n) return c.json({ error: "not_found" }, 404);
+  if (!(await restockRestaurants(db, me)).includes(n.restaurant_id)) return c.json({ error: "forbidden" }, 403);
+  if (n.completed_at) return c.json({ error: "already_done" }, 409);
+  return n;
+}
+app.put("/api/inventory/:id/lines", async (c) => {
+  const n = await openInventory(c); if (n instanceof Response) return n;
+  const b = await c.req.json<{ lines?: { key?: string; name?: string; location?: string; category?: string; qty?: number | null; unit?: string }[] }>().catch(() => ({} as { lines?: [] }));
+  if (!Array.isArray(b.lines) || b.lines.length > 500) return c.json({ error: "invalid_lines" }, 400);
+  const st: D1PreparedStatement[] = [];
+  for (const l of b.lines) {
+    const key = (l.key ?? "").trim().toLowerCase().slice(0, 120);
+    if (!key) return c.json({ error: "invalid_lines" }, 400);
+    if (l.qty === null || l.qty === undefined) { st.push(c.env.DB.prepare("DELETE FROM inventory_lines WHERE count_id = ? AND key = ?").bind(n.id, key)); continue; }
+    if (typeof l.qty !== "number" || !Number.isFinite(l.qty) || l.qty < 0 || l.qty > 1_000_000) return c.json({ error: "invalid_lines" }, 400);
+    st.push(c.env.DB.prepare("INSERT INTO inventory_lines (count_id, key, name, location, category, qty, unit) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (count_id, key) DO UPDATE SET qty = ?6, unit = ?7")
+      .bind(n.id, key, (l.name ?? key).trim().slice(0, 120), (l.location ?? "").slice(0, 20) || null, (l.category ?? "").slice(0, 40) || null, l.qty, (l.unit ?? "").trim().slice(0, 20) || null));
+  }
+  if (st.length) await c.env.DB.batch(st);
+  return c.json({ ok: true });
+});
+app.post("/api/inventory/:id/complete", async (c) => {
+  const n = await openInventory(c); if (n instanceof Response) return n;
+  const me = c.get("me"), b = await c.req.json<{ note?: string }>().catch(() => ({} as { note?: string }));
+  if (!(await c.env.DB.prepare("SELECT 1 FROM inventory_lines WHERE count_id = ? LIMIT 1").bind(n.id).first())) return c.json({ error: "empty_count" }, 422);
+  await c.env.DB.prepare("UPDATE inventory_counts SET completed_at = ?, completed_by = ?, note = ? WHERE id = ?").bind(Date.now(), me.id, (b.note ?? "").trim().slice(0, 300) || null, n.id).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/inventory/:id", async (c) => {
+  const n = await openInventory(c); if (n instanceof Response) return n;
+  await c.env.DB.prepare("DELETE FROM inventory_counts WHERE id = ?").bind(n.id).run();
+  return c.json({ ok: true });
+});
+app.get("/api/inventory/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB, id = intParam(c.req.param("id"));
+  const n = id ? await db.prepare("SELECT n.id, n.restaurant_id, n.started_at, n.completed_at, n.note, s.name AS completed_by FROM inventory_counts n LEFT JOIN staff s ON s.id = n.completed_by WHERE n.id = ?").bind(id).first<{ restaurant_id: number }>() : null;
+  if (!n) return c.json({ error: "not_found" }, 404);
+  if (!(await restockRestaurants(db, me)).includes(n.restaurant_id)) return c.json({ error: "forbidden" }, 403);
+  const lines = (await db.prepare("SELECT key, name, location, category, qty, unit FROM inventory_lines WHERE count_id = ? ORDER BY location, name").bind(id).all<InvLine>()).results;
+  return c.json({ ...n, lines });
+});
+
 app.get("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
   if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
