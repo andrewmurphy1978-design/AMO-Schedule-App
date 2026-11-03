@@ -3524,12 +3524,20 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   const channel = b.notify_channel === "email" ? "email" : "sms";
   const phone = b.phone?.trim() ? normalizePhone(b.phone) : null;
   if (b.phone?.trim() && !phone) return c.json({ error: "invalid_phone" }, 400);
+  const before = await c.env.DB.prepare("SELECT email FROM staff WHERE id = ?").bind(id).first<{ email: string | null }>();
+  const newEmail = b.email?.trim().toLowerCase() || null;
   try {
     await c.env.DB.prepare("UPDATE staff SET name=?, first_name=?, last_name=?, email=?, phone=?, lang=?, notify_channel=?, color=?, sex=?, print_order=? WHERE id=?")
-      .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, phone, lang, channel, b.color?.toLowerCase() ?? null, b.sex === "M" || b.sex === "F" ? b.sex : null, po, id)
+      .bind(nm.name, nm.first, nm.last, newEmail, phone, lang, channel, b.color?.toLowerCase() ?? null, b.sex === "M" || b.sex === "F" ? b.sex : null, po, id)
       .run();
   } catch {
     return c.json({ error: "email_taken" }, 409);
+  }
+  // Sign-in credentials (sessions, password, passkeys, pending codes) belong to an email address. When the employee's address changes
+  // they are removed, so the new address starts clean and the old one can be given to someone else without handing over access.
+  const oldEmail = before?.email?.toLowerCase();
+  if (oldEmail && oldEmail !== newEmail) {
+    await c.env.DB.batch(["sessions", "login_passwords", "passkeys", "login_codes"].map((t) => c.env.DB.prepare(`DELETE FROM ${t} WHERE email = ?`).bind(oldEmail)));
   }
   emit(c, "staff.updated", () => staffData(c.env.DB, id));
   return c.json({ ok: true });

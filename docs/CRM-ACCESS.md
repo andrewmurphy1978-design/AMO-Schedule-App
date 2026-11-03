@@ -208,6 +208,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | Changing an employee's email (`PUT /api/staff/:id`) now deletes the old address's sessions, password, passkeys and pending codes. |
 | 2026-11-03 | **First-time guidance**: install offer in the browser, then biometrics + required password in the installed app (`POST /api/account/installed`, migration 0084). |
 | 2026-11-03 | **Sign-in by password and by passkey/biometrics** (migration 0082), sign-in screen rebuilt, Account → Security tab; **signed-in indicator** on the employee list (`signed_in`, `last_seen_at`; migration 0083). Google/Apple sign-in deliberately not built (unknown emails would be refused anyway). |
 | 2026-11-03 | Outgoing emails (login codes and notifications) now carry a sender display name (Branding "sender name", else the company name). In production the SMTP relay is Brevo (domain authenticated with DKIM/SPF/DMARC) instead of the IONOS mailbox; no secrets stored here. |
