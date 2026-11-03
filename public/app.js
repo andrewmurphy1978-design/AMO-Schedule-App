@@ -2422,6 +2422,7 @@ async function renderOrders(box, restaurantIds) {
     h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("div", { class: "order-form" }, combo, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
     h("h3", { class: "restock-title" }, `${t("orderOpen")}${d.open.length ? ` · ${d.open.length}` : ""}`),
     ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone"), g.sp?.order_method ? h("small", { class: "meta" }, ` · ${{ call: "📞", email: "✉️", api: "🔌" }[g.sp.order_method]} ${t({ call: "supMethodCall", email: "supMethodEmail", api: "supMethodApi" }[g.sp.order_method])}`) : null, g.sp?.customer_number ? h("small", { class: "meta" }, ` · ${t("supClientShort")} ${g.sp.customer_number}`) : null),
+      g.sp?.order_method === "call" && g.sp.phone && state.me?.voice ? h("button", { class: "btn small", type: "button", onClick: () => { state.voicePrefill = { name: g.sp.name, phone: g.sp.phone, text: `${t("orderCallIntro").replace("{n}", g.sp.customer_number || "—")} ${g.items.map((o) => o.name + (o.note ? ` (${o.note})` : "")).join(", ")}.` }; state.voiceTab = "call"; state.voiceCall = null; state.view = "voice"; render(); } }, `📞 ${t("orderCallAssist")}`) : null,
       g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
       g.items.map((o) => row(o, g.sp?.id ?? null)))) : [h("p", { class: "meta" }, t("orderEmpty"))]),
     d.done.length ? h("details", { class: "order-done" }, h("summary", {}, t("orderRecent")), d.done.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${t("orderOrderedAt")} ${when(o.ordered_at)}${o.supplier ? ` · ${o.supplier}` : ""}`)))) : null);
@@ -2566,6 +2567,10 @@ async function renderVoice() {
   const [info, calls] = await Promise.all([api("/voice/contacts"), api("/voice/calls")]);
   const box = h("div", { class: "account voice-view" }, h("h2", {}, `📞 ${t("voiceTitle")}`));
   $app.replaceChildren(box);
+  const vtab = state.voiceTab === "orders" ? "orders" : "call";
+  box.append(h("div", { class: "subtabs lists-tabs", role: "tablist" }, [["call", t("voiceTabCall"), "📞"], ["orders", t("listsOrders"), "🛒"]].map(([id, label, icon]) =>
+    h("button", { type: "button", role: "tab", title: label, "aria-label": label, "aria-selected": String(vtab === id), onClick: () => { state.voiceTab = id; render(); } }, h("span", { class: "tab-ic", "aria-hidden": "true" }, icon), h("span", { class: "tab-tx" }, label)))));
+  if (vtab === "orders") { await renderOrders(box, state.restaurants.map((r) => r.id)); return; }
   const lang = getLang();
   const errMsg = (e) => { const k = `voiceErr_${e.body?.error}`; const base = t(k) !== k ? t(k) : errorText(e); return e.body?.detail ? `${base} : ${e.body.detail}` : base; };
   const quick = [["voiceYes"], ["voiceNo"], ["voiceThanks"], ["voiceOk"], ["voiceCallMe"]].map(([k]) => t(k));
@@ -2618,13 +2623,18 @@ async function renderVoice() {
   if (state.voiceCall || active) { conversation(state.voiceCall ?? active.id); return; }
 
   // ---- a new call ----
-  const who = h("select", { "aria-label": t("voiceTo"), onChange: () => { const c = info.contacts.find((x) => String(x.id) === who.value); if (c) langSel.value = c.lang === "en" ? "en" : "fr"; } }, h("option", { value: "" }, `— ${t("voiceChoose")}`), info.contacts.map((c) => h("option", { value: c.id }, `${c.name} (…${c.tail})`)));
+  const pick = (v) => v.startsWith("c") ? info.extra.find((x) => `c${x.id}` === v) : info.contacts.find((x) => `s${x.id}` === v);
+  const who = h("select", { "aria-label": t("voiceTo"), onChange: () => { const c = who.value === "p" ? null : pick(who.value); if (c) langSel.value = c.lang === "en" ? "en" : "fr"; } }, h("option", { value: "" }, `— ${t("voiceChoose")}`),
+    h("optgroup", { label: t("voiceGroupTeam") }, info.contacts.map((c) => h("option", { value: `s${c.id}` }, `${c.name} (…${c.tail})`))),
+    info.extra?.length ? h("optgroup", { label: t("voiceGroupContacts") }, info.extra.map((c) => h("option", { value: `c${c.id}` }, `${c.name}${c.label ? ` · ${c.label}` : ""} (…${c.tail})`))) : null);
+  const pre = state.voicePrefill; state.voicePrefill = null;
+  if (pre) who.prepend(h("option", { value: "p", selected: true }, `${pre.name} (…${pre.phone.slice(-4)})`));
   const langSel = h("select", { "aria-label": t("voiceLangLabel") }, [["fr", "Français"], ["en", "English"]].map(([v, l]) => h("option", { value: v, selected: v === lang }, l)));
-  const msg = h("textarea", { rows: 4, maxLength: 500, placeholder: t("voiceMessage"), "aria-label": t("voiceMessage") });
+  const msg = h("textarea", { rows: 4, maxLength: 500, placeholder: t("voiceMessage"), "aria-label": t("voiceMessage") }, pre?.text ?? "");
   const go = h("button", { class: "btn primary big", type: "button", disabled: !info.ready, onClick: async () => {
     if (!who.value) { toast(t("voiceChoose")); return; }
     go.disabled = true;
-    try { const r = await api("/voice/calls", { method: "POST", body: { staff_id: Number(who.value), lang: langSel.value, text: msg.value } }); state.voiceCall = r.id; render(); }
+    try { const r = await api("/voice/calls", { method: "POST", body: { ...(who.value === "p" ? { phone: pre.phone } : { [who.value[0] === "c" ? "contact_id" : "staff_id"]: Number(who.value.slice(1)) }), lang: langSel.value, text: msg.value } }); state.voiceCall = r.id; render(); }
     catch (e) { toast(errMsg(e)); go.disabled = false; }
   } }, t("voiceCallBtn"));
   box.append(h("p", { class: "meta" }, t("voiceHelp")), info.ready ? null : h("div", { class: "info" }, `⚠ ${t("voiceNotReady")}`),
@@ -3613,9 +3623,39 @@ function clientsPanel() {
   return box;
 }
 
+// Administration: extra people the assisted calls can reach (suppliers, repairers...) besides the team.
+function voiceContactsPanel() {
+  const box = h("section", { class: "panel" });
+  async function load() {
+    const list = await api("/admin/voice-contacts");
+    const form = (c) => {
+      const name = h("input", { value: c?.name ?? "", maxLength: 80, required: true, placeholder: t("vcName") });
+      const label = h("input", { value: c?.label ?? "", maxLength: 60, placeholder: t("vcLabelEx") });
+      const phone = h("input", { type: "tel", value: c?.phone ?? "", required: true, placeholder: "+1 819 555 1234" });
+      const lang = h("select", {}, [["fr", "Français"], ["en", "English"]].map(([v, l]) => h("option", { value: v, selected: (c?.lang ?? "fr") === v }, l)));
+      const notes = h("input", { value: c?.notes ?? "", maxLength: 300, placeholder: t("vcNotes") });
+      return { name, label, phone, lang, notes, body: () => ({ name: name.value, label: label.value, phone: phone.value, lang: lang.value, notes: notes.value }) };
+    };
+    const editor = (c) => {
+      const f = form(c);
+      return h("form", { class: "vc-admin-form", onSubmit: async (e) => { e.preventDefault(); try { await api(c ? `/admin/voice-contacts/${c.id}` : "/admin/voice-contacts", { method: c ? "PUT" : "POST", body: f.body() }); load(); } catch (err) { toast(err.body?.error === "invalid_phone" ? t("vcBadPhone") : errorText(err)); } } },
+        f.name, f.label, f.phone, f.lang, f.notes, h("button", { class: "btn primary", type: "submit" }, c ? t("save") : t("add")),
+        c ? h("button", { class: "btn", type: "button", onClick: () => load() }, t("cancel")) : null);
+    };
+    box.replaceChildren(h("h2", {}, `📞 ${t("adminContacts")}`), h("p", { class: "meta" }, t("vcHelp")),
+      ...list.map((c) => h("div", { class: "card vc-admin-row" }, h("div", {}, h("strong", {}, c.name), c.label ? h("span", { class: "meta" }, ` · ${c.label}`) : null, h("div", { class: "meta" }, `${c.phone} · ${c.lang.toUpperCase()}${c.notes ? ` · ${c.notes}` : ""}`)),
+        h("div", { class: "actions" },
+          h("button", { class: "btn", type: "button", onClick: (e) => e.currentTarget.closest(".vc-admin-row").replaceChildren(editor(c)) }, t("edit")),
+          h("button", { class: "btn danger", type: "button", onClick: async () => { if (await confirmDialog({ title: t("delete"), message: t("vcDelete").replace("{name}", c.name), yes: t("delete"), no: t("cancel") })) { await api(`/admin/voice-contacts/${c.id}`, { method: "DELETE" }); load(); } } }, t("delete"))))),
+      h("h3", {}, t("vcAdd")), h("div", { class: "card" }, editor(null)));
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["contacts", "adminContacts"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { contacts: "📞", vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -3673,11 +3713,12 @@ async function renderAdmin() {
     usage: () => [usagePanel()],
     autoschedule: () => [autoSchedulePanel()],
     vehicles: () => [vehiclesAdminPanel()],
+    contacts: () => [voiceContactsPanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "contacts", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];

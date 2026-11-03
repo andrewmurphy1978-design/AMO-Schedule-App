@@ -1269,3 +1269,7 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .veh-history{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}.veh-history li{display:flex;gap:.6rem;align-items:flex-start;padding:.4rem 0;border-bottom:1px solid rgba(128,128,128,.2)}.veh-ev-ic{width:1.6rem;text-align:center;flex:none}
 .restock-tabs{margin:.25rem 0 .75rem}.restock-tabs button{flex:1}.restock-tabs .nav-badge{margin-left:.4rem}
 .restock-tabs button{white-space:nowrap;padding:.5rem .3rem}@media (max-width:899px){.restock-tabs button{font-size:.92rem}}
+
+.vc-admin-row{display:flex;gap:.6rem;justify-content:space-between;align-items:center;flex-wrap:wrap}
+.vc-admin-form{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+.vc-admin-form input{flex:1 1 140px;min-width:0}

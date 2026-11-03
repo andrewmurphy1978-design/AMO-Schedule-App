@@ -179,7 +179,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
@@ -195,6 +195,7 @@ const OWNER_SQL: Record<Owned, string> = {
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
+  voice_contact: "SELECT 1 FROM voice_contacts WHERE id = ?1 AND client_id = ?2",
   voice_call: "SELECT 1 FROM voice_calls WHERE id = ?1 AND client_id = ?2",
   order_request: "SELECT 1 FROM order_requests o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ?1 AND r.client_id = ?2",
   community_post: "SELECT 1 FROM community_posts p JOIN communities c ON c.id = p.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE p.id = ?1 AND r.client_id = ?2",
@@ -205,7 +206,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -3259,8 +3260,31 @@ const voiceView = (k: VoiceCall) => ({ id: k.id, to_name: k.to_name, lang: k.lan
 app.get("/api/voice/contacts", requireVoice, async (c) => {
   const me = c.get("me");
   const rows = (await c.env.DB.prepare("SELECT id, name, first_name, lang, substr(phone, -4) AS tail FROM staff WHERE client_id = ? AND active = 1 AND id != ? AND phone IS NOT NULL AND phone != '' ORDER BY name").bind(me.client_id, me.id).all<{ id: number; name: string; first_name: string | null; lang: string; tail: string }>()).results;
+  const extra = (await c.env.DB.prepare("SELECT id, name, label, lang, substr(phone, -4) AS tail FROM voice_contacts WHERE client_id = ? ORDER BY name COLLATE NOCASE").bind(me.client_id).all<{ id: number; name: string; label: string | null; lang: string; tail: string }>()).results;
   const conn = await loadConnections(c.env, c.env.DB, me.client_id);
-  return c.json({ contacts: sortByName(rows), ready: !!conn.twilio && !!conn.appUrl, missing: !conn.twilio ? "twilio" : !conn.appUrl ? "app_url" : null });
+  return c.json({ contacts: sortByName(rows), extra, ready: !!conn.twilio && !!conn.appUrl, missing: !conn.twilio ? "twilio" : !conn.appUrl ? "app_url" : null });
+});
+app.get("/api/admin/voice-contacts", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, label, phone, lang, notes FROM voice_contacts WHERE client_id = ? ORDER BY name COLLATE NOCASE").bind(c.get("me").client_id).all()).results));
+async function voiceContactBody(c: Context<any>) {
+  const b = await c.req.json<{ name?: string; label?: string; phone?: string; lang?: string; notes?: string }>().catch(() => ({} as { name?: string; label?: string; phone?: string; lang?: string; notes?: string }));
+  const name = (b.name ?? "").trim().slice(0, 80), phone = normalizePhone(b.phone);
+  if (!name) return { error: "name_required" };
+  if (!phone) return { error: "invalid_phone" };
+  return { name, phone, label: (b.label ?? "").trim().slice(0, 60) || null, lang: b.lang === "en" ? "en" : "fr", notes: (b.notes ?? "").trim().slice(0, 300) || null };
+}
+app.post("/api/admin/voice-contacts", requireAdmin, async (c) => {
+  const v = await voiceContactBody(c); if ("error" in v) return c.json({ error: v.error }, 400);
+  const r = await c.env.DB.prepare("INSERT INTO voice_contacts (client_id, name, label, phone, lang, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(c.get("me").client_id, v.name, v.label, v.phone, v.lang, v.notes, Date.now()).first<{ id: number }>();
+  return c.json({ id: r!.id }, 201);
+});
+app.put("/api/admin/voice-contacts/:id", requireAdmin, async (c) => {
+  const v = await voiceContactBody(c); if ("error" in v) return c.json({ error: v.error }, 400);
+  await c.env.DB.prepare("UPDATE voice_contacts SET name = ?, label = ?, phone = ?, lang = ?, notes = ? WHERE id = ? AND client_id = ?").bind(v.name, v.label, v.phone, v.lang, v.notes, intParam(c.req.param("id")), c.get("me").client_id).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/admin/voice-contacts/:id", requireAdmin, async (c) => {
+  await c.env.DB.prepare("DELETE FROM voice_contacts WHERE id = ? AND client_id = ?").bind(intParam(c.req.param("id")), c.get("me").client_id).run();
+  return c.json({ ok: true });
 });
 app.get("/api/voice/calls", requireVoice, async (c) => {
   const me = c.get("me");
@@ -3276,7 +3300,7 @@ app.get("/api/voice/calls/:id", requireVoice, async (c) => {
 });
 app.post("/api/voice/calls", requireVoice, async (c) => {
   const me = c.get("me"), db = c.env.DB;
-  const b = await c.req.json<{ staff_id?: number; phone?: string; lang?: string; text?: string }>().catch(() => ({} as { staff_id?: number; phone?: string; lang?: string; text?: string }));
+  const b = await c.req.json<{ staff_id?: number; contact_id?: number; phone?: string; lang?: string; text?: string }>().catch(() => ({} as { staff_id?: number; contact_id?: number; phone?: string; lang?: string; text?: string }));
   const text = cleanSpeech(b.text);
   if (!text) return c.json({ error: "empty_text" }, 400);
   const conn = await loadConnections(c.env, db, me.client_id);
@@ -3285,7 +3309,11 @@ app.post("/api/voice/calls", requireVoice, async (c) => {
   if (await db.prepare(`SELECT 1 FROM voice_calls WHERE caller_id = ? AND status IN ('queued', 'in_progress', 'ending') AND created_at > ?`).bind(me.id, Date.now() - 20 * 60_000).first()) return c.json({ error: "call_in_progress" }, 409);
   if (((await db.prepare("SELECT COUNT(*) AS n FROM voice_calls WHERE caller_id = ? AND created_at > ?").bind(me.id, Date.now() - 86_400_000).first<{ n: number }>())?.n ?? 0) >= 40) return c.json({ error: "too_many_calls" }, 429);
   let name = "", phone: string | null = null, lang: VoiceLang = b.lang === "en" ? "en" : "fr", staffId: number | null = null;
-  if (b.staff_id) {
+  if (b.contact_id) {
+    const t = await db.prepare("SELECT name, phone, lang FROM voice_contacts WHERE id = ? AND client_id = ?").bind(b.contact_id, me.client_id).first<{ name: string; phone: string; lang: string }>();
+    if (!t) return c.json({ error: "not_found" }, 404);
+    name = t.name; phone = t.phone; if (!b.lang) lang = t.lang === "en" ? "en" : "fr";
+  } else if (b.staff_id) {
     const t = await db.prepare("SELECT id, name, phone, lang FROM staff WHERE id = ? AND client_id = ? AND active = 1").bind(b.staff_id, me.client_id).first<{ id: number; name: string; phone: string | null; lang: string }>();
     if (!t?.phone) return c.json({ error: "no_phone" }, 422);
     staffId = t.id; name = t.name; phone = t.phone; if (!b.lang) lang = t.lang === "en" ? "en" : "fr";
