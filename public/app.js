@@ -2526,7 +2526,7 @@ async function renderMessages(box) {
 
 /** New conversation: pick one or more colleagues, write the first message. */
 async function messageComposer(box, toThread, toList) {
-  const people = await api("/messages/people");
+  const { people, can_group: canGroup, max_group: maxGroup, groups: groupsRule } = await api("/messages/people");
   const chosen = new Map();
   const search = h("input", { type: "search", placeholder: t("dmSearch"), "aria-label": t("dmSearch"), autocomplete: "off" });
   const chips = h("div", { class: "dm-chips" });
@@ -2542,13 +2542,18 @@ async function messageComposer(box, toThread, toList) {
     send.disabled = !chosen.size || !body.value.trim();
     const q = norm(search.value.trim());
     list.replaceChildren(...people.filter((p) => !q || norm(p.name).includes(q)).map((p) => h("label", { class: "dm-person" },
-      h("input", { type: "checkbox", checked: chosen.has(p.id), onChange: (e) => { if (e.target.checked) chosen.set(p.id, p); else chosen.delete(p.id); refresh(); } }),
+      h("input", { type: "checkbox", checked: chosen.has(p.id), onChange: (e) => {
+        if (e.target.checked) { if (!canGroup) chosen.clear(); else if (chosen.size >= maxGroup - 1) { toast(t("dmGroupFull").replace("{n}", String(maxGroup))); e.target.checked = false; return; } chosen.set(p.id, p); } else chosen.delete(p.id);
+        refresh();
+      } }),
       avatar(p.id, p.name, p.color, p.photo_v, 30), h("span", {}, p.name))));
   };
   search.addEventListener("input", refresh); body.addEventListener("input", () => { send.disabled = !chosen.size || !body.value.trim(); });
   refresh();
   box.replaceChildren(
     h("div", { class: "dm-head" }, h("button", { class: "btn", type: "button", onClick: toList }, `← ${t("dmTab")}`), h("h3", {}, t("dmNew"))),
+    canGroup ? null : h("p", { class: "meta" }, groupsRule === "off" ? t("dmGroupsOff") : t("dmGroupsManagers")),
+    people.length ? null : h("div", { class: "empty" }, t("dmNoPeople")),
     h("form", { class: "acc-form dm-new", onSubmit: async (e) => {
       e.preventDefault();
       try { const r = await api("/messages/threads", { method: "POST", body: { member_ids: [...chosen.keys()], title: title.value, body: body.value } }); toThread(r.id); }
@@ -2604,28 +2609,32 @@ async function messageThread(box, id, myId, toList) {
 
 async function renderCommunity() {
   const list = await api("/communities");
-  const dmMode = !list.length || state.communityId === "dm"; // the Messages tab (always there, even with no community)
-  if (!dmMode && !list.some((x) => x.id === state.communityId)) state.communityId = (list.find((x) => x.unread) ?? list[0]).id;
+  // two tabs at the top: Communities (the boards) and Messages (personal messages, always there, even with no community)
+  const tab = state.commTab ?? (list.length ? "communities" : "messages");
+  const dmMode = tab === "messages";
+  if (!dmMode && list.length && !list.some((x) => x.id === state.communityId)) state.communityId = (list.find((x) => x.unread) ?? list[0]).id;
+  const postsUnread = list.reduce((n, x) => n + (x.unread || 0), 0);
+  const topTabs = h("div", { class: "subtabs comm-top", role: "tablist" }, [["communities", `🏘️ ${t("communityTab")}`, postsUnread], ["messages", `💬 ${t("dmTab")}`, state.dmUnread ?? 0]].map(([id, label, n]) =>
+    h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { state.commTab = id; if (id === "messages") state.dmThread = null; renderCommunity(); } }, label, n > 0 && tab !== id ? h("span", { class: "nav-badge" }, String(n)) : null)));
   const manyRestos = new Set(list.map((x) => x.restaurant_id)).size > 1;
   const short = (n) => n.split(/-des-|\sdes\s/)[0];
   // "Saint-Sauveur" -> SS, "Ste-Agathe-des-Monts" -> SA
   const restoCode = (n) => n.split(/[-\s]+/).filter((w) => w && !/^(des?|du|la|le|les)$/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
   const shortIcons = (deps) => { const list = deps.filter((d) => d !== "admin"); return [...(list.length ? list : deps)].sort((a, b) => DEPTS.indexOf(a) - DEPTS.indexOf(b)).map(deptIcon).join(""); };
   const feed = h("div", { class: "comm-feed" });
-  const dmPill = h("button", { type: "button", role: "tab", class: "dm-pill", "aria-selected": String(dmMode), onClick: () => { state.communityId = "dm"; state.dmThread = null; renderCommunity(); } },
-    h("span", { class: "cp-full" }, `💬 ${t("dmTab")}`), h("span", { class: "cp-short" }, "💬"), (state.dmUnread ?? 0) > 0 && !dmMode ? h("span", { class: "nav-badge" }, String(state.dmUnread)) : null);
-  const pills = h("div", { class: "comm-pills", role: "tablist" }, [...list.map((x) =>
+  const pills = h("div", { class: "comm-pills", role: "tablist" }, list.map((x) =>
     h("button", { type: "button", role: "tab", "aria-selected": String(x.id === state.communityId), title: `${x.restaurant} · ${x.name}`, "aria-label": `${x.restaurant} · ${x.name}`, onClick: () => { state.communityId = x.id; renderCommunity(); } },
       // desktop: the names; phone: the restaurant code (SS, SA…) and the icons of the departments
       h("span", { class: "cp-full" }, manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name),
       h("span", { class: "cp-short" }, `${manyRestos ? `${restoCode(x.restaurant)} ` : ""}${shortIcons(x.departments)}`),
-      x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)), dmPill]);
+      x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)));
   if (dmMode) {
     const dmBox = h("div", { class: "dm" });
-    $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), pills, dmBox));
+    $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, dmBox));
     await renderMessages(dmBox);
     return;
   }
+  if (!list.length) { $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, h("div", { class: "empty" }, t("noCommunity")))); return; }
   const id = state.communityId;
   let moderator = false;
   const body = h("textarea", { maxLength: 2000, rows: 2, placeholder: t("writePost"), "aria-label": t("writePost") });
@@ -2700,7 +2709,7 @@ async function renderCommunity() {
         posts = [...posts, ...older.posts]; paint(older.more);
       } }, t("olderPosts"))] : []));
   }
-  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), pills, compose, feed));
+  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, pills, compose, feed));
   await load();
 }
 
@@ -3758,7 +3767,21 @@ function communitiesPanel(ov) {
         } }, `+ ${t("add")}`)));
     };
     const tr = await api("/admin/community-transcripts").catch(() => ({ all: false, ai_available: false }));
-    box.replaceChildren(h("h2", {}, t("adminCommunities")), h("p", { class: "meta" }, t("communitiesHelp")),
+    const dm = await api("/admin/messages-settings").catch(() => null);
+    const dmCard = () => {
+      if (!dm) return null;
+      const scope = radioGroup("dm-scope", [["department", t("dmScopeDepartment")], ["restaurant", t("dmScopeRestaurant")], ["all", t("dmScopeAll")]], dm.scope);
+      const groups = radioGroup("dm-groups", [["all", t("dmGroupsAll")], ["managers", t("dmGroupsMgr")], ["off", t("dmGroupsNone")]], dm.groups);
+      const max = h("input", { type: "number", min: 3, max: 50, value: dm.max_group, inputMode: "numeric", style: "max-width:6rem", "aria-label": t("dmMaxGroup") });
+      return h("form", { class: "card dm-settings", onSubmit: async (e) => {
+        e.preventDefault();
+        try { await api("/admin/messages-settings", { method: "PUT", body: { scope: scope.value, groups: groups.value, max_group: Number(max.value) } }); toast(t("saved")); } catch (err) { toast(err.body?.field === "max_group" ? t("dmMaxGroupBad") : errorText(err)); }
+      } }, h("h3", {}, `💬 ${t("dmSettings")}`), h("p", { class: "meta" }, t("dmSettingsHelp")),
+        h("div", { class: "field" }, h("span", {}, t("dmScope")), scope, h("span", { class: "meta" }, t("dmScopeHelp"))),
+        h("div", { class: "field" }, h("span", {}, t("dmGroups")), groups), h("label", { class: "field" }, h("span", {}, t("dmMaxGroup")), max),
+        h("button", { class: "btn primary", type: "submit" }, t("save")));
+    };
+    box.replaceChildren(h("h2", {}, t("adminCommunities")), h("p", { class: "meta" }, t("communitiesHelp")), dmCard(),
       h("div", { class: "card tr-setting" }, h("label", { class: "check" }, h("input", { type: "checkbox", checked: tr.all, onChange: async (e) => { const want = e.target.checked; try { await api("/admin/community-transcripts", { method: "PUT", body: { all: want } }); toast(t("saved")); } catch (err) { e.target.checked = !want; toast(errorText(err)); } } }), h("span", {}, `📝 ${t("transcriptAllLabel")}`)),
         h("p", { class: "meta" }, t("transcriptAllHelp")), tr.ai_available ? null : h("p", { class: "meta" }, `⚠ ${t("transcriptNoAi")}`)),
       ...ov.restaurants.map((r) => h("div", { class: "comm-resto" }, h("h3", {}, r.name), ...rows.filter((c) => c.restaurant_id === r.id).map(rowFor), addFor(r))));
@@ -4849,8 +4872,8 @@ function openFromLink() {
   const view = q.get("view");
   if (view && ["mine", "schedule", "posts", "checklist", "voice", "community", "account", "admin"].includes(view) && (view !== "admin" || state.me?.me.is_admin)) {
     state.view = view;
-    if (q.get("c")) state.communityId = Number(q.get("c"));
-    if (q.get("dm")) { state.communityId = "dm"; state.dmThread = Number(q.get("dm")) || null; }
+    if (q.get("c")) { state.communityId = Number(q.get("c")); state.commTab = "communities"; }
+    if (q.get("dm")) { state.commTab = "messages"; state.dmThread = Number(q.get("dm")) || null; }
     if (q.get("sub")) state.listsSub = q.get("sub");
     if (q.get("tab")) state.accountTab = q.get("tab");
     if (q.get("section")) state.adminSection = q.get("section");

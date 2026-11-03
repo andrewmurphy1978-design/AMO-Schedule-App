@@ -25,6 +25,7 @@ import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { AUTO_DEPTS, parseAuto, validateAuto, nextMonday, autoDue, inAutoScope, autoNotice, autoReminder, reminderDue, type AutoSettings, type AutoResult } from "./autoschedule.ts";
 import { describeDevice } from "./devices.ts";
+import { parseDm, validateDm, canStartGroup, type DmSettings } from "./messaging.ts";
 import { parseVehicleSettings, validateVehicleSettings, currentSeason, tireReminderDue, tireNotice, issueNotice, VEHICLE_CATEGORIES, type SeasonNow } from "./vehicles.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
@@ -3509,7 +3510,7 @@ app.post("/api/communities/:id/posts", async (c) => {
 
 // ---------- Personal messages between employees (inside the Communities screen) ----------
 // A conversation has two people (direct: reused when it already exists) or more (group). Only its members can read it.
-const DM_MAX_MEMBERS = 20, DM_MAX_LEN = 2000, DM_PER_MINUTE = 30;
+const DM_MAX_MEMBERS = 50, DM_MAX_LEN = 2000, DM_PER_MINUTE = 30;
 const dmClean = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim() : "");
 const dmMember = (db: D1Database, threadId: number, staffId: number) => db.prepare("SELECT last_read_id FROM dm_members WHERE thread_id = ? AND staff_id = ? AND left_at IS NULL").bind(threadId, staffId).first<{ last_read_id: number }>();
 const dmPerson = "s.id, s.name, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v";
@@ -3530,11 +3531,37 @@ async function dmPost(c: Context<any>, threadId: number, me: Me, body: string, t
   return id;
 }
 
-// the colleagues one can write to: every active employee of the company
+const dmSettings = async (db: D1Database, clientId: number) => parseDm(await getSetting(db, clientId, "dm_settings"));
+/** The colleagues one may write to: administrators reach everyone; the others, depending on the setting, the people of the same restaurant and department, of the same restaurant, or of the company. Administrators are always reachable. */
+async function dmReachable(db: D1Database, me: Me, s: DmSettings): Promise<{ id: number; name: string; first_name: string | null; color: string | null; photo_v: number | null }[]> {
+  const everyone = me.is_admin || s.scope === "all";
+  const mine = "WITH mine(restaurant_id, department_id) AS (SELECT sr.restaurant_id, ro.department_id FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id WHERE sr.staff_id = ?1 UNION SELECT restaurant_id, department_id FROM managers WHERE staff_id = ?1)";
+  const same = s.scope === "restaurant"
+    ? "m.restaurant_id = sr.restaurant_id" : "m.restaurant_id = sr.restaurant_id AND m.department_id = ro.department_id";
+  const sameMgr = s.scope === "restaurant" ? "m.restaurant_id = mg.restaurant_id" : "m.restaurant_id = mg.restaurant_id AND m.department_id = mg.department_id";
+  const sql = everyone
+    ? `SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 ORDER BY s.name`
+    : `${mine} SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 AND (s.is_admin = 1
+         OR EXISTS (SELECT 1 FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN mine m ON ${same} WHERE sr.staff_id = s.id)
+         OR EXISTS (SELECT 1 FROM managers mg JOIN mine m ON ${sameMgr} WHERE mg.staff_id = s.id)) ORDER BY s.name`;
+  return (await db.prepare(sql).bind(me.id, me.client_id).all<{ id: number; name: string; first_name: string | null; color: string | null; photo_v: number | null }>()).results;
+}
+const isManagerSomewhere = async (db: D1Database, me: Me) => !!(await db.prepare("SELECT 1 FROM managers WHERE staff_id = ? LIMIT 1").bind(me.id).first());
+
 app.get("/api/messages/people", async (c) => {
-  const me = c.get("me");
-  const rows = (await c.env.DB.prepare(`SELECT ${dmPerson} FROM staff s WHERE s.client_id = ? AND s.active = 1 AND s.id != ? ORDER BY s.name`).bind(me.client_id, me.id).all<{ name: string }>()).results;
-  return c.json(sortByName(rows));
+  const me = c.get("me"), db = c.env.DB;
+  const s = await dmSettings(db, me.client_id);
+  const people = sortByName(await dmReachable(db, me, s));
+  return c.json({ people, can_group: canStartGroup(s, me, await isManagerSomewhere(db, me)), max_group: s.max_group, scope: me.is_admin ? "all" : s.scope, groups: s.groups });
+});
+
+// who may write to whom, and who may start a group (administrators)
+app.get("/api/admin/messages-settings", requireAdmin, async (c) => c.json(await dmSettings(c.env.DB, c.get("me").client_id)));
+app.put("/api/admin/messages-settings", requireAdmin, async (c) => {
+  const v = validateDm(await c.req.json().catch(() => null));
+  if ("error" in v) return c.json({ error: "invalid", field: v.error }, 400);
+  await putSettingStmt(c.env.DB, c.get("me").client_id, "dm_settings", JSON.stringify(v.value)).run();
+  return c.json({ ok: true, settings: v.value });
 });
 
 // my conversations, the most recent first, with who is in them, the last message and what I have not read
@@ -3568,11 +3595,14 @@ app.post("/api/messages/threads", async (c) => {
   const b = await c.req.json<{ member_ids?: unknown; title?: unknown; body?: unknown }>().catch(() => ({} as { member_ids?: unknown; title?: unknown; body?: unknown }));
   const ids = Array.isArray(b.member_ids) ? [...new Set(b.member_ids.filter((x): x is number => Number.isInteger(x) && x > 0 && x !== me.id))] : [];
   const body = dmClean(b.body), title = dmClean(b.title).slice(0, 60) || null;
-  if (!ids.length || ids.length >= DM_MAX_MEMBERS) return c.json({ error: "invalid_members" }, 400);
+  const ds = await dmSettings(db, me.client_id);
+  if (!ids.length || ids.length >= Math.min(DM_MAX_MEMBERS, ds.max_group)) return c.json({ error: "invalid_members" }, 400);
   if (!body || body.length > DM_MAX_LEN) return c.json({ error: "invalid_body" }, 400);
-  const ok = await db.prepare(`SELECT count(*) AS n FROM staff WHERE client_id = ? AND active = 1 AND id IN (${ids.map(() => "?").join(",")})`).bind(me.client_id, ...ids).first<{ n: number }>();
-  if (ok?.n !== ids.length) return c.json({ error: "invalid_members" }, 400);
   const group = ids.length > 1;
+  if (group && !canStartGroup(ds, me, await isManagerSomewhere(db, me))) return c.json({ error: "groups_not_allowed" }, 403);
+  // only people one may write to (the same rule as the list of names)
+  const reach = new Set((await dmReachable(db, me, ds)).map((p) => p.id));
+  if (!ids.every((id) => reach.has(id))) return c.json({ error: "not_reachable" }, 403);
   let threadId: number | null = null;
   if (!group) threadId = (await db.prepare("SELECT t.id FROM dm_threads t JOIN dm_members a ON a.thread_id = t.id AND a.staff_id = ? JOIN dm_members b ON b.thread_id = t.id AND b.staff_id = ? WHERE t.is_group = 0 AND t.client_id = ? LIMIT 1").bind(me.id, ids[0], me.client_id).first<{ id: number }>())?.id ?? null;
   if (threadId === null) {
