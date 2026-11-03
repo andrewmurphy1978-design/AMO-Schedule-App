@@ -2852,7 +2852,7 @@ async function renderAccount() {
       const add = passkeysSupported()
         ? h("button", { class: "btn primary", type: "button", onClick: async () => {
             try { await registerPasskey(); toast(t("secPasskeyAdded")); draw(); }
-            catch (err) { toast(err?.body?.error === "too_many_passkeys" ? t("secPasskeyTooMany") : t("secPasskeyCancelled")); }
+            catch (err) { toast(err?.body?.error === "too_many_passkeys" ? t("secPasskeyTooMany") : err?.name === "InvalidStateError" ? t("secPasskeyAlready") : t("secPasskeyCancelled")); }
           } }, t("secAddPasskey"))
         : h("p", { class: "meta" }, t("secPasskeyUnsupported"));
       const cur = h("input", { type: "password", autocomplete: "current-password", maxLength: 200 });
@@ -2868,7 +2868,7 @@ async function renderAccount() {
         h("label", { class: "field" }, h("span", {}, t("secPasswordNew")), pw1), h("label", { class: "field" }, h("span", {}, t("secPasswordConfirm")), pw2),
         h("button", { class: "btn primary", type: "submit" }, info.has_password ? t("secChangePassword") : t("secSetPassword")));
       box.replaceChildren(
-        h("div", { class: "sec-block" }, h("h3", {}, t("secPasskeys")), h("p", { class: "meta" }, t("secPasskeysHelp")), ...keys, add),
+        h("div", { class: "sec-block" }, h("h3", {}, t("secPasskeys")), h("p", { class: "meta" }, t("secPasskeysHelp")), h("p", { class: "meta" }, t("secSyncedHint")), ...keys, add),
         h("div", { class: "sec-block" }, h("h3", {}, t("secPassword")), h("p", { class: "meta" }, info.has_password ? t("secPasswordSet") : t("secPasswordNone")), h("p", { class: "meta" }, t("secPasswordHelp")), pwForm,
           ...(info.has_password ? [h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemovePasswordConfirm"))) { await api("/account/password", { method: "DELETE" }); toast(t("secPasswordRemoved")); draw(); } } }, t("secRemovePassword"))] : [])));
     };
@@ -4796,7 +4796,7 @@ async function appStage(info) {
   // "Later" asks again after a day; it can always be done in Account → Security.
   if (passkeysSupported() && !info.passkeys.length && Date.now() - Number(lsGet("pk_later") ?? 0) > 24 * 3600 * 1000) {
     const yes = await confirmDialog({ title: t("confirmTitle"), message: t("passkeyOffer"), yes: t("passkeyOfferYes"), no: t("onbLater") });
-    if (yes) { try { await registerPasskey(); toast(t("secPasskeyAdded")); } catch { lsSet("pk_later", String(Date.now())); toast(t("secPasskeyCancelled")); } }
+    if (yes) { try { await registerPasskey(); toast(t("secPasskeyAdded")); } catch (err) { lsSet("pk_later", String(Date.now())); toast(err?.name === "InvalidStateError" ? t("secPasskeyAlready") : t("secPasskeyCancelled")); } }
     else { lsSet("pk_later", String(Date.now())); toast(t("passkeyLaterHint")); }
   }
   if (!info.has_password) await passwordRequired();
