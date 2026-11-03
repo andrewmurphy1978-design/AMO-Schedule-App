@@ -1312,3 +1312,4 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .inv-part input[type=number] { width: 100%; }
 .inv-part select { width: 100%; min-width: 0; }
 .inv-part .inv-unit { grid-column: 1 / -1; width: 100%; }
+.btn.link { background: none; border: 0; color: var(--brand, #da291c); text-decoration: underline; font-weight: 600; padding: .4rem 0; }

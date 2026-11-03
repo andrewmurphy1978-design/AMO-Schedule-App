@@ -5212,11 +5212,24 @@ function renderLogin(prefill = "") {
     try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); stepCode(); }
     catch (err) { fail(err, err.body?.error === "invalid_email" ? t("invalidEmail") : t("genericError")); }
   };
+  // two pages: the first connection (the e-mail only, then the emailed code) and the usual one (passkey, password, or a code)
+  const seen = () => lsGet("amo_login_seen") === "1";
+  const stepFirst = () => {
+    msg.textContent = ""; password.value = "";
+    $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, t("loginFirstHelp")),
+      h("form", { class: "acc-form", onSubmit: (e) => { e.preventDefault(); sendCode(); } },
+        h("label", { class: "field" }, h("span", {}, t("loginEmail")), email), msg,
+        h("button", { class: "btn primary", type: "submit" }, `✉️ ${t("loginFirstBtn")}`)),
+      h("div", { class: "login-or" }, t("loginOr")),
+      h("button", { class: "btn", type: "button", onClick: () => { state.loginMode = "returning"; stepEmail(); } }, t("loginGoReturning"))));
+    email.focus();
+  };
   const stepEmail = () => {
+    if ((state.loginMode ?? (seen() ? "returning" : "first")) === "first") { stepFirst(); return; }
     msg.textContent = ""; password.value = "";
     const usePasskey = async () => {
       msg.textContent = "";
-      try { await passkeySignIn(); boot(); }
+      try { await passkeySignIn(); lsSet("amo_login_seen", "1"); boot(); }
       catch (err) { if (err?.name !== "NotAllowedError" && err?.name !== "AbortError") msg.textContent = t("loginPasskeyFailed"); }
     };
     $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, brandText("intro") || t("loginIntro")),
@@ -5224,13 +5237,14 @@ function renderLogin(prefill = "") {
       h("form", { class: "acc-form", onSubmit: async (e) => {
         e.preventDefault();
         if (!password.value) { sendCode(); return; } // no password typed: the emailed code is the way in
-        try { await api("/auth/password", { method: "POST", body: { email: email.value, password: password.value } }); boot(); }
+        try { await api("/auth/password", { method: "POST", body: { email: email.value, password: password.value } }); lsSet("amo_login_seen", "1"); boot(); }
         catch (err) { fail(err, t("loginBadPassword")); password.value = ""; password.focus(); }
       } }, h("label", { class: "field" }, h("span", {}, t("loginEmail")), email), h("label", { class: "field" }, h("span", {}, t("loginPassword")), password), msg,
         h("button", { class: "btn primary", type: "submit" }, t("loginPasswordSubmit"))),
       h("div", { class: "login-or" }, t("loginOr")),
       h("button", { class: "btn", type: "button", onClick: sendCode }, t("loginByCode")),
-      h("p", { class: "meta" }, t("loginForgot"))));
+      h("p", { class: "meta" }, t("loginForgot")),
+      h("button", { class: "btn link", type: "button", onClick: () => { state.loginMode = "first"; stepEmail(); } }, t("loginGoFirst"))));
     email.focus();
   };
   const stepCode = () => {
@@ -5238,7 +5252,7 @@ function renderLogin(prefill = "") {
     $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, t("loginCodeSent")), h("p", {}, h("b", {}, email.value.trim())),
       h("form", { class: "acc-form", onSubmit: async (e) => {
         e.preventDefault();
-        try { await api("/auth/verify", { method: "POST", body: { email: email.value, code: code.value } }); boot(); }
+        try { await api("/auth/verify", { method: "POST", body: { email: email.value, code: code.value } }); lsSet("amo_login_seen", "1"); boot(); }
         catch (err) { fail(err, t("loginBadCode")); code.value = ""; code.focus(); }
       } }, code, msg, h("button", { class: "btn primary", type: "submit" }, t("loginVerify"))),
       h("div", { class: "actions" },
