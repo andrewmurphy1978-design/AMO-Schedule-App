@@ -3401,7 +3401,7 @@ app.post("/api/push/test", async (c) => {
 // administrators see them all. Managers of a department of the group, and administrators, moderate (pin, delete).
 const COMMUNITY_DEPTS = ["floor", "kitchen", "prep", "delivery", "admin"];
 type CommunityRow = { id: number; name: string; restaurant_id: number; restaurant: string; position: number };
-async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null; departments: string[] })[]> {
+async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { unread: number; last_post_at: string | null; last_body?: string | null; last_by?: string | null; last_media?: string | null; departments: string[] })[]> {
   const base = "SELECT DISTINCT c.id, c.name, c.restaurant_id, r.name AS restaurant, c.position FROM communities c JOIN restaurants r ON r.id = c.restaurant_id";
   const custom = !me.is_admin && (await db.prepare("SELECT community_custom FROM staff WHERE id = ?").bind(me.id).first<{ community_custom: number }>())?.community_custom === 1;
   const byRole = `${base} JOIN community_departments cd ON cd.community_id = c.id JOIN roles ro ON ro.department_id = cd.department_id
@@ -3420,9 +3420,12 @@ async function myCommunities(db: D1Database, me: Me): Promise<(CommunityRow & { 
   const marks = rows.map(() => "?").join(",");
   const stats = (await db.prepare(
     `SELECT c.id, (SELECT max(created_at) FROM community_posts WHERE community_id = c.id) AS last_post_at,
+            (SELECT p.body FROM community_posts p WHERE p.community_id = c.id ORDER BY p.id DESC LIMIT 1) AS last_body,
+            (SELECT coalesce(s.first_name, s.name) FROM community_posts p JOIN staff s ON s.id = p.staff_id WHERE p.community_id = c.id ORDER BY p.id DESC LIMIT 1) AS last_by,
+            (SELECT mm.kind FROM community_media mm WHERE mm.post_id = (SELECT p.id FROM community_posts p WHERE p.community_id = c.id ORDER BY p.id DESC LIMIT 1) LIMIT 1) AS last_media,
             (SELECT count(*) FROM community_posts p WHERE p.community_id = c.id AND p.staff_id != ? AND p.id > coalesce((SELECT last_post_id FROM community_reads WHERE community_id = c.id AND staff_id = ?), 0)) AS unread
      FROM communities c WHERE c.id IN (${marks})`,
-  ).bind(me.id, me.id, ...rows.map((r) => r.id)).all<{ id: number; last_post_at: string | null; unread: number }>()).results;
+  ).bind(me.id, me.id, ...rows.map((r) => r.id)).all<{ id: number; last_post_at: string | null; unread: number; last_body: string | null; last_by: string | null; last_media: string | null }>()).results;
   const deps = (await db.prepare(`SELECT community_id, department_id FROM community_departments WHERE community_id IN (${marks})`).bind(...rows.map((r) => r.id)).all<{ community_id: number; department_id: string }>()).results;
   return rows.map((r) => ({ ...r, departments: deps.filter((d) => d.community_id === r.id).map((d) => d.department_id), ...(stats.find((x) => x.id === r.id) ?? { unread: 0, last_post_at: null }) }));
 }

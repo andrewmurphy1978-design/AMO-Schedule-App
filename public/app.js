@@ -2647,14 +2647,62 @@ async function messageComposer(box, toThread, toList, group = false) {
       h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); ready(); }) }, "😊"), send))));
 }
 
+/** The Messenger-style write bar, shared by Messages and Communities: round icons that fold into "›" while typing, a thumbs-up when empty, ➤ when there is something to send.
+ *  opts: { uploadUrl, send({ body, media_ids }) (throws to keep what was typed), placeholder, like: "👍" }. Returns { form, previews, body, focus() }. */
+function messengerBar({ uploadUrl, send, placeholder, like = "👍" }) {
+  const finePointer = window.matchMedia("(pointer: fine)").matches;
+  const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: placeholder ?? t("dmMsgPh"), "aria-label": t("dmWrite") });
+  const grow = () => { body.style.height = "auto"; body.style.height = `${Math.min(body.scrollHeight, 140)}px`; };
+  let attached = [], expanded = true, busy = false;
+  const previews = h("div", { class: "comm-previews dm-previews" });
+  const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
+    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : m.kind === "audio" ? h("div", { class: "comm-preview-audio" }, h("audio", { src: m.url, controls: true, preload: "metadata" }), m.transcript ? h("small", { class: "meta" }, `📝 ${m.transcript}`) : null) : h("img", { src: m.url, alt: "" }),
+    h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); sync(); } }, "✕"))));
+  const upload = async (file) => {
+    if (attached.length >= 4) { toast(t("mediaTooMany")); return; }
+    try { toast(t("mediaUploading")); attached.push(await uploadMedia(uploadUrl, file)); drawPreviews(); sync(); }
+    catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
+  };
+  const picker = h("input", { type: "file", accept: "image/*,video/*,audio/*", multiple: true, hidden: true, onChange: async (e) => { const files = [...e.target.files]; e.target.value = ""; for (const f of files) await upload(f); } });
+  const record = async (video) => { const file = await recordMessage(video); if (file) await upload(file); };
+  const ic = (icon, label, run) => h("button", { class: "dm-ic round", type: "button", "aria-label": label, title: label, onClick: run }, icon);
+  const toolsEl = h("div", { class: "dm-bar-tools" }, ic("📎", t("addMedia"), () => picker.click()), picker, ic("🎤", t("recVoice"), () => record(false)), ic("🎥", t("recVideo"), () => record(true)),
+    ic("😊", t("emojis"), (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); if (body.value.trim()) expanded = false; sync(); grow(); })));
+  const moreBtn = ic("›", t("dmMoreTools"), () => { expanded = true; sync(); });
+  moreBtn.classList.add("dm-more");
+  const sendBtn = h("button", { class: "dm-send", type: "submit" });
+  const typing = () => body.value.trim().length > 0 || attached.length > 0;
+  function sync() {
+    if (!typing()) expanded = true;
+    toolsEl.hidden = typing() && !expanded; moreBtn.hidden = !(typing() && !expanded);
+    const on = typing();
+    sendBtn.textContent = on ? "➤" : like; sendBtn.classList.toggle("like", !on); sendBtn.setAttribute("aria-label", on ? t("dmSend") : t("dmLike")); sendBtn.title = on ? t("dmSend") : t("dmLike");
+  }
+  body.addEventListener("input", () => { if (body.value.trim() && expanded) expanded = false; sync(); grow(); });
+  const sendNow = async (e) => {
+    e?.preventDefault();
+    if (busy) return;
+    const text = body.value.trim();
+    const quick = !text && !attached.length;                       // nothing written: the thumbs-up
+    busy = true;
+    try {
+      await send({ body: quick ? like : text, media_ids: attached.map((m) => m.id) });
+      body.value = ""; attached = []; drawPreviews(); expanded = true; grow(); sync();
+    } catch (err) { toast(err?.body?.error === "too_many_requests" ? t("dmSlow") : errorText(err)); }
+    finally { busy = false; }
+  };
+  // a computer: Enter sends (Shift+Enter = new line); a phone: Enter is a new line and the button sends
+  body.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && (finePointer ? !e.shiftKey : false)) sendNow(e); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendNow(e); });
+  const form = h("form", { class: "dm-compose", onSubmit: sendNow }, toolsEl, moreBtn, body, sendBtn);
+  sync();
+  return { form, previews, body, focus: () => { if (finePointer) body.focus(); } };
+}
+
 const dmMediaLabel = (k) => (k === "video" ? `🎥 ${t("dmVideo")}` : k === "audio" ? `🎤 ${t("voiceMsg")}` : `📷 ${t("dmPhoto")}`);
 /** One conversation: a header (back arrow, who), the messages, and a Messenger-style bar to answer. */
 async function messageThread(box, id, myId, toList, onChange) {
   let d = await api(`/messages/threads/${id}`);
   const msgs = h("div", { class: "dm-msgs", "aria-live": "polite" });
-  const finePointer = window.matchMedia("(pointer: fine)").matches;
-  const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: t("dmMsgPh"), "aria-label": t("dmWrite") });
-  const grow = () => { body.style.height = "auto"; body.style.height = `${Math.min(body.scrollHeight, 140)}px`; };
   const nameOf = (sid) => { const p = d.members.find((m) => m.id === sid); return p ? dmFirst(p) : "—"; };
   const person = (sid) => d.members.find((m) => m.id === sid);
   const th = () => ({ ...d.thread, members: d.members });
@@ -2662,12 +2710,8 @@ async function messageThread(box, id, myId, toList, onChange) {
   const hhmm = (ms) => new Date(ms).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
   const snippet = (m) => (m.deleted ? t("dmDeleted") : m.body || (m.media?.[0] ? dmMediaLabel(m.media[0].kind) : m.kind ? dmMediaLabel(m.kind) : ""));
   // what is being written: pictures / voice already uploaded, the message being answered
-  let attached = [], replyTo = null, expanded = true;
-  const previews = h("div", { class: "comm-previews dm-previews" });
+  let replyTo = null;
   const replyBar = h("div", { class: "dm-replybar", hidden: true });
-  const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
-    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : m.kind === "audio" ? h("div", { class: "comm-preview-audio" }, h("audio", { src: m.url, controls: true, preload: "metadata" })) : h("img", { src: m.url, alt: "" }),
-    h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); sync(); } }, "✕"))));
   const setReply = (m) => {
     replyTo = m; replyBar.hidden = !m;
     replyBar.replaceChildren(...(m ? [h("div", { class: "dm-replytxt" }, h("b", {}, `${t("dmReplyTo")} ${m.mine ? t("dmYou") : nameOf(m.staff_id)}`), h("span", { class: "meta" }, snippet(m))), h("button", { type: "button", class: "round", "aria-label": t("cancel"), onClick: () => setReply(null) }, "✕")] : []));
@@ -2713,50 +2757,21 @@ async function messageThread(box, id, myId, toList, onChange) {
   }
   async function reload(stick) { d = await api(`/messages/threads/${id}`); paint(stick); api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {}); onChange?.(); }
 
-  // the bar: round icons on the left; as soon as something is typed they fold into a "›" and the arrow appears; empty, the button is a thumbs-up
-  const upload = async (file) => {
-    if (attached.length >= 4) { toast(t("mediaTooMany")); return; }
-    try { toast(t("mediaUploading")); attached.push(await uploadMedia(`/api/messages/threads/${id}/media`, file)); drawPreviews(); sync(); }
-    catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
-  };
-  const picker = h("input", { type: "file", accept: "image/*,video/*,audio/*", multiple: true, hidden: true, onChange: async (e) => { const files = [...e.target.files]; e.target.value = ""; for (const f of files) await upload(f); } });
-  const record = async (video) => { const file = await recordMessage(video); if (file) await upload(file); };
-  const ic = (icon, label, run) => h("button", { class: "dm-ic round", type: "button", "aria-label": label, title: label, onClick: run }, icon);
-  const toolsEl = h("div", { class: "dm-bar-tools" }, ic("📎", t("addMedia"), () => picker.click()), picker, ic("🎤", t("recVoice"), () => record(false)), ic("🎥", t("recVideo"), () => record(true)),
-    ic("😊", t("emojis"), (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); sync(); grow(); })));
-  const moreBtn = ic("›", t("dmMoreTools"), () => { expanded = true; sync(); });
-  moreBtn.classList.add("dm-more");
-  const sendBtn = h("button", { class: "dm-send", type: "submit" });
-  const typing = () => body.value.trim().length > 0 || attached.length > 0;
-  function sync() {
-    if (!typing()) expanded = true;
-    toolsEl.hidden = typing() && !expanded; moreBtn.hidden = !(typing() && !expanded);
-    const on = typing();
-    sendBtn.textContent = on ? "➤" : "👍"; sendBtn.classList.toggle("like", !on); sendBtn.setAttribute("aria-label", on ? t("dmSend") : t("dmLike")); sendBtn.title = on ? t("dmSend") : t("dmLike");
-  }
-  body.addEventListener("input", () => { if (body.value.trim() && expanded) expanded = false; sync(); grow(); });
-  const sendNow = async (e) => {
-    e?.preventDefault();
-    const text = body.value.trim();
-    const like = !text && !attached.length;                       // nothing written: the thumbs-up
-    try {
-      await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: like ? "👍" : text, media_ids: attached.map((m) => m.id), reply_to: replyTo?.id } });
-      body.value = ""; attached = []; drawPreviews(); setReply(null); expanded = true; grow(); sync(); await reload(true);
-    } catch (err) { toast(err.body?.error === "too_many_requests" ? t("dmSlow") : errorText(err)); }
-  };
-  // a computer: Enter sends (Shift+Enter = new line); a phone: Enter is a new line and the button sends
-  body.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && (finePointer ? !e.shiftKey : false)) sendNow(e); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendNow(e); });
+  const bar = messengerBar({ uploadUrl: `/api/messages/threads/${id}/media`, send: async ({ body: text, media_ids }) => {
+    await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: text, media_ids, reply_to: replyTo?.id } });
+    setReply(null); await reload(true);
+  } });
+  const body = bar.body;
   const members = d.members.filter((m) => m.id !== myId);
   box.replaceChildren(h("div", { class: "dm-chat" },
     h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"),
       h("div", { class: "dm-title" }, dmIcon(th(), myId, 40), h("div", { class: "dm-title-tx" }, h("b", {}, dmName(th(), myId)), d.thread.is_group ? h("div", { class: "meta" }, `${d.members.length} ${t("dmPeople")} · ${members.map(dmFirst).join(", ")}`) : null)),
       d.thread.is_group ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("dmLeaveConfirm"))) { try { await api(`/messages/threads/${id}/leave`, { method: "POST" }); toList(); } catch (e) { toast(errorText(e)); } } } }, t("dmLeave")) : null),
-    msgs, replyBar, previews,
-    h("form", { class: "dm-compose", onSubmit: sendNow }, toolsEl, moreBtn, body, sendBtn)));
-  paint(true); sync();
+    msgs, replyBar, bar.previews, bar.form));
+  paint(true);
   api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {});
   state.dmTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmTimer); return; } if (!document.hidden && !body.value.trim()) reload(false).catch(() => {}); }, 12000); // new messages arrive while it is open
-  if (finePointer) body.focus();
+  bar.focus();
 }
 
 async function renderCommunity() {
@@ -2764,79 +2779,91 @@ async function renderCommunity() {
   // two tabs at the top: Communities (the boards) and Messages (personal messages, always there, even with no community)
   const tab = state.commTab ?? (list.length ? "communities" : "messages");
   const dmMode = tab === "messages";
-  if (!dmMode && list.length && !list.some((x) => x.id === state.communityId)) state.communityId = (list.find((x) => x.unread) ?? list[0]).id;
+  if (!dmMode && list.length && !list.some((x) => x.id === state.communityId)) { state.communityId = (list.find((x) => x.unread) ?? list[0]).id; state.commOpen = false; }
   const postsUnread = list.reduce((n, x) => n + (x.unread || 0), 0);
   const topTabs = h("div", { class: "subtabs comm-top", role: "tablist" }, [["communities", `🏘️ ${t("communityTab")}`, postsUnread], ["messages", `💬 ${t("dmTab")}`, state.dmUnread ?? 0]].map(([id, label, n]) =>
-    h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { state.commTab = id; if (id === "messages") state.dmThread = null; renderCommunity(); } }, label, n > 0 && tab !== id ? h("span", { class: "nav-badge" }, String(n)) : null)));
+    h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { state.commTab = id; if (id === "messages") state.dmThread = null; else state.commOpen = false; renderCommunity(); } }, label, n > 0 && tab !== id ? h("span", { class: "nav-badge" }, String(n)) : null)));
+  const inner = h("div", { class: "dm" });
+  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, inner));
+  if (dmMode) { await renderMessages(inner); return; }
+  if (!list.length) { inner.replaceChildren(h("div", { class: "empty" }, t("noCommunity"))); return; }
+  inner.classList.add("comm-boards");
+  await renderBoards(inner, list);
+}
+
+// Communities work exactly like Messages: a computer shows the boards on the left and the chosen one on the right; a phone shows the list,
+// then a full-screen feed with a back arrow. The posts are on top (the newest at the bottom), the write bar is at the bottom.
+async function renderBoards(box, list) {
+  clearInterval(state.dmTimer); clearInterval(state.dmListTimer);
+  const desktop = mqDesktop.matches;
+  const root = box.closest(".community");
+  const setOpen = (on) => root?.classList.toggle("dm-open", on && !desktop);
   const manyRestos = new Set(list.map((x) => x.restaurant_id)).size > 1;
   const short = (n) => n.split(/-des-|\sdes\s/)[0];
-  // "Saint-Sauveur" -> SS, "Ste-Agathe-des-Monts" -> SA
-  const restoCode = (n) => n.split(/[-\s]+/).filter((w) => w && !/^(des?|du|la|le|les)$/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
-  const shortIcons = (deps) => { const list = deps.filter((d) => d !== "admin"); return [...(list.length ? list : deps)].sort((a, b) => DEPTS.indexOf(a) - DEPTS.indexOf(b)).map(deptIcon).join(""); };
-  const feed = h("div", { class: "comm-feed" });
-  const pills = h("div", { class: "comm-pills", role: "tablist" }, list.map((x) =>
-    h("button", { type: "button", role: "tab", "aria-selected": String(x.id === state.communityId), title: `${x.restaurant} · ${x.name}`, "aria-label": `${x.restaurant} · ${x.name}`, onClick: () => { state.communityId = x.id; renderCommunity(); } },
-      // desktop: the names; phone: the restaurant code (SS, SA…) and the icons of the departments
-      h("span", { class: "cp-full" }, manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name),
-      h("span", { class: "cp-short" }, `${manyRestos ? `${restoCode(x.restaurant)} ` : ""}${shortIcons(x.departments)}`),
-      x.unread && x.id !== state.communityId ? h("span", { class: "nav-badge" }, String(x.unread)) : null)));
-  if (dmMode) {
-    const dmBox = h("div", { class: "dm" });
-    $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, dmBox));
-    await renderMessages(dmBox);
+  const shortIcons = (deps) => { const l = deps.filter((d) => d !== "admin"); return [...(l.length ? l : deps)].sort((a, b) => DEPTS.indexOf(a) - DEPTS.indexOf(b)).map(deptIcon).join(""); };
+  const title = (x) => (manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name);
+  const when = (iso) => { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
+  const preview = (x) => (x.last_body ? `${x.last_by}: ${x.last_body}` : x.last_media ? `${x.last_by}: ${dmMediaLabel(x.last_media)}` : t("noPosts"));
+  const search = h("input", { type: "search", class: "dm-search", placeholder: t("commFind"), "aria-label": t("commFind"), autocomplete: "off" });
+  const listEl = h("div", { class: "dm-list", role: "list" });
+  const norm = (x) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const pane = h("section", { class: "dm-main" });
+  const syncBadges = () => { state.communityUnread = list.reduce((n, x) => n + (x.unread || 0), 0) + (state.dmUnread ?? 0); renderChrome(); };
+  const refreshList = async () => { try { const fresh = await api("/communities"); list.splice(0, list.length, ...fresh); } catch { return; } syncBadges(); paintList(); };
+  const open = (id) => { state.communityId = id; state.commOpen = true; if (desktop) { paintList(); renderPane(); } else renderBoards(box, list); };
+  const toList = () => { state.commOpen = false; renderBoards(box, list); };
+  function paintList() {
+    const q = norm(search.value.trim());
+    const rows = list.filter((x) => !q || norm(`${x.restaurant} ${x.name}`).includes(q));
+    listEl.replaceChildren(...(rows.length ? rows.map((x) => h("button", { type: "button", role: "listitem", class: `dm-row ${x.unread ? "unread" : ""} ${desktop && state.communityId === x.id ? "selected" : ""}`, "aria-current": desktop && state.communityId === x.id ? "true" : "false", onClick: () => open(x.id) },
+      h("span", { class: "dm-group-ic board-ic", style: "--s:52px", "aria-hidden": "true" }, shortIcons(x.departments)),
+      h("span", { class: "dm-row-main" }, h("span", { class: "dm-row-top" }, h("b", {}, title(x)), x.last_post_at ? h("span", { class: "meta dm-when" }, when(x.last_post_at)) : null),
+        h("span", { class: "dm-preview-line" }, h("span", { class: "meta dm-preview" }, preview(x)), x.unread ? h("span", { class: "dm-dot", "aria-label": `${x.unread}` }, x.unread > 9 ? "9+" : String(x.unread)) : null)))) : [h("div", { class: "empty" }, t("dmNoMatch"))]));
+  }
+  search.addEventListener("input", paintList);
+  async function renderPane() {
+    clearInterval(state.dmTimer);
+    const c = list.find((x) => x.id === state.communityId);
+    if (!c || (!desktop && !state.commOpen)) { setOpen(false); pane.replaceChildren(h("div", { class: "dm-placeholder" }, h("div", { class: "dm-placeholder-ic", "aria-hidden": "true" }, "🏘️"), h("p", {}, t("commPick")))); return; }
+    setOpen(true);
+    await communityFeed(pane, c, { shortIcons, title, toList, onChange: refreshList });
+  }
+  if (desktop) {
+    box.replaceChildren(h("div", { class: "dm-split" }, h("aside", { class: "dm-side" }, h("div", { class: "dm-head" }, h("h3", {}, t("communityTab"))), search, listEl), pane));
+    paintList(); await renderPane();
+    state.dmListTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmListTimer); return; } if (!document.hidden) refreshList(); }, 30000);
     return;
   }
-  if (!list.length) { $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, h("div", { class: "empty" }, t("noCommunity")))); return; }
-  const id = state.communityId;
-  let moderator = false;
-  const body = h("textarea", { maxLength: 2000, rows: 2, placeholder: t("writePost"), "aria-label": t("writePost") });
-  // photos and videos: uploaded as soon as they are picked, attached to the post when it is published
-  let attached = [];
-  const previews = h("div", { class: "comm-previews" });
-  const drawPreviews = () => previews.replaceChildren(...attached.map((m, i) => h("div", { class: "comm-preview" },
-    m.kind === "video" ? h("video", { src: m.url, muted: true, playsinline: true, preload: "metadata" }) : m.kind === "audio" ? h("div", { class: "comm-preview-audio" }, h("audio", { src: m.url, controls: true, preload: "metadata" }), m.transcript ? h("small", { class: "meta" }, `📝 ${m.transcript}`) : null) : h("img", { src: m.url, alt: "" }),
-    h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { attached.splice(i, 1); drawPreviews(); } }, "✕"))));
-  const picker = h("input", { type: "file", accept: "image/*,video/*,audio/*", multiple: true, hidden: true, onChange: async (e) => {
-    const files = [...e.target.files]; e.target.value = "";
-    for (const file of files) {
-      if (attached.length >= 4) { toast(t("mediaTooMany")); break; }
-      try { toast(t("mediaUploading")); attached.push(await uploadCommunityMedia(id, file)); drawPreviews(); }
-      catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
-    }
-  } });
-  // record a voice or video message right here: it is uploaded (and transcribed) like a picked file
-  const record = async (withVideo) => {
-    const file = await recordMessage(withVideo); if (!file) return;
-    if (attached.length >= 4) { toast(t("mediaTooMany")); return; }
-    try { toast(t("transcriptWorking")); attached.push(await uploadCommunityMedia(id, file)); drawPreviews(); }
-    catch (err) { toast(err.message === "too_large" ? t("mediaTooBig") : err.message === "invalid_type" ? t("mediaBadType") : errorText(err)); }
-  };
-  const compose = h("form", { class: "comm-compose", onSubmit: async (e) => {
-    e.preventDefault();
-    if (!body.value.trim() && !attached.length) return;
-    try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: body.value, media_ids: attached.map((m) => m.id) } }); body.value = ""; attached = []; drawPreviews(); await load(); } catch (err) { toast(errorText(err)); }
-  } }, body, previews,
-    h("div", { class: "comm-compose-actions" },
-      h("div", { class: "comm-tools" }, h("button", { class: "btn", type: "button", "aria-label": t("addMedia"), title: t("addMedia"), onClick: () => picker.click() }, h("span", { "aria-hidden": "true" }, "📎"), h("span", { class: "btn-tx" }, ` ${t("addMedia")}`)), picker,
-        h("button", { class: "btn", type: "button", "aria-label": t("recVoice"), title: t("recVoice"), onClick: () => record(false) }, "🎤"),
-        h("button", { class: "btn", type: "button", "aria-label": t("recVideo"), title: t("recVideo"), onClick: () => record(true) }, "🎥"),
-        h("button", { class: "btn", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(body, em)) }, "😊")),
-      h("button", { class: "btn primary", type: "submit", "aria-label": t("publishPost"), title: t("publishPost") }, h("span", { class: "btn-ic", "aria-hidden": "true" }, "➤"), h("span", { class: "btn-tx" }, t("publishPost")))));
+  if (state.commOpen && list.some((x) => x.id === state.communityId)) { box.replaceChildren(pane); await renderPane(); return; }
+  setOpen(false);
+  // phone: the list; the search sits behind a magnifier next to the tabs, like in Messages
+  search.hidden = !search.value;
+  const bar = root?.querySelector(".comm-top");
+  bar?.querySelector(".dm-loupe")?.remove();
+  const loupe = h("button", { type: "button", class: "dm-loupe", "aria-label": t("commFind"), title: t("commFind"), "aria-expanded": String(!search.hidden), onClick: () => {
+    search.hidden = !search.hidden; loupe.setAttribute("aria-expanded", String(!search.hidden));
+    if (search.hidden) { search.value = ""; paintList(); } else search.focus();
+  } }, "🔍");
+  bar?.append(loupe);
+  box.replaceChildren(search, listEl); paintList();
+}
+
+/** One board: its posts on top (pinned ones in a strip, the newest at the bottom), the Messenger-style write bar at the bottom. */
+async function communityFeed(box, c, { shortIcons, title, toList, onChange }) {
+  const id = c.id;
+  let posts = [], moderator = false, more = false;
+  const msgs = h("div", { class: "dm-msgs comm-posts", "aria-live": "polite" });
+  const pinnedBox = h("div", { class: "comm-pinned", hidden: true });
   const author = (x) => h("div", { class: "post-who" }, avatar(x.staff_id, x.author, x.color, x.photo_v, 34), h("div", {}, h("b", {}, x.first_name || x.author), h("span", { class: "meta" }, ` · ${timeAgo(x.created_at)}`)));
-  const del = (x) => x.can_delete ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } } }, t("delete")) : null;
-  const reactionBar = (x) => {
-    const toggle = async (emoji, on) => { try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
-    return h("div", { class: "reactions" },
-      ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggle(r.emoji, !r.mine) }, `${r.emoji} ${r.count}`)));
-  };
-  const toggleReact = async (x, emoji) => { const on = !x.reactions.some((r) => r.emoji === emoji && r.mine); try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(); } catch (e) { toast(errorText(e)); } };
-  const removePost = async (x) => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(); } catch (e) { toast(errorText(e)); } } };
+  const reactionBar = (x) => h("div", { class: "reactions" }, ...x.reactions.map((r) => h("button", { type: "button", class: `react ${r.mine ? "mine" : ""}`, "aria-pressed": String(r.mine), onClick: () => toggleReact(x, r.emoji) }, `${r.emoji} ${r.count}`)));
+  const toggleReact = async (x, emoji) => { const on = !x.reactions.some((r) => r.emoji === emoji && r.mine); try { await api(`/community-posts/${x.id}/reaction`, { method: "PUT", body: { emoji, on } }); await load(false); } catch (e) { toast(errorText(e)); } };
+  const removePost = async (x) => { if (await ask(t("confirmDeletePost"))) { try { await api(`/community-posts/${x.id}`, { method: "DELETE" }); await load(false); } catch (e) { toast(errorText(e)); } } };
   const postCard = (x) => {
     const replyInput = h("input", { maxLength: 2000, placeholder: t("writeReply"), "aria-label": t("writeReply") });
     const replyBox = h("form", { class: "comm-reply", hidden: true, onSubmit: async (e) => {
       e.preventDefault();
       const input = e.target.querySelector("input"); if (!input.value.trim()) return;
-      try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(); } catch (err) { toast(errorText(err)); }
+      try { await api(`/communities/${id}/posts`, { method: "POST", body: { body: input.value, parent_id: x.id } }); await load(false); } catch (err) { toast(errorText(err)); }
     } }, replyInput, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(replyInput, em)) }, "😊"), h("button", { class: "btn sm primary", type: "submit" }, t("send")));
     const article = h("article", { class: `post ${x.pinned ? "pinned" : ""}` },
       x.pinned ? h("div", { class: "post-pin" }, `📌 ${t("pinned")}`) : null,
@@ -2845,26 +2872,37 @@ async function renderCommunity() {
       replyBox);
     // hover toolbar / long press: react, reply, pin (moderators), delete
     msgActions(article, { react: (e) => toggleReact(x, e), reply: () => { replyBox.hidden = false; replyBox.querySelector("input").focus(); },
-      pin: moderator ? { label: x.pinned ? t("unpin") : t("pin"), run: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(); } catch (e) { toast(errorText(e)); } } } : null,
+      pin: moderator ? { label: x.pinned ? t("unpin") : t("pin"), run: async () => { try { await api(`/community-posts/${x.id}/pin`, { method: "PUT", body: { pinned: !x.pinned } }); await load(false); } catch (e) { toast(errorText(e)); } } } : null,
       del: x.can_delete ? () => removePost(x) : null });
     return article;
   };
-  let posts = [];
-  async function load() {
-    const d = await api(`/communities/${id}/posts`);
-    moderator = d.moderator; posts = d.posts;
-    paint(d.more);
-    state.communityUnread = Math.max(0, (state.communityUnread ?? 0) - (list.find((x) => x.id === id)?.unread ?? 0)); list.find((x) => x.id === id).unread = 0; renderChrome();
+  const older = h("button", { class: "btn sm", type: "button", hidden: true, onClick: async () => {
+    const oldest = Math.min(...posts.filter((p) => !p.pinned).map((p) => p.id));
+    const more2 = await api(`/communities/${id}/posts?before=${oldest}`);
+    const have = new Set(posts.map((p) => p.id));
+    posts = [...posts, ...more2.posts.filter((p) => !have.has(p.id))]; more = more2.more; paint(false);
+  } }, t("olderPosts"));
+  function paint(stick) {
+    const nearBottom = stick || msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+    const pinned = posts.filter((p) => p.pinned), rest = posts.filter((p) => !p.pinned).sort((a, b) => a.id - b.id);
+    pinnedBox.replaceChildren(...pinned.map(postCard)); pinnedBox.hidden = !pinned.length;
+    msgs.replaceChildren(...(more ? [older] : []), ...(rest.length ? rest.map(postCard) : [h("div", { class: "empty" }, t("noPosts"))]));
+    older.hidden = !more;
+    if (nearBottom) msgs.scrollTop = msgs.scrollHeight;
   }
-  function paint(more) {
-    feed.replaceChildren(...(posts.length ? posts.map(postCard) : [h("div", { class: "empty" }, t("noPosts"))]),
-      ...(more ? [h("button", { class: "btn", type: "button", onClick: async () => {
-        const older = await api(`/communities/${id}/posts?before=${posts[posts.length - 1].id}`);
-        posts = [...posts, ...older.posts]; paint(older.more);
-      } }, t("olderPosts"))] : []));
-  }
-  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, pills, compose, feed));
-  await load();
+  async function load(stick) { const d = await api(`/communities/${id}/posts`); moderator = d.moderator; posts = d.posts; more = d.more; paint(stick); onChange?.(); }
+  const bar = messengerBar({ uploadUrl: `/api/communities/${id}/media`, send: async ({ body: text, media_ids }) => { await api(`/communities/${id}/posts`, { method: "POST", body: { body: text, media_ids } }); await load(true); } });
+  box.replaceChildren(h("div", { class: "dm-chat comm-feed-view" },
+    h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"),
+      h("div", { class: "dm-title" }, h("span", { class: "dm-group-ic board-ic", style: "--s:40px", "aria-hidden": "true" }, shortIcons(c.departments)), h("div", { class: "dm-title-tx" }, h("b", {}, title(c)), h("div", { class: "meta" }, c.restaurant)))),
+    pinnedBox, msgs, bar.previews, bar.form));
+  await load(true);
+  state.dmTimer = setInterval(() => {
+    if (!box.isConnected) { clearInterval(state.dmTimer); return; }
+    const typingReply = [...box.querySelectorAll(".comm-reply:not([hidden]) input")].some((i) => i.value);
+    if (!document.hidden && !typingReply && !bar.body.value.trim()) load(false).catch(() => {});   // new posts arrive while it is open
+  }, 15000);
+  bar.focus();
 }
 
 // "Install the app": Chrome, Edge and Android offer a prompt we can trigger; iPhone and Safari need the Share menu, so we explain it.
