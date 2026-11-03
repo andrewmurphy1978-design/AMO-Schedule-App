@@ -1313,3 +1313,8 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .inv-part select { width: 100%; min-width: 0; }
 .inv-part .inv-unit { grid-column: 1 / -1; width: 100%; }
 .btn.link { background: none; border: 0; color: var(--brand, #da291c); text-decoration: underline; font-weight: 600; padding: .4rem 0; }
+/* sign-in: the e-mail field takes the full width and the button sits under it, on a computer as on a phone */
+.login-card .acc-form { grid-template-columns: 1fr; max-width: none; gap: 1rem; }
+.login-card .acc-form .field, .login-card .acc-form input { width: 100%; box-sizing: border-box; }
+.login-card .acc-form .btn.primary { width: 100%; grid-column: auto; }
+.login-card { max-width: 480px; width: 100%; box-sizing: border-box; }
