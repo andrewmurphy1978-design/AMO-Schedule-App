@@ -2080,7 +2080,6 @@ async function renderChecklist() {
   state.restock = restock;
   const hasEnd = shifts.length > 0 || (test && state.me.me.is_admin);
   let sub = state.listsSub ?? (hasEnd ? "end" : "restock");
-  if (sub === "end" && !hasEnd && restock.length) sub = "restock";
   if ((sub === "restock" || sub === "prep" || sub === "orders") && !restock.length) sub = "end";
   const box = h("div", { class: "account checklist-view" }, h("h2", {}, t("listsTab")));
   $app.replaceChildren(box);
@@ -2089,7 +2088,11 @@ async function renderChecklist() {
   if (sub === "orders") { await renderOrders(box, restock); return; }
   if (sub === "restock" || sub === "prep") { await renderRestock(box, restock, sub); return; }
   if (test) box.append(h("div", { class: "info test-banner", role: "status" }, `🧪 ${t("checklistTestBanner")}`));
-  if (!shifts.length) { box.append(h("div", { class: "okmsg" }, `✓ ${t("checklistAllDone")}`), test ? h("p", { class: "meta" }, t("checklistTestNoShift")) : null); return; }
+  if (!shifts.length) {
+    // Opened on purpose from the sub-tabs: say why there is nothing to fill in, instead of jumping to another list.
+    box.append(h("div", { class: "info", role: "status" }, t("checklistNoneNow")), state.me.me.is_admin ? h("p", { class: "meta" }, t(test ? "checklistTestNoShift" : "checklistAdminHint")) : null);
+    return;
+  }
   for (const sh of shifts) box.append(await checklistCard(sh.id, sh, test));
 }
 // "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.
