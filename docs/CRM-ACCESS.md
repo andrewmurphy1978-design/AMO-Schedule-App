@@ -29,7 +29,12 @@ There are **two human sign-in paths** and **API tokens for other systems (sectio
    - `POST /api/auth/request` `{ "email": "...", "lang": "fr" }` → always answers `{ok:true}`; a 6-digit code is emailed (valid 10 min, 5 tries, max 5 codes/hour/address, 30 s between requests).
    - `POST /api/auth/verify` `{ "email": "...", "code": "123456" }` → sets an `sid` cookie (HttpOnly, Secure, SameSite=Lax, 30 days).
    - `POST /api/auth/logout` clears it.
-   - Needs SMTP configured for the client (or for client 1 as the fallback).
+   - Needs SMTP configured for the client (or for client 1 as the fallback). In production the SMTP relay is Brevo (IP restriction off, because Workers have no fixed IP).
+   - `POST /api/auth/password` `{ "email", "password" }` → sets the same `sid` cookie. Always the same answer (`400 invalid_credentials`) for a wrong password or unknown address; 5 failures lock that address for 15 minutes (`429`). Passwords are PBKDF2-SHA256 hashes (table `login_passwords`), optional, set by the employee in Account → Security.
+   - **Passkeys / biometrics** (Face ID, Touch ID, Android, Windows Hello; WebAuthn, discoverable credentials, user verification required): `POST /api/auth/passkey/options` then `POST /api/auth/passkey/verify` `{ cid, response }` → `sid` cookie. The relying-party id is the site's host name. Registered by the employee in Account → Security (`POST /api/account/passkeys/options`, `POST /api/account/passkeys`, `DELETE /api/account/passkeys/:id`); table `passkeys` stores only public keys.
+   - `GET /api/account/security`, `PUT|DELETE /api/account/password`: the signed-in employee's own password/passkeys (never available to API tokens, like all of `/api/account`).
+   - Every method re-checks that the email is an **active employee** (or platform owner) of an active client at sign-in time.
+   - `GET /api/admin/overview` staff rows carry `signed_in` (an unexpired browser session exists) and `last_seen_at` (`sessions.last_seen_at`, refreshed at most every 2 minutes); shown as a dot in Administration → Employés.
 
 3. **API token (for the CRM).** `Authorization: Bearer ams_...` — see section 6. No cookie, no Cloudflare Access login needed once the site is reachable (see "Cloudflare Access" below).
 
@@ -202,6 +207,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | **Sign-in by password and by passkey/biometrics** (migration 0082), sign-in screen rebuilt, Account → Security tab; **signed-in indicator** on the employee list (`signed_in`, `last_seen_at`; migration 0083). Google/Apple sign-in deliberately not built (unknown emails would be refused anyway). |
 | 2026-11-03 | Outgoing emails (login codes and notifications) now carry a sender display name (Branding "sender name", else the company name). In production the SMTP relay is Brevo (domain authenticated with DKIM/SPF/DMARC) instead of the IONOS mailbox; no secrets stored here. |
 | 2026-10-30 | **Checklist: "could not complete" with the missing ingredients** (counts as handled, shown in the daily report, managers notified; migration 0053). Breakfast posts only offered on shifts overlapping breakfast hours. |
 | 2026-10-30 | **Kitchen posts can be assigned for part of a shift** (optional `start_at`/`end_at` per post on `POST /shifts/:id/checklist/posts`; `ranges` in `/post-board`, `posts[].start_at/end_at` in `/schedule`; Postes timeline; migration 0054). |

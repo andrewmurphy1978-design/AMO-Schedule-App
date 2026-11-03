@@ -9,6 +9,7 @@
     "test": "node --test --experimental-strip-types test/*.test.ts"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.3",
     "hono": "^4.6.0"
   },
   "devDependencies": {

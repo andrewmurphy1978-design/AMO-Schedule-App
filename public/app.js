@@ -2580,6 +2580,42 @@ async function renderAccount() {
     h("div", { class: "field push-field" }, h("span", {}, t("remindersTitle")), reminders),
     h("button", { class: "btn primary", type: "submit" }, t("save")),
     h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; renderLogin(); } }, t("logout")));
+  const securityBox = () => {
+    const box = h("div", { class: "acc-content" }, h("p", { class: "meta" }, t("loading")));
+    const draw = async () => {
+      let info;
+      try { info = await api("/account/security"); } catch (e) { box.replaceChildren(h("p", { class: "meta" }, t("genericError"))); return; }
+      const when = (ms) => new Date(ms).toLocaleDateString(getLang() === "en" ? "en-CA" : "fr-CA");
+      const keys = info.passkeys.length ? info.passkeys.map((k) => h("div", { class: "pk-row" },
+        h("div", {}, h("b", {}, k.name || "—"), h("div", { class: "meta" }, `${t("secLastUsed")} : ${k.last_used_at ? when(k.last_used_at) : t("secNeverUsed")}`)),
+        h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemoveConfirm"))) { await api(`/account/passkeys/${encodeURIComponent(k.id)}`, { method: "DELETE" }); toast(t("secPasskeyRemoved")); draw(); } } }, t("secRemove"))))
+        : [h("p", { class: "meta" }, t("secNoPasskeys"))];
+      const add = passkeysSupported()
+        ? h("button", { class: "btn primary", type: "button", onClick: async () => {
+            try { await registerPasskey(); toast(t("secPasskeyAdded")); draw(); }
+            catch (err) { toast(err?.body?.error === "too_many_passkeys" ? t("secPasskeyTooMany") : t("secPasskeyCancelled")); }
+          } }, t("secAddPasskey"))
+        : h("p", { class: "meta" }, t("secPasskeyUnsupported"));
+      const cur = h("input", { type: "password", autocomplete: "current-password", maxLength: 200 });
+      const pw1 = h("input", { type: "password", autocomplete: "new-password", minLength: 10, maxLength: 200, required: true });
+      const pw2 = h("input", { type: "password", autocomplete: "new-password", minLength: 10, maxLength: 200, required: true });
+      const pwForm = h("form", { class: "acc-form", onSubmit: async (e) => {
+        e.preventDefault();
+        if (pw1.value !== pw2.value) { toast(t("secPasswordMismatch")); return; }
+        try { await api("/account/password", { method: "PUT", body: { password: pw1.value, current: info.has_password ? cur.value : undefined } }); toast(t("secPasswordSaved")); draw(); }
+        catch (err) { const k = err?.body?.error; toast(k === "wrong_current_password" ? t("secWrongCurrent") : k === "too_short" ? t("secTooShort") : k === "too_common" ? t("secTooCommon") : k === "too_long" ? t("secTooLong") : errorText(err)); }
+      } },
+        ...(info.has_password ? [h("label", { class: "field" }, h("span", {}, t("secPasswordCurrent")), cur)] : []),
+        h("label", { class: "field" }, h("span", {}, t("secPasswordNew")), pw1), h("label", { class: "field" }, h("span", {}, t("secPasswordConfirm")), pw2),
+        h("button", { class: "btn primary", type: "submit" }, info.has_password ? t("secChangePassword") : t("secSetPassword")));
+      box.replaceChildren(
+        h("div", { class: "sec-block" }, h("h3", {}, t("secPasskeys")), h("p", { class: "meta" }, t("secPasskeysHelp")), ...keys, add),
+        h("div", { class: "sec-block" }, h("h3", {}, t("secPassword")), h("p", { class: "meta" }, info.has_password ? t("secPasswordSet") : t("secPasswordNone")), h("p", { class: "meta" }, t("secPasswordHelp")), pwForm,
+          ...(info.has_password ? [h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemovePasswordConfirm"))) { await api("/account/password", { method: "DELETE" }); toast(t("secPasswordRemoved")); draw(); } } }, t("secRemovePassword"))] : [])));
+    };
+    draw();
+    return box;
+  };
   const tabs = [
     ["profile", t("details"), () => [profile]],
     ["daysoff", t("tabDaysOff"), () => [availabilityEditor(state.me.me.id, "daysoff")]],
@@ -2587,6 +2623,7 @@ async function renderAccount() {
     ["timeoff", t("timeOff"), () => { const box = h("div", { class: "acc-content" }, h("p", { class: "meta" }, t("loading"))); timeOffNodes().then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; }],
     ["calendar", t("tabCalendar"), () => [h("p", { class: "meta" }, t("calendarHelp")), calBox]],
     ["payslips", t("tabPayslips"), () => { loadSlips(); return [slipsBox]; }],
+    ["security", t("tabSecurity"), () => [securityBox()]],
   ];
   state.accountTab = tabs.some(([id]) => id === state.accountTab) ? state.accountTab : "profile";
   const bar = h("div", { class: "dlg-tabs acc-tabs", role: "tablist" });
@@ -4213,7 +4250,8 @@ function staffCard(s, ov) {
     dlg.showModal();
   };
   const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
-    h("span", { class: "who-row" }, summaryAvatar, nameEl), iconBlock,
+    h("span", { class: "who-row" }, summaryAvatar, h("span", { class: `presence ${s.signed_in ? "on" : "off"}`, role: "img", "aria-label": s.signed_in ? t("signedIn") : t("notSignedIn"),
+      title: s.signed_in ? `${t("signedIn")} · ${t("lastActivity")} : ${new Date(s.last_seen_at).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { dateStyle: "short", timeStyle: "short" })}` : t("notSignedIn") }), nameEl), iconBlock,
     h("span", { class: "inactive-badge badge" }, t("inactive")),
     s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : null);
   return rowEl;
@@ -4248,22 +4286,67 @@ async function loadBrand() {
   applyBrand();
 }
 
-// Sign-in screen: email -> 6-digit code sent by email -> session cookie.
+// ---------- Passkeys (biometrics): the browser talks to the device, the server verifies ----------
+const b64uToBuf = (x) => Uint8Array.from(atob(x.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)).buffer;
+const bufToB64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const passkeysSupported = () => !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+const creationOptions = (o) => ({ ...o, challenge: b64uToBuf(o.challenge), user: { ...o.user, id: b64uToBuf(o.user.id) }, excludeCredentials: (o.excludeCredentials ?? []).map((c) => ({ ...c, id: b64uToBuf(c.id) })) });
+const requestOptions = (o) => ({ ...o, challenge: b64uToBuf(o.challenge), allowCredentials: (o.allowCredentials ?? []).map((c) => ({ ...c, id: b64uToBuf(c.id) })) });
+function credentialJSON(cred) {
+  const r = cred.response;
+  const base = { id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type, clientExtensionResults: cred.getClientExtensionResults?.() ?? {}, authenticatorAttachment: cred.authenticatorAttachment ?? undefined };
+  if (r.attestationObject) return { ...base, response: { clientDataJSON: bufToB64u(r.clientDataJSON), attestationObject: bufToB64u(r.attestationObject), transports: r.getTransports?.() ?? [] } };
+  return { ...base, response: { clientDataJSON: bufToB64u(r.clientDataJSON), authenticatorData: bufToB64u(r.authenticatorData), signature: bufToB64u(r.signature), userHandle: r.userHandle ? bufToB64u(r.userHandle) : undefined } };
+}
+async function passkeySignIn() {
+  const { cid, options } = await api("/auth/passkey/options", { method: "POST" });
+  const cred = await navigator.credentials.get({ publicKey: requestOptions(options) });
+  await api("/auth/passkey/verify", { method: "POST", body: { cid, response: credentialJSON(cred) } });
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  return /iPhone|iPad/.test(ua) ? "iPhone / iPad" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows (Windows Hello)" : /Mac/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "Appareil";
+}
+/** Registers this device's biometrics for the signed-in person. Throws on refusal. */
+async function registerPasskey() {
+  const { cid, options } = await api("/account/passkeys/options", { method: "POST" });
+  const cred = await navigator.credentials.create({ publicKey: creationOptions(options) });
+  await api("/account/passkeys", { method: "POST", body: { cid, response: credentialJSON(cred), name: deviceName() } });
+}
+
+// Sign-in screen: biometrics, or email + password, or a 6-digit code sent by email -> session cookie.
 function renderLogin(prefill = "") {
   renderChrome();
   document.getElementById("main-tabs").replaceChildren(); // nothing to navigate to before signing in
-  const email = h("input", { type: "email", required: true, autocomplete: "email", inputMode: "email", value: prefill, placeholder: "prenom@exemple.com", maxLength: 200 });
+  const email = h("input", { type: "email", required: true, autocomplete: "username", inputMode: "email", value: prefill, placeholder: "prenom@exemple.com", maxLength: 200 });
+  const password = h("input", { type: "password", autocomplete: "current-password", maxLength: 200, "aria-label": t("loginPassword") });
   const code = h("input", { required: true, autocomplete: "one-time-code", inputMode: "numeric", pattern: "[0-9]{6}", maxLength: 6, class: "login-code", "aria-label": t("loginCode") });
   const msg = h("div", { class: "alert", role: "alert" });
   const fail = (e, fallback) => { msg.textContent = e?.body?.error === "too_many_requests" ? t("loginTooMany") : e?.body?.error === "email_not_configured" ? t("loginEmailOff") : fallback; };
+  const sendCode = async () => {
+    if (!email.value.trim()) { msg.textContent = t("loginNeedEmail"); email.focus(); return; }
+    try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); stepCode(); }
+    catch (err) { fail(err, err.body?.error === "invalid_email" ? t("invalidEmail") : t("genericError")); }
+  };
   const stepEmail = () => {
-    msg.textContent = "";
+    msg.textContent = ""; password.value = "";
+    const usePasskey = async () => {
+      msg.textContent = "";
+      try { await passkeySignIn(); boot(); }
+      catch (err) { if (err?.name !== "NotAllowedError" && err?.name !== "AbortError") msg.textContent = t("loginPasskeyFailed"); }
+    };
     $app.replaceChildren(h("div", { class: "login-card" }, h("h2", {}, brandText("title") || t("loginTitle")), h("p", { class: "meta" }, brandText("intro") || t("loginIntro")),
+      ...(passkeysSupported() ? [h("button", { class: "btn primary", type: "button", onClick: usePasskey }, `🔐 ${t("loginPasskey")}`), h("p", { class: "meta" }, t("loginPasskeyHelp")), h("div", { class: "login-or" }, t("loginOr"))] : []),
       h("form", { class: "acc-form", onSubmit: async (e) => {
         e.preventDefault();
-        try { await api("/auth/request", { method: "POST", body: { email: email.value, lang: getLang() } }); stepCode(); }
-        catch (err) { fail(err, err.body?.error === "invalid_email" ? t("invalidEmail") : t("genericError")); }
-      } }, h("label", { class: "field" }, h("span", {}, t("loginEmail")), email), msg, h("button", { class: "btn primary", type: "submit" }, t("loginSend")))));
+        if (!password.value) { sendCode(); return; } // no password typed: the emailed code is the way in
+        try { await api("/auth/password", { method: "POST", body: { email: email.value, password: password.value } }); boot(); }
+        catch (err) { fail(err, t("loginBadPassword")); password.value = ""; password.focus(); }
+      } }, h("label", { class: "field" }, h("span", {}, t("loginEmail")), email), h("label", { class: "field" }, h("span", {}, t("loginPassword")), password), msg,
+        h("button", { class: "btn primary", type: "submit" }, t("loginPasswordSubmit"))),
+      h("div", { class: "login-or" }, t("loginOr")),
+      h("button", { class: "btn", type: "button", onClick: sendCode }, t("loginByCode")),
+      h("p", { class: "meta" }, t("loginForgot"))));
     email.focus();
   };
   const stepCode = () => {
@@ -4282,6 +4365,20 @@ function renderLogin(prefill = "") {
   stepEmail();
 }
 
+let passkeyOffered = false;
+/** Once per device, after a sign-in by code or password: offer to turn on biometrics. */
+async function offerPasskey() {
+  if (passkeyOffered || !passkeysSupported()) return;
+  passkeyOffered = true;
+  try {
+    if (localStorage.getItem("pk_asked")) return;
+    const info = await api("/account/security");
+    if (info.passkeys.length) { localStorage.setItem("pk_asked", "1"); return; }
+    localStorage.setItem("pk_asked", "1");
+    if (await ask(t("passkeyOffer"), t("passkeyOfferYes"))) { await registerPasskey(); toast(t("secPasskeyAdded")); }
+  } catch { /* declined or unsupported: nothing to do */ }
+}
+
 async function boot() {
   await loadBrand();
   try {
@@ -4298,6 +4395,7 @@ async function boot() {
   state.posts = localizePosts(state.posts);
   openFromLink();
   render();
+  offerPasskey();
 }
 // A notification opens the app on the right screen: /?view=community&c=3, /?view=account&tab=timeoff, /?view=admin&section=timeoff
 function openFromLink() {

@@ -630,7 +630,7 @@ dialog .modal-body > h2:first-child { margin: -18px -18px .4rem; padding: .85rem
 .acc-content .btn{min-height:44px}.acc-form .btn.primary{width:100%}
 .login-card{max-width:420px;margin:2rem auto;display:grid;gap:1rem;padding:0 .5rem}
 .login-card input{min-height:48px;font-size:16px}.login-code{text-align:center;font-size:28px!important;letter-spacing:.4em;font-weight:700}
-.login-card .btn{min-height:44px}
+.login-card .btn{min-height:44px}.login-or{display:flex;align-items:center;gap:.75rem;color:var(--muted,#6b7280);font-size:.9rem}.login-or::before,.login-or::after{content:"";flex:1;height:1px;background:currentColor;opacity:.3}.pk-row{display:flex;justify-content:space-between;align-items:center;gap:.75rem;padding:.5rem 0;border-bottom:1px solid rgba(128,128,128,.25)}.sec-block{display:grid;gap:.75rem;margin-bottom:1.5rem}
 .brand-logo{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.brand-logo img{max-width:160px;object-fit:contain;background:#fff;border:1px solid #e3dfd9;border-radius:8px;padding:4px}input[type=color]{width:64px;min-height:44px;padding:2px}
 .client-bar{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.4rem 16px;background:#fff3cd;border-bottom:1px solid #e0c96a;font-size:.9rem}.client-bar .btn{min-height:32px;padding:0 .7rem}
 .token-reveal{background:#fff8e1;border-color:#e0c96a}.token-reveal input{font-family:ui-monospace,monospace;width:100%}.code{background:#f1efeb;border-radius:8px;padding:.6rem .8rem;overflow-x:auto;font-size:.85rem}
@@ -1092,3 +1092,5 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .admin-group+.admin-group{margin-top:.3rem}
 @media (max-width:899px){.admin-nav .admin-group-title{padding:.3rem .4rem;font-size:.7rem;text-align:left}.admin-group+.admin-group{margin-top:.1rem}}
 .ing-qtys{display:grid;gap:.3rem}.ing-qty-row{display:grid;grid-template-columns:1fr 6rem 7rem;gap:.4rem;align-items:center}.ing-qty-row span{font-weight:600;overflow-wrap:anywhere}@media (max-width:700px){.ing-qty-row{grid-template-columns:1fr 5rem 6rem}}
+
+.presence{display:inline-block;flex:none;width:10px;height:10px;border-radius:50%;margin:0 .45rem 0 .35rem;box-sizing:border-box}.presence.on{background:#22a559;box-shadow:0 0 0 3px rgba(34,165,89,.25)}.presence.off{border:2px solid #9aa0a6;background:transparent}

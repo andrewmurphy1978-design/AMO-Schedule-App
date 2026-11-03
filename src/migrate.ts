@@ -81,6 +81,8 @@ import m0078 from "../migrations/0078_oven_group.sql";
 import m0079 from "../migrations/0079_boxes.sql";
 import m0080 from "../migrations/0080_boxes_supplier.sql";
 import m0081 from "../migrations/0081_component_quantities_seafood.sql";
+import m0082 from "../migrations/0082_passwords_passkeys.sql";
+import m0083 from "../migrations/0083_session_last_seen.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -164,6 +166,8 @@ const MIGRATIONS: [string, string][] = [
   ["0079_boxes", m0079],
   ["0080_boxes_supplier", m0080],
   ["0081_component_quantities_seafood", m0081],
+  ["0082_passwords_passkeys", m0082],
+  ["0083_session_last_seen", m0083],
 ];
 
 const statements = (sql: string) =>

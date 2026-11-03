@@ -27,6 +27,8 @@ import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templat
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
 import { EVENTS, MAX_ENDPOINTS, queueEvent, flushDeliveries, validateUrl, validateEvents, newSecret, staffData, shiftData, timeOffData, coverageData, type EventName } from "./webhooks.ts";
+import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from "@simplewebauthn/server";
+import { hashPassword, verifyPassword, passwordProblem, MAX_PASSWORD_FAILS, PASSWORD_LOCK_MS } from "./passwords.ts";
 import { parseBrand, validateBrandPatch, senderAddress, LOGO_TYPES, MAX_LOGO_BYTES, type Brand } from "./brand.ts";
 import { settingKey, clientSettingRows, getSetting, putSettingStmt, delSettingStmt } from "./tenant.ts";
 import { loadSettingsFrom } from "./settings-db.ts";
@@ -85,8 +87,10 @@ async function identify(c: Context<any>): Promise<{ email?: string; reason?: str
   // 1) In-app session (cookie set after the emailed one-time code was entered).
   const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
   if (sid) {
-    const s = await (c.env.DB as D1Database).prepare("SELECT email FROM sessions WHERE token_hash = ? AND expires_at > ?").bind(await sha256Hex(sid), Date.now()).first<{ email: string }>();
+    const th = await sha256Hex(sid);
+    const s = await (c.env.DB as D1Database).prepare("SELECT email, COALESCE(last_seen_at, created_at) AS seen FROM sessions WHERE token_hash = ? AND expires_at > ?").bind(th, Date.now()).first<{ email: string; seen: number }>();
     if (s) {
+      if (Date.now() - s.seen > 120_000) c.executionCtx.waitUntil((c.env.DB as D1Database).prepare("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?").bind(Date.now(), th).run().then(() => {}, () => {}));
       // Cookie-authenticated writes must come from this site (CSRF defence on top of SameSite=Lax).
       const origin = c.req.header("origin");
       if (c.req.method !== "GET" && c.req.method !== "HEAD" && origin && new URL(origin).host !== new URL(c.req.url).host) return { reason: "bad_origin" };
@@ -564,9 +568,163 @@ app.post("/api/auth/verify", async (c) => {
   await db.prepare("UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?").bind(row.id).run();
   if (!safeEqual(row.code_hash, await codeHash(c.env.SIN_KEY ?? "", email, code))) return c.json({ error: "invalid_code" }, 400);
   await db.prepare("DELETE FROM login_codes WHERE email = ?").bind(email).run();
-  const token = newSessionToken();
-  await db.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now).run();
+  await startSession(c, email);
+  return c.json({ ok: true });
+});
+
+async function startSession(c: Context<any>, email: string) {
+  const token = newSessionToken(), now = Date.now();
+  await c.env.DB.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now).run();
   c.header("Set-Cookie", sessionCookie(token, isSecure(c)));
+}
+
+/** Only an active employee (or a platform administrator) may sign in, whatever the method. */
+async function mayEnter(c: Context<any>, email: string): Promise<boolean> {
+  const db = c.env.DB as D1Database;
+  const staff = await db.prepare("SELECT active, client_id FROM staff WHERE lower(email) = ?").bind(email).first<{ active: number | null; client_id: number }>();
+  if (staff) {
+    if (staff.active === 0) return false;
+    const cl = await db.prepare("SELECT active FROM clients WHERE id = ?").bind(staff.client_id).first<{ active: number }>();
+    return !!cl && cl.active !== 0;
+  }
+  return superAdmins(c.env).includes(email);
+}
+
+// ---------- Password sign-in ----------
+app.post("/api/auth/password", async (c) => {
+  const b = await c.req.json<{ email?: string; password?: string }>().catch(() => ({} as { email?: string; password?: string }));
+  const email = (b.email ?? "").trim().toLowerCase(), password = typeof b.password === "string" ? b.password : "";
+  if (!looksLikeEmail(email) || !password || password.length > 200) return c.json({ error: "invalid_credentials" }, 400);
+  const db = c.env.DB, now = Date.now();
+  const rec = await db.prepare("SELECT hash, salt, iterations, fail_count, locked_until FROM login_passwords WHERE email = ?").bind(email).first<{ hash: string; salt: string; iterations: number; fail_count: number; locked_until: number }>();
+  if (rec && rec.locked_until > now) return c.json({ error: "too_many_requests" }, 429);
+  // Same work and same answer whether or not the address has a password: nobody can probe who works here.
+  const ok = rec ? await verifyPassword(password, rec) : (await hashPassword(password), false);
+  if (!rec || !ok || !(await mayEnter(c, email))) {
+    if (rec) {
+      const fails = rec.fail_count + 1;
+      await db.prepare("UPDATE login_passwords SET fail_count = ?, locked_until = ? WHERE email = ?").bind(fails >= MAX_PASSWORD_FAILS ? 0 : fails, fails >= MAX_PASSWORD_FAILS ? now + PASSWORD_LOCK_MS : 0, email).run();
+    }
+    return c.json({ error: "invalid_credentials" }, 400);
+  }
+  await db.prepare("UPDATE login_passwords SET fail_count = 0, locked_until = 0 WHERE email = ?").bind(email).run();
+  await startSession(c, email);
+  return c.json({ ok: true });
+});
+
+// ---------- Passkeys (Face ID, Touch ID, Android biometrics, Windows Hello) ----------
+const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+// The site address the browser really used (the Host header: behind a custom domain the request URL may name the route, and local development runs on localhost).
+const rp = (c: Context<any>) => {
+  const host = (c.req.header("host") ?? new URL(c.req.url).host).toLowerCase();
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  return { rpID: host.replace(/:\d+$/, ""), origin: `${local ? "http" : "https"}://${host}` };
+};
+async function saveChallenge(db: D1Database, challenge: string, purpose: string, email: string | null): Promise<string> {
+  const id = crypto.randomUUID(), now = Date.now();
+  await db.prepare("DELETE FROM webauthn_challenges WHERE expires_at < ?").bind(now).run();
+  await db.prepare("INSERT INTO webauthn_challenges (id, challenge, purpose, email, expires_at) VALUES (?, ?, ?, ?, ?)").bind(id, challenge, purpose, email, now + CHALLENGE_TTL_MS).run();
+  return id;
+}
+/** A challenge can be used once: it is deleted as it is read. */
+async function takeChallenge(db: D1Database, id: unknown, purpose: string): Promise<{ challenge: string; email: string | null } | null> {
+  if (typeof id !== "string" || id.length > 64) return null;
+  const row = await db.prepare("DELETE FROM webauthn_challenges WHERE id = ? AND purpose = ? RETURNING challenge, email, expires_at").bind(id, purpose).first<{ challenge: string; email: string | null; expires_at: number }>();
+  return row && row.expires_at > Date.now() ? { challenge: row.challenge, email: row.email } : null;
+}
+const b64u = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromB64u = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (ch) => ch.charCodeAt(0));
+
+app.post("/api/auth/passkey/options", async (c) => {
+  const { rpID } = rp(c);
+  const options = await generateAuthenticationOptions({ rpID, userVerification: "required", timeout: 120_000 });
+  return c.json({ cid: await saveChallenge(c.env.DB, options.challenge, "auth", null), options });
+});
+app.post("/api/auth/passkey/verify", async (c) => {
+  const b = await c.req.json<{ cid?: string; response?: { id?: string } }>().catch(() => ({} as { cid?: string; response?: { id?: string } }));
+  const ch = await takeChallenge(c.env.DB, b.cid, "auth");
+  const credId = b.response?.id;
+  if (!ch || typeof credId !== "string" || credId.length > 600) return c.json({ error: "invalid_passkey" }, 400);
+  const key = await c.env.DB.prepare("SELECT id, email, public_key, counter, transports FROM passkeys WHERE id = ?").bind(credId).first<{ id: string; email: string; public_key: string; counter: number; transports: string | null }>();
+  if (!key) return c.json({ error: "invalid_passkey" }, 400);
+  const { rpID, origin } = rp(c);
+  try {
+    const v = await verifyAuthenticationResponse({
+      response: b.response as never, expectedChallenge: ch.challenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true,
+      credential: { id: key.id, publicKey: fromB64u(key.public_key), counter: key.counter, transports: key.transports ? (JSON.parse(key.transports) as never) : undefined },
+    });
+    if (!v.verified || !(await mayEnter(c, key.email))) return c.json({ error: "invalid_passkey" }, 400);
+    await c.env.DB.prepare("UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?").bind(v.authenticationInfo.newCounter, Date.now(), key.id).run();
+    await startSession(c, key.email);
+    return c.json({ ok: true });
+  } catch {
+    return c.json({ error: "invalid_passkey" }, 400);
+  }
+});
+
+// Managing one's own password and passkeys (needs a signed-in session; never available to API tokens).
+app.get("/api/account/security", async (c) => {
+  const email = c.get("me").email.toLowerCase();
+  const [pw, keys] = await Promise.all([
+    c.env.DB.prepare("SELECT 1 AS x FROM login_passwords WHERE email = ?").bind(email).first(),
+    c.env.DB.prepare("SELECT id, name, created_at, last_used_at FROM passkeys WHERE email = ? ORDER BY created_at").bind(email).all<{ id: string; name: string | null; created_at: number; last_used_at: number | null }>(),
+  ]);
+  return c.json({ has_password: !!pw, passkeys: keys.results });
+});
+app.put("/api/account/password", async (c) => {
+  const me = c.get("me"), email = me.email.toLowerCase(), db = c.env.DB;
+  const b = await c.req.json<{ password?: string; current?: string }>().catch(() => ({} as { password?: string; current?: string }));
+  const problem = passwordProblem(b.password, email);
+  if (problem) return c.json({ error: problem }, 400);
+  const rec = await db.prepare("SELECT hash, salt, iterations, locked_until FROM login_passwords WHERE email = ?").bind(email).first<{ hash: string; salt: string; iterations: number; locked_until: number }>();
+  // Changing an existing password needs the current one (a stolen session must not be enough to lock the owner out).
+  if (rec && (rec.locked_until > Date.now() || typeof b.current !== "string" || !(await verifyPassword(b.current, rec)))) return c.json({ error: "wrong_current_password" }, 400);
+  const h = await hashPassword(b.password as string);
+  await db.prepare("INSERT INTO login_passwords (email, hash, salt, iterations, fail_count, locked_until, updated_at) VALUES (?, ?, ?, ?, 0, 0, ?) ON CONFLICT(email) DO UPDATE SET hash = excluded.hash, salt = excluded.salt, iterations = excluded.iterations, fail_count = 0, locked_until = 0, updated_at = excluded.updated_at")
+    .bind(email, h.hash, h.salt, h.iterations, Date.now()).run();
+  return c.json({ ok: true });
+});
+app.delete("/api/account/password", async (c) => {
+  await c.env.DB.prepare("DELETE FROM login_passwords WHERE email = ?").bind(c.get("me").email.toLowerCase()).run();
+  return c.json({ ok: true });
+});
+app.post("/api/account/passkeys/options", async (c) => {
+  const me = c.get("me"), email = me.email.toLowerCase();
+  const { rpID } = rp(c);
+  const existing = await c.env.DB.prepare("SELECT id, transports FROM passkeys WHERE email = ?").bind(email).all<{ id: string; transports: string | null }>();
+  const brand = await loadBrand(c.env.DB, me.client_id);
+  const options = await generateRegistrationOptions({
+    rpName: brand.name, rpID, userName: email, userDisplayName: me.name,
+    userID: new TextEncoder().encode(`staff-${me.id}`),
+    attestationType: "none", timeout: 120_000,
+    excludeCredentials: existing.results.map((k) => ({ id: k.id, transports: k.transports ? (JSON.parse(k.transports) as never) : undefined })),
+    authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    supportedAlgorithmIDs: [-7, -257],
+  });
+  return c.json({ cid: await saveChallenge(c.env.DB, options.challenge, "register", email), options });
+});
+app.post("/api/account/passkeys", async (c) => {
+  const me = c.get("me"), email = me.email.toLowerCase();
+  const b = await c.req.json<{ cid?: string; response?: unknown; name?: string }>().catch(() => ({} as { cid?: string; response?: unknown; name?: string }));
+  const ch = await takeChallenge(c.env.DB, b.cid, "register");
+  if (!ch || ch.email !== email) return c.json({ error: "invalid_passkey" }, 400);
+  const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM passkeys WHERE email = ?").bind(email).first<{ n: number }>();
+  if ((count?.n ?? 0) >= 10) return c.json({ error: "too_many_passkeys" }, 400);
+  const { rpID, origin } = rp(c);
+  try {
+    const v = await verifyRegistrationResponse({ response: b.response as never, expectedChallenge: ch.challenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true });
+    if (!v.verified || !v.registrationInfo) return c.json({ error: "invalid_passkey" }, 400);
+    const cred = v.registrationInfo.credential;
+    const name = (typeof b.name === "string" ? b.name : "").replace(/[\r\n<>]/g, "").trim().slice(0, 60) || null;
+    await c.env.DB.prepare("INSERT INTO passkeys (id, email, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(cred.id, email, b64u(cred.publicKey), cred.counter, cred.transports ? JSON.stringify(cred.transports) : null, name, Date.now()).run();
+    return c.json({ ok: true });
+  } catch {
+    return c.json({ error: "invalid_passkey" }, 400);
+  }
+});
+app.delete("/api/account/passkeys/:id", async (c) => {
+  await c.env.DB.prepare("DELETE FROM passkeys WHERE id = ? AND email = ?").bind(c.req.param("id"), c.get("me").email.toLowerCase()).run();
   return c.json({ ok: true });
 });
 
@@ -3329,11 +3487,15 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
     db.prepare("SELECT id, name, open_time, close_time FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all(),
     db.prepare("SELECT w.staff_id, w.role_id, w.hourly_cents FROM staff_role_wages w JOIN staff s ON s.id = w.staff_id WHERE s.client_id = ?").bind(cid).all<{ staff_id: number; role_id: number; hourly_cents: number }>(),
   ]);
+  // Who is signed in: an unexpired browser session; last_seen_at is when it was last used.
+  const seen = new Map((await db.prepare("SELECT email, MAX(COALESCE(last_seen_at, created_at)) AS last_seen FROM sessions WHERE expires_at > ? GROUP BY email").bind(Date.now()).all<{ email: string; last_seen: number }>()).results.map((r) => [r.email.toLowerCase(), r.last_seen]));
   return c.json({
     restaurants: await withOpenHours(db, restaurants.results as { id: number; name: string; open_time: string; close_time: string }[]),
     default_rates: await defaultRates(db, cid),
     staff: sortByName(staff.results as any[]).map((s) => ({
       ...s,
+      signed_in: s.email ? seen.has(String(s.email).toLowerCase()) : false,
+      last_seen_at: s.email ? seen.get(String(s.email).toLowerCase()) ?? null : null,
       is_admin: s.is_admin === 1,
       active: s.active !== 0,
       roles: roles.results.filter((r) => r.staff_id === s.id),
