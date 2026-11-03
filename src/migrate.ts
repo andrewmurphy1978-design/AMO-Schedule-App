@@ -85,6 +85,7 @@ import m0082 from "../migrations/0082_passwords_passkeys.sql";
 import m0083 from "../migrations/0083_session_last_seen.sql";
 import m0084 from "../migrations/0084_app_installed.sql";
 import m0085 from "../migrations/0085_auto_schedule.sql";
+import m0086 from "../migrations/0086_messages.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -172,6 +173,7 @@ const MIGRATIONS: [string, string][] = [
   ["0083_session_last_seen", m0083],
   ["0084_app_installed", m0084],
   ["0085_auto_schedule", m0085],
+  ["0086_messages", m0086],
 ];
 
 const statements = (sql: string) =>

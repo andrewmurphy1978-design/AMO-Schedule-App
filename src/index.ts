@@ -175,9 +175,10 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
+  dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
   restaurant: "SELECT 1 FROM restaurants WHERE id = ?1 AND client_id = ?2",
   shift: "SELECT 1 FROM shifts sh JOIN restaurants r ON r.id = sh.restaurant_id WHERE sh.id = ?1 AND r.client_id = ?2",
   target_set: "SELECT 1 FROM target_sets t JOIN restaurants r ON r.id = t.restaurant_id WHERE t.id = ?1 AND r.client_id = ?2",
@@ -198,7 +199,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)\/(cancel|withdraw|decide)$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -3479,6 +3480,139 @@ app.post("/api/communities/:id/posts", async (c) => {
     } catch { /* notifications never block a post */ }
   })());
   return c.json({ id: r.meta.last_row_id }, 201);
+});
+
+// ---------- Personal messages between employees (inside the Communities screen) ----------
+// A conversation has two people (direct: reused when it already exists) or more (group). Only its members can read it.
+const DM_MAX_MEMBERS = 20, DM_MAX_LEN = 2000, DM_PER_MINUTE = 30;
+const dmClean = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim() : "");
+const dmMember = (db: D1Database, threadId: number, staffId: number) => db.prepare("SELECT last_read_id FROM dm_members WHERE thread_id = ? AND staff_id = ? AND left_at IS NULL").bind(threadId, staffId).first<{ last_read_id: number }>();
+const dmPerson = "s.id, s.name, s.first_name, s.color, (SELECT updated_at FROM staff_photos WHERE staff_id = s.id) AS photo_v";
+
+/** Adds a message, moves the conversation up, and tells the other members who enabled notifications. */
+async function dmPost(c: Context<any>, threadId: number, me: Me, body: string, title: string | null): Promise<number> {
+  const db = c.env.DB as D1Database, now = Date.now();
+  const r = await db.prepare("INSERT INTO dm_messages (thread_id, staff_id, body, created_at) VALUES (?, ?, ?, ?)").bind(threadId, me.id, body, now).run();
+  const id = r.meta.last_row_id as number;
+  await db.batch([db.prepare("UPDATE dm_threads SET last_message_at = ? WHERE id = ?").bind(now, threadId), db.prepare("UPDATE dm_members SET last_read_id = ? WHERE thread_id = ? AND staff_id = ?").bind(id, threadId, me.id)]);
+  c.executionCtx.waitUntil((async () => {
+    try {
+      const others = (await db.prepare("SELECT dm.staff_id FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.thread_id = ? AND dm.staff_id != ? AND dm.left_at IS NULL AND s.active = 1").bind(threadId, me.id).all<{ staff_id: number }>()).results;
+      const first = me.name.split(" ")[0];
+      for (const p of others) await pushToStaff(db, p.staff_id, { title: title ? `${first} · ${title}` : first, body: body.slice(0, 140), url: `/?view=community&dm=${threadId}`, tag: `dm-${threadId}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
+    } catch { /* notifications never block a message */ }
+  })());
+  return id;
+}
+
+// the colleagues one can write to: every active employee of the company
+app.get("/api/messages/people", async (c) => {
+  const me = c.get("me");
+  const rows = (await c.env.DB.prepare(`SELECT ${dmPerson} FROM staff s WHERE s.client_id = ? AND s.active = 1 AND s.id != ? ORDER BY s.name`).bind(me.client_id, me.id).all<{ name: string }>()).results;
+  return c.json(sortByName(rows));
+});
+
+// my conversations, the most recent first, with who is in them, the last message and what I have not read
+app.get("/api/messages/threads", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const threads = (await db.prepare(
+    `SELECT t.id, t.title, t.is_group, t.last_message_at,
+            (SELECT CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END FROM dm_messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+            (SELECT m.staff_id FROM dm_messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_by,
+            (SELECT count(*) FROM dm_messages m WHERE m.thread_id = t.id AND m.staff_id != ?1 AND m.deleted_at IS NULL AND m.id > me.last_read_id) AS unread
+     FROM dm_threads t JOIN dm_members me ON me.thread_id = t.id AND me.staff_id = ?1 AND me.left_at IS NULL
+     WHERE t.client_id = ?2 ORDER BY t.last_message_at DESC LIMIT 100`,
+  ).bind(me.id, me.client_id).all<{ id: number }>()).results;
+  if (!threads.length) return c.json([]);
+  const members = (await db.prepare(`SELECT dm.thread_id, ${dmPerson} FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.left_at IS NULL AND dm.thread_id IN (${threads.map(() => "?").join(",")})`).bind(...threads.map((x) => x.id)).all<{ thread_id: number }>()).results;
+  return c.json(threads.map((t) => ({ ...t, members: members.filter((m) => m.thread_id === t.id).map(({ thread_id: _t, ...p }) => p) })));
+});
+
+app.get("/api/messages/unread", async (c) => {
+  const me = c.get("me");
+  const r = await c.env.DB.prepare(
+    `SELECT count(*) AS n FROM dm_messages m JOIN dm_members me ON me.thread_id = m.thread_id AND me.staff_id = ?1 AND me.left_at IS NULL JOIN dm_threads t ON t.id = m.thread_id
+     WHERE t.client_id = ?2 AND m.staff_id != ?1 AND m.deleted_at IS NULL AND m.id > me.last_read_id`,
+  ).bind(me.id, me.client_id).first<{ n: number }>();
+  return c.json({ unread: r?.n ?? 0 });
+});
+
+// start a conversation with one or more colleagues (with one person, the existing conversation is reused)
+app.post("/api/messages/threads", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ member_ids?: unknown; title?: unknown; body?: unknown }>().catch(() => ({} as { member_ids?: unknown; title?: unknown; body?: unknown }));
+  const ids = Array.isArray(b.member_ids) ? [...new Set(b.member_ids.filter((x): x is number => Number.isInteger(x) && x > 0 && x !== me.id))] : [];
+  const body = dmClean(b.body), title = dmClean(b.title).slice(0, 60) || null;
+  if (!ids.length || ids.length >= DM_MAX_MEMBERS) return c.json({ error: "invalid_members" }, 400);
+  if (!body || body.length > DM_MAX_LEN) return c.json({ error: "invalid_body" }, 400);
+  const ok = await db.prepare(`SELECT count(*) AS n FROM staff WHERE client_id = ? AND active = 1 AND id IN (${ids.map(() => "?").join(",")})`).bind(me.client_id, ...ids).first<{ n: number }>();
+  if (ok?.n !== ids.length) return c.json({ error: "invalid_members" }, 400);
+  const group = ids.length > 1;
+  let threadId: number | null = null;
+  if (!group) threadId = (await db.prepare("SELECT t.id FROM dm_threads t JOIN dm_members a ON a.thread_id = t.id AND a.staff_id = ? JOIN dm_members b ON b.thread_id = t.id AND b.staff_id = ? WHERE t.is_group = 0 AND t.client_id = ? LIMIT 1").bind(me.id, ids[0], me.client_id).first<{ id: number }>())?.id ?? null;
+  if (threadId === null) {
+    const now = Date.now();
+    threadId = (await db.prepare("INSERT INTO dm_threads (client_id, title, is_group, created_by, created_at, last_message_at) VALUES (?, ?, ?, ?, ?, ?)").bind(me.client_id, group ? title : null, group ? 1 : 0, me.id, now, now).run()).meta.last_row_id as number;
+    await db.batch([me.id, ...ids].map((sid) => db.prepare("INSERT INTO dm_members (thread_id, staff_id) VALUES (?, ?)").bind(threadId, sid)));
+  }
+  await dmPost(c, threadId, me, body, group ? title : null);
+  return c.json({ id: threadId }, 201);
+});
+
+// the messages of one conversation (the latest 50, or the 50 before `before`); reading marks them read
+app.get("/api/messages/threads/:id", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
+  const before = intParam(c.req.query("before")) ?? 0;
+  const rows = (await db.prepare(
+    `SELECT m.id, m.staff_id, CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END AS body, m.created_at, m.deleted_at IS NOT NULL AS deleted
+     FROM dm_messages m WHERE m.thread_id = ? AND (? = 0 OR m.id < ?) ORDER BY m.id DESC LIMIT 51`,
+  ).bind(id, before, before).all<{ id: number; staff_id: number; deleted: number }>()).results;
+  const more = rows.length > 50;
+  const messages = rows.slice(0, 50).reverse();
+  const thread = await db.prepare("SELECT id, title, is_group FROM dm_threads WHERE id = ?").bind(id).first();
+  const members = (await db.prepare(`SELECT ${dmPerson} FROM dm_members dm JOIN staff s ON s.id = dm.staff_id WHERE dm.thread_id = ? AND dm.left_at IS NULL`).bind(id).all()).results;
+  if (!before) {
+    const last = (await db.prepare("SELECT coalesce(max(id), 0) AS m FROM dm_messages WHERE thread_id = ?").bind(id).first<{ m: number }>())?.m ?? 0;
+    await db.prepare("UPDATE dm_members SET last_read_id = ? WHERE thread_id = ? AND staff_id = ?").bind(last, id, me.id).run();
+  }
+  return c.json({ thread, members, more, messages: messages.map((m) => ({ ...m, mine: m.staff_id === me.id, deleted: !!m.deleted })) });
+});
+
+app.post("/api/messages/threads/:id/messages", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if (!(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
+  const body = dmClean((await c.req.json<{ body?: unknown }>().catch(() => ({} as { body?: unknown }))).body);
+  if (!body || body.length > DM_MAX_LEN) return c.json({ error: "invalid_body" }, 400);
+  const recent = await db.prepare("SELECT count(*) AS n FROM dm_messages WHERE staff_id = ? AND created_at > ?").bind(me.id, Date.now() - 60_000).first<{ n: number }>();
+  if ((recent?.n ?? 0) >= DM_PER_MINUTE) return c.json({ error: "too_many_requests" }, 429);
+  const t = await db.prepare("SELECT title, is_group FROM dm_threads WHERE id = ?").bind(id).first<{ title: string | null; is_group: number }>();
+  return c.json({ id: await dmPost(c, id, me, body, t?.is_group ? t.title : null) }, 201);
+});
+
+// a sender can withdraw their own message (it stays in the conversation as "message deleted")
+app.delete("/api/messages/messages/:id", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const me = c.get("me");
+  const r = await c.env.DB.prepare("UPDATE dm_messages SET deleted_at = ?, body = '' WHERE id = ? AND staff_id = ? AND deleted_at IS NULL AND thread_id IN (SELECT id FROM dm_threads WHERE client_id = ?)").bind(Date.now(), id, me.id, me.client_id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+
+// leave a group (a direct conversation cannot be left)
+app.post("/api/messages/threads/:id/leave", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  const t = await db.prepare("SELECT is_group FROM dm_threads WHERE id = ?").bind(id).first<{ is_group: number }>();
+  if (!t || !(await dmMember(db, id, me.id))) return c.json({ error: "forbidden" }, 403);
+  if (!t.is_group) return c.json({ error: "not_a_group" }, 400);
+  await db.prepare("UPDATE dm_members SET left_at = ? WHERE thread_id = ? AND staff_id = ?").bind(Date.now(), id, me.id).run();
+  return c.json({ ok: true });
 });
 
 // Transcripts cost money (AI): they are made only when someone is going to read them: a deaf and mute member of the community, or everybody when the owner turned that on.

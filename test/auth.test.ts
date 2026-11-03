@@ -35,6 +35,6 @@ test("API tokens: format, header parsing and forbidden paths", () => {
   assert.equal(bearerToken(`bearer ${t}`), t);
   assert.equal(bearerToken("Bearer nope"), null);
   assert.equal(bearerToken(null), null);
-  for (const p of ["/api/clients", "/api/clients/2", "/api/admin/tokens", "/api/admin/tokens/3", "/api/auth/verify", "/api/account", "/api/payslips", "/api/payslips/4/pdf"]) assert.ok(tokenForbidden(p), p);
+  for (const p of ["/api/clients", "/api/clients/2", "/api/admin/tokens", "/api/admin/tokens/3", "/api/auth/verify", "/api/account", "/api/payslips", "/api/payslips/4/pdf", "/api/messages/threads", "/api/messages/unread"]) assert.ok(tokenForbidden(p), p);
   for (const p of ["/api/me", "/api/admin/overview", "/api/admin/payslips", "/api/schedule", "/api/accounting"]) assert.ok(!tokenForbidden(p), p);
 });
