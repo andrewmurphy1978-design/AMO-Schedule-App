@@ -25,6 +25,7 @@ import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { AUTO_DEPTS, parseAuto, validateAuto, nextMonday, autoDue, inAutoScope, autoNotice, autoReminder, reminderDue, type AutoSettings, type AutoResult } from "./autoschedule.ts";
 import { describeDevice } from "./devices.ts";
+import { smsClean } from "./sms.ts";
 import { parseDm, validateDm, canStartGroup, type DmSettings } from "./messaging.ts";
 import { parseVehicleSettings, validateVehicleSettings, currentSeason, tireReminderDue, tireNotice, issueNotice, VEHICLE_CATEGORIES, type SeasonNow } from "./vehicles.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
@@ -4358,7 +4359,7 @@ app.post("/hooks/twilio", async (c) => {
   const conn = await loadConnections(c.env, c.env.DB, clientId);
   const url = conn.appUrl ? `${conn.appUrl}/hooks/twilio` : c.req.url;
   if (!conn.twilio || !(await verifyTwilioSignature(conn.twilio.token, url, params, c.req.header("X-Twilio-Signature")))) return c.text("forbidden", 403);
-  const twiml = (text?: string) => c.body(`<?xml version="1.0" encoding="UTF-8"?><Response>${text ? `<Message>${esc(text)}</Message>` : ""}</Response>`, 200, { "content-type": "text/xml" });
+  const twiml = (text?: string) => c.body(`<?xml version="1.0" encoding="UTF-8"?><Response>${text ? `<Message>${esc(smsClean(text))}</Message>` : ""}</Response>`, 200, { "content-type": "text/xml" });
   const from = normalizePhone(params.From);
   const person = from ? await c.env.DB.prepare("SELECT id, name, lang, sex FROM staff WHERE phone = ? AND client_id = ?").bind(from, clientId).first<{ id: number; name: string; lang: string; sex: string | null }>() : null;
   if (!person) return twiml();

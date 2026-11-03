@@ -1,6 +1,7 @@
 // Sending SMS / email to employees and logging every attempt. Talks to D1, Twilio and an SMTP server.
 import { parseConnections, pickChannel, type Channel, type ConnEnv, type Connections } from "./connections.ts";
 import { sendTwilioSms } from "./twilio.ts";
+import { smsClean } from "./sms.ts";
 import { sendMailOverSocket } from "./smtp-socket.ts";
 import { senderAddress } from "./brand.ts";
 import type { Lang, Msg } from "./templates.ts";
@@ -27,6 +28,7 @@ async function log(db: D1Database, e: { staff_id: number | null; channel: Channe
 /** Sends one message on one channel and logs the outcome. Never throws. */
 export async function deliver(db: D1Database, conn: Connections, channel: Channel, to: string, msg: Msg, kind: string, staffId: number | null): Promise<{ ok: boolean; error?: string }> {
   if (conn.brand && conn.brand !== "Mikes") msg = { ...msg, text: msg.text.replace(/^Mikes:/, `${conn.brand}:`) };
+  if (channel === "sms") msg = { ...msg, text: smsClean(msg.text) }; // no emoji, no curly apostrophe: fewer characters to pay for
   let result: { ok: boolean; error?: string };
   try {
     if (channel === "sms") {
