@@ -208,7 +208,7 @@ Tell the maintainer which of these the CRM needs and this file will be updated.
 
 | Date | Change |
 |---|---|
-| 2026-11-03 | **Welcome email** (link + first-time procedure, in the language of the employee's file) sent when an email address is added to or changed on an employee (`POST /api/staff`, `PUT /api/staff/:id`); `POST /api/staff/:id/welcome` (admin) sends it again. Logged in `notifications` with kind `welcome`. |
+| 2026-11-03 | **Welcome email** (link + first-time procedure, in the language of the employee's file) sent when an email address is added to or changed on an employee (`POST /api/staff`, `PUT /api/staff/:id`); `POST /api/staff/:id/welcome` (admin) sends it again and always answers 200 with `{ok:true}` or `{ok:false, error: no_email|inactive|email_not_configured|send_failed, detail?}`; `POST /api/staff` and `PUT /api/staff/:id` return the same object as `welcome` when they sent one. The employee dialog has a "Resend the welcome email" button and shows why a send failed. Logged in `notifications` with kind `welcome`. |
 | 2026-11-03 | Changing an employee's email (`PUT /api/staff/:id`) now deletes the old address's sessions, password, passkeys and pending codes. |
 | 2026-11-03 | **First-time guidance**: install offer in the browser, then biometrics + required password in the installed app (`POST /api/account/installed`, migration 0084). |
 | 2026-11-03 | **Sign-in by password and by passkey/biometrics** (migration 0082), sign-in screen rebuilt, Account → Security tab; **signed-in indicator** on the employee list (`signed_in`, `last_seen_at`; migration 0083). Google/Apple sign-in deliberately not built (unknown emails would be refused anyway). |

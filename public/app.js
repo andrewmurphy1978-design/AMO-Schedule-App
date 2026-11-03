@@ -4037,6 +4037,10 @@ function roleChoiceDialog({ s, r, ro, others, input, roleInputs }) {
   dlg.showModal();
 }
 
+/** Why a welcome email did not leave, in words. */
+function welcomeProblem(r) {
+  return r.error === "no_email" ? t("welcomeNoEmail") : r.error === "inactive" ? t("welcomeInactive") : r.error === "email_not_configured" ? t("welcomeNoSmtp") : (r.detail ? `${t("welcomeSendError")} ${r.detail}` : t("welcomeSendError"));
+}
 function staffCard(s, ov) {
   const sp = s.first_name ? { first: s.first_name, last: s.last_name } : splitName(s.name);
   const first = h("input", { value: sp.first, required: true, maxLength: 80 });
@@ -4095,17 +4099,25 @@ function staffCard(s, ov) {
     e.preventDefault();
     try {
       if (!sex.value) { toast(t("sexRequired")); return; }
-      await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || undefined, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
+      const saved = await api(`/staff/${s.id}`, { method: "PUT", body: { first_name: first.value, last_name: last.value, sex: sex.value || undefined, print_order: printOrder.value || null, email: email.value, phone: phone.value, lang: lang.value, notify_channel: channel.value, color: chosen } });
       const w = await api(`/staff/${s.id}/wage`, { method: "PUT", body: { hourly_rate: rate.value, role_rates: Object.fromEntries(roleRateInputs.map((x) => [x.rid, x.input.value])) } });
       s.hourly_cents = w.hourly_cents; s.role_rates = w.role_rates;
       if (sinInput.value.trim()) { const r = await api(`/staff/${s.id}/sin`, { method: "PUT", body: { sin: sinInput.value } }); s.sin_last3 = r.sin_last3; sinInput.value = ""; sinInput.placeholder = `••• ••• ${r.sin_last3}`; }
-      toast(t("saved"));
+      s.email = email.value.trim().toLowerCase() || null;
+      toast(saved?.welcome ? (saved.welcome.ok ? t("savedWelcomeSent") : `${t("savedWelcomeFailed")} ${welcomeProblem(saved.welcome)}`) : t("saved"));
     } catch (err) { toast(err.body?.error === "invalid_sin" ? t("invalidSin") : err.body?.error === "sin_already_used" ? t("sinUsed") : err.body?.error === "invalid_rate" ? t("genericError") : errorText(err)); }
   } },
     h("div", { class: "form-row r3" },
       h("label", { class: "field" }, h("span", {}, t("firstName")), first), h("label", { class: "field" }, h("span", {}, t("lastName")), last),
       h("div", { class: "field" }, h("span", {}, t("sexLabel")), sex)),
     h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("email")), email), h("label", { class: "field" }, h("span", {}, t("phone")), phone)),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: async (e) => {
+      if (email.value.trim().toLowerCase() !== (s.email ?? "")) { toast(t("welcomeSaveFirst")); return; }
+      const btn = e.currentTarget; btn.disabled = true;
+      try { const r = await api(`/staff/${s.id}/welcome`, { method: "POST" }); toast(r.ok ? `${t("welcomeSent")} ${s.email}` : `${t("welcomeFailed")} ${welcomeProblem(r)}`); }
+      catch (err) { toast(`${t("welcomeFailed")} ${errorText(err)}`); }
+      finally { btn.disabled = false; }
+    } }, `✉ ${t("welcomeResend")}`)),
     h("div", { class: "form-row r2" }, h("div", { class: "field" }, h("span", {}, t("language")), lang), h("div", { class: "field" }, h("span", {}, t("notifyBy")), channel)),
     h("div", { class: "form-row r2" },
     h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.active !== false, onChange: async (e) => {

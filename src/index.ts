@@ -1214,8 +1214,8 @@ app.post("/api/staff", requireAdmin, async (c) => {
       .bind(nm.name, nm.first, nm.last, b.email?.trim().toLowerCase() || null, b.phone ?? null, b.is_admin ? 1 : 0, b.sex === "M" || b.sex === "F" ? b.sex : null, c.get("me").client_id)
       .run();
     emit(c, "staff.created", () => staffData(c.env.DB, r.meta.last_row_id as number));
-    if (b.email?.trim()) c.executionCtx.waitUntil(sendWelcome(c.env, r.meta.last_row_id as number));
-    return c.json({ id: r.meta.last_row_id }, 201);
+    const welcome = b.email?.trim() ? await sendWelcome(c.env, r.meta.last_row_id as number) : undefined;
+    return c.json({ id: r.meta.last_row_id, welcome }, 201);
   } catch {
     return c.json({ error: "email_taken" }, 409);
   }
@@ -3512,26 +3512,30 @@ app.get("/api/admin/overview", requireAdmin, async (c) => {
   });
 });
 
-/** Welcome email with the link and the first-time procedure, in the language of the employee's file. Never throws. */
-async function sendWelcome(env: Env, staffId: number): Promise<void> {
+type WelcomeResult = { ok: true } | { ok: false; error: "no_email" | "inactive" | "email_not_configured" | "send_failed"; detail?: string };
+/** Welcome email with the link and the first-time procedure, in the language of the employee's file. Never throws; says why it did not leave. */
+async function sendWelcome(env: Env, staffId: number): Promise<WelcomeResult> {
   try {
     const db = env.DB;
     const st = await db.prepare("SELECT id, name, first_name, email, lang, active, client_id FROM staff WHERE id = ?").bind(staffId).first<{ id: number; name: string; first_name: string | null; email: string | null; lang: string | null; active: number | null; client_id: number }>();
-    if (!st?.email || st.active === 0) return;
+    if (!st?.email) return { ok: false, error: "no_email" };
+    if (st.active === 0) return { ok: false, error: "inactive" };
     let conn = await loadConnections(env, db, st.client_id);
     if (!conn.smtp && st.client_id !== 1) conn = { ...conn, smtp: (await loadConnections(env, db, 1)).smtp };
-    if (!conn.smtp) return;
+    if (!conn.smtp) return { ok: false, error: "email_not_configured" };
     const brand = await loadBrand(db, st.client_id);
     const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } };
-    await deliver(db, smtp, "email", st.email, T.welcome(st.lang === "en" ? "en" : "fr", { name: st.first_name || st.name, brand: brand.name, url: conn.appUrl, email: st.email }), "welcome", st.id);
-  } catch { /* the welcome email is a courtesy */ }
+    const r = await deliver(db, smtp, "email", st.email, T.welcome(st.lang === "en" ? "en" : "fr", { name: st.first_name || st.name, brand: brand.name, url: conn.appUrl, email: st.email }), "welcome", st.id);
+    return r.ok ? { ok: true } : { ok: false, error: "send_failed", detail: r.error };
+  } catch (e) {
+    return { ok: false, error: "send_failed", detail: String((e as Error)?.message ?? e).slice(0, 200) };
+  }
 }
 
 app.post("/api/staff/:id/welcome", requireAdmin, async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "bad_id" }, 400);
-  c.executionCtx.waitUntil(sendWelcome(c.env, id));
-  return c.json({ ok: true });
+  return c.json(await sendWelcome(c.env, id)); // always 200: the body says whether the email left, and why not
 });
 
 app.put("/api/staff/:id", requireAdmin, async (c) => {
@@ -3562,9 +3566,9 @@ app.put("/api/staff/:id", requireAdmin, async (c) => {
   if (oldEmail && oldEmail !== newEmail) {
     await c.env.DB.batch(["sessions", "login_passwords", "passkeys", "login_codes"].map((t) => c.env.DB.prepare(`DELETE FROM ${t} WHERE email = ?`).bind(oldEmail)));
   }
-  if (newEmail && newEmail !== oldEmail) c.executionCtx.waitUntil(sendWelcome(c.env, id)); // an address was added or changed
+  const welcome = newEmail && newEmail !== oldEmail ? await sendWelcome(c.env, id) : undefined; // an address was added or changed
   emit(c, "staff.updated", () => staffData(c.env.DB, id));
-  return c.json({ ok: true });
+  return c.json({ ok: true, welcome });
 });
 
 // ---------- Shifts (edit) ----------
