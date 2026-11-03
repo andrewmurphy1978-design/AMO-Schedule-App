@@ -1174,3 +1174,10 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
   .community .dm>.dm-list{padding-bottom:.5rem}
   .community .dm>.dm-privacy{padding-bottom:5rem}
 }
+.dm-loupe{display:none}
+@media (max-width:899px){
+  .comm-top{display:flex;align-items:center}.comm-top>button:not(.dm-loupe){flex:1}
+  .comm-top .dm-loupe{display:inline-flex;align-items:center;justify-content:center;flex:none;width:44px;height:44px;min-height:0;padding:0;margin-left:.25rem;border:0;border-radius:50%;background:transparent;font-size:1.25rem;cursor:pointer}
+  .comm-top .dm-loupe[aria-expanded=true]{background:rgba(128,128,128,.2)}
+  .dm>.dm-search{margin-top:.1rem}.dm>.dm-search[hidden]{display:none}
+}

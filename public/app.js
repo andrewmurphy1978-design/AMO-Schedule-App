@@ -2551,6 +2551,15 @@ async function renderMessages(box) {
   if (state.dmThread) { box.replaceChildren(pane); await renderPane(); return; }
   setOpen(false);
   // phone: the conversations start at the top; "new message" (and "new group") are round buttons at the bottom of the screen, like Messenger
+  // the search sits behind a magnifier at the right of the tabs (like Messenger); tapping it shows the field above the list
+  search.hidden = !search.value;
+  const bar = root?.querySelector(".comm-top");
+  bar?.querySelector(".dm-loupe")?.remove();
+  const loupe = h("button", { type: "button", class: "dm-loupe", "aria-label": t("dmFind"), title: t("dmFind"), "aria-expanded": String(!search.hidden), onClick: () => {
+    search.hidden = !search.hidden; loupe.setAttribute("aria-expanded", String(!search.hidden));
+    if (search.hidden) { search.value = ""; paintList(); } else search.focus();
+  } }, "🔍");
+  bar?.append(loupe);
   box.replaceChildren(search, listEl, h("p", { class: "meta dm-privacy" }, t("dmPrivacy")),
     h("div", { class: "dm-fab" }, groupBtn, newBtn)); paintList();
   state.dmListTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmListTimer); return; } if (!document.hidden && !state.dmThread) loadThreads().then(paintList).catch(() => {}); }, 20000);
