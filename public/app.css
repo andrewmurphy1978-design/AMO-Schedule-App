@@ -1318,3 +1318,10 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .login-card .acc-form .field, .login-card .acc-form input { width: 100%; box-sizing: border-box; }
 .login-card .acc-form .btn.primary { width: 100%; grid-column: auto; }
 .login-card { max-width: 480px; width: 100%; box-sizing: border-box; }
+
+/* the write bar: a labelled send button on a computer (the arrow alone on a phone) */
+.dm-send-tx { display: none; }
+@media (min-width: 900px) {
+  .dm-send:not(.like) { width: auto; padding: 0 1rem; border-radius: 999px; display: inline-flex; align-items: center; gap: .4rem; font-weight: 700; font-size: 1rem; }
+  .dm-send:not(.like) .dm-send-tx { display: inline; }
+}

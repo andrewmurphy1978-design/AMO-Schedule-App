@@ -722,9 +722,11 @@ app.post("/api/account/passkeys/options", async (c) => {
     userID: new TextEncoder().encode(`staff-${me.id}`),
     attestationType: "none", timeout: 120_000,
     excludeCredentials: existing.results.map((k) => ({ id: k.id, transports: k.transports ? (JSON.parse(k.transports) as never) : undefined })),
-    authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    // this device's own biometrics (Windows Hello, Face ID, fingerprint), not a phone or a security key: Chrome on Windows then opens Windows Hello directly
+    authenticatorSelection: { authenticatorAttachment: "platform", residentKey: "required", userVerification: "required" },
     supportedAlgorithmIDs: [-7, -257],
   });
+  (options as { hints?: string[] }).hints = ["client-device"]; // newer browsers: prefer the device itself; older ones ignore it
   return c.json({ cid: await saveChallenge(c.env.DB, options.challenge, "register", email), options });
 });
 app.post("/api/account/passkeys", async (c) => {

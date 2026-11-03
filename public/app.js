@@ -2878,7 +2878,7 @@ async function messageComposer(box, toThread, toList, group = false) {
 
 /** The Messenger-style write bar, shared by Messages and Communities: round icons that fold into "›" while typing, a thumbs-up when empty, ➤ when there is something to send.
  *  opts: { uploadUrl, send({ body, media_ids }) (throws to keep what was typed), placeholder, like: "👍" }. Returns { form, previews, body, focus() }. */
-function messengerBar({ uploadUrl, send, placeholder, like = "👍" }) {
+function messengerBar({ uploadUrl, send, placeholder, like = "👍", sendLabel }) {
   const finePointer = window.matchMedia("(pointer: fine)").matches;
   const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: placeholder ?? t("dmMsgPh"), "aria-label": t("dmWrite") });
   const grow = () => { body.style.height = "auto"; body.style.height = `${Math.min(body.scrollHeight, 140)}px`; };
@@ -2899,13 +2899,14 @@ function messengerBar({ uploadUrl, send, placeholder, like = "👍" }) {
     ic("😊", t("emojis"), (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); if (body.value.trim()) expanded = false; sync(); grow(); })));
   const moreBtn = ic("›", t("dmMoreTools"), () => { expanded = true; sync(); });
   moreBtn.classList.add("dm-more");
-  const sendBtn = h("button", { class: "dm-send", type: "submit" });
+  const sendIc = h("span", { "aria-hidden": "true" }), sendTx = h("span", { class: "dm-send-tx" });
+  const sendBtn = h("button", { class: "dm-send", type: "submit" }, sendIc, sendTx); // on a computer the label shows beside the arrow once there is something to send
   const typing = () => body.value.trim().length > 0 || attached.length > 0;
   function sync() {
     if (!typing()) expanded = true;
     toolsEl.hidden = typing() && !expanded; moreBtn.hidden = !(typing() && !expanded);
     const on = typing();
-    sendBtn.textContent = on ? "➤" : like; sendBtn.classList.toggle("like", !on); sendBtn.setAttribute("aria-label", on ? t("dmSend") : t("dmLike")); sendBtn.title = on ? t("dmSend") : t("dmLike");
+    sendIc.textContent = on ? "➤" : like; sendTx.textContent = on ? sendLabel ?? t("dmSend") : ""; sendBtn.classList.toggle("like", !on); sendBtn.setAttribute("aria-label", on ? t("dmSend") : t("dmLike")); sendBtn.title = on ? t("dmSend") : t("dmLike");
   }
   body.addEventListener("input", () => { if (body.value.trim() && expanded) expanded = false; sync(); grow(); });
   const sendNow = async (e) => {
@@ -3120,7 +3121,7 @@ async function communityFeed(box, c, { shortIcons, title, toList, onChange }) {
     if (nearBottom) msgs.scrollTop = msgs.scrollHeight;
   }
   async function load(stick) { const d = await api(`/communities/${id}/posts`); moderator = d.moderator; posts = d.posts; more = d.more; paint(stick); onChange?.(); }
-  const bar = messengerBar({ uploadUrl: `/api/communities/${id}/media`, send: async ({ body: text, media_ids }) => { await api(`/communities/${id}/posts`, { method: "POST", body: { body: text, media_ids } }); await load(true); } });
+  const bar = messengerBar({ sendLabel: t("publishBtn"), uploadUrl: `/api/communities/${id}/media`, send: async ({ body: text, media_ids }) => { await api(`/communities/${id}/posts`, { method: "POST", body: { body: text, media_ids } }); await load(true); } });
   box.replaceChildren(h("div", { class: "dm-chat comm-feed-view" },
     h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"),
       h("div", { class: "dm-title" }, h("span", { class: "dm-group-ic board-ic", style: "--s:40px", "aria-hidden": "true" }, shortIcons(c.departments)), h("div", { class: "dm-title-tx" }, h("b", {}, title(c)), h("div", { class: "meta" }, c.restaurant)))),
@@ -5225,7 +5226,7 @@ function renderLogin(prefill = "") {
     email.focus();
   };
   const stepEmail = () => {
-    if ((state.loginMode ?? (seen() ? "returning" : "first")) === "first") { stepFirst(); return; }
+    if ((state.loginMode ?? (seen() || isStandalone() ? "returning" : "first")) === "first") { stepFirst(); return; }
     msg.textContent = ""; password.value = "";
     const usePasskey = async () => {
       msg.textContent = "";
