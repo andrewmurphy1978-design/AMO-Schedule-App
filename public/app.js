@@ -3036,8 +3036,8 @@ function clientsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -3093,11 +3093,12 @@ async function renderAdmin() {
     ingredients: () => [ingredientsPanel()],
     products: () => [h("section", { class: "panel" }, h("h2", {}, `🛍️ ${t("adminProducts")}`), h("p", { class: "meta" }, t("productsSoon")))],
     usage: () => [usagePanel()],
+    autoschedule: () => [autoSchedulePanel()],
     timeoff: () => { const box = h("div", {}, h("p", { class: "meta" }, t("loading"))); timeOffNodes("review").then((n) => box.replaceChildren(...n)).catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e)))); return [box]; },
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];
@@ -3517,6 +3518,113 @@ function previewChecklist(title, items, role) {
 
 // Administration: the end-of-shift lists (per kitchen post and per role) and who did theirs.
 // Administration → Coûts: what Claude and Twilio cost, per month.
+// ---------- Automatic schedules (created overnight) ----------
+function autoSchedulePanel() {
+  const box = h("section", { class: "panel auto-panel" });
+  let timer = null;
+  const dayName = (i) => new Date(Date.UTC(2026, 10, 1 + i)).toLocaleDateString(locale(), { weekday: "long", timeZone: "UTC" });
+  const hourLabel = (hh) => (getLang() === "en" ? `${hh % 12 || 12} ${hh < 12 ? "AM" : "PM"}` : `${hh} h`);
+  const select = (options, value, label) => h("select", { "aria-label": label }, options.map(([v, l]) => h("option", { value: v, selected: String(v) === String(value) }, l)));
+  const weekLabel = (w) => new Date(`${w}T12:00:00Z`).toLocaleDateString(locale(), { day: "numeric", month: "long", timeZone: "UTC" });
+  // restaurants x departments, each box ticked when included; value() is null when everything is ticked
+  const scopeMatrix = (d, initial) => {
+    const on = (rid, dep) => initial === null || initial.includes(`${rid}:${dep}`);
+    const boxes = [];
+    const rows = d.restaurants.map((r) => h("tr", {}, h("th", { scope: "row" }, r.name), d.departments.map((dep) => {
+      const cb = h("input", { type: "checkbox", checked: on(r.id, dep), "aria-label": `${r.name} · ${t(`dept.${dep}`)}` }); boxes.push([`${r.id}:${dep}`, cb]);
+      return h("td", {}, cb); })));
+    return { node: h("div", { class: "auto-scope-wrap" }, h("table", { class: "auto-scope" }, h("thead", {}, h("tr", {}, h("th"), d.departments.map((dep) => h("th", {}, t(`dept.${dep}`))))), h("tbody", {}, rows))),
+      value: () => (boxes.every(([, cb]) => cb.checked) ? null : boxes.filter(([, cb]) => cb.checked).map(([k]) => k)) };
+  };
+  async function load() {
+    const d = await api("/admin/auto-schedule");
+    const s = d.settings;
+    const enabled = h("input", { type: "checkbox", checked: s.enabled });
+    const dow = select([0, 1, 2, 3, 4, 5, 6].map((i) => [i, dayName(i)]), s.dow, t("autoDay"));
+    const hour = select(Array.from({ length: 24 }, (_, i) => [i, hourLabel(i)]), s.hour, t("autoHour"));
+    const nHour = select(Array.from({ length: 24 }, (_, i) => [i, hourLabel(i)]), s.notify_hour, t("autoNoticeHour"));
+    const email = h("input", { type: "checkbox", checked: s.email }), sms = h("input", { type: "checkbox", checked: s.sms });
+    const extra = h("textarea", { rows: 3, maxLength: 2000, placeholder: t("autoExtraPh") }, s.extra);
+    const matrix = scopeMatrix(d, s.scope);
+    const picks = d.candidates.map((p) => [p, h("input", { type: "checkbox", checked: d.recipients_now.includes(p.id), "aria-label": p.name })]);
+    // reminders while the schedules are still not published
+    const rOn = h("input", { type: "checkbox", checked: s.reminders });
+    const rDays = Array.from({ length: 7 }, (_, i) => [i + 1, h("input", { type: "checkbox", checked: s.reminder_days.includes(i + 1), "aria-label": `+${i + 1}` })]);
+    const rHour = select(Array.from({ length: 24 }, (_, i) => [i, hourLabel(i)]), s.reminder_hour, t("autoRemindHour"));
+    const rEmail = h("input", { type: "checkbox", checked: s.r_email }), rSms = h("input", { type: "checkbox", checked: s.r_sms });
+    const sameCb = h("input", { type: "checkbox", checked: s.reminder_recipients === null });
+    const rPicks = d.candidates.map((p) => [p, h("input", { type: "checkbox", checked: (s.reminder_recipients ?? d.recipients_now).includes(p.id), disabled: s.reminder_recipients === null, "aria-label": p.name })]);
+    sameCb.addEventListener("change", () => rPicks.forEach(([, cb]) => { cb.disabled = sameCb.checked; }));
+    const when = h("p", { class: "meta auto-when" });
+    const paintWhen = () => {
+      const sameDay = Number(nHour.value) > Number(hour.value);
+      when.textContent = t("autoWhen").replace("{week}", weekLabel(d.next_week)).replace("{day}", dayName(Number(dow.value))).replace("{hour}", hourLabel(Number(hour.value))).replace("{tz}", d.timezone)
+        + " " + t("autoWhenNotice").replace("{day}", dayName(sameDay ? Number(dow.value) : (Number(dow.value) + 1) % 7)).replace("{hour}", hourLabel(Number(nHour.value)));
+    };
+    [dow, hour, nHour].forEach((el) => el.addEventListener("change", paintWhen)); paintWhen();
+    const save = async (e) => {
+      e.preventDefault();
+      try {
+        await api("/admin/auto-schedule", { method: "PUT", body: { enabled: enabled.checked, dow: Number(dow.value), hour: Number(hour.value), notify_hour: Number(nHour.value), email: email.checked, sms: sms.checked, recipients: picks.filter(([, cb]) => cb.checked).map(([p]) => p.id), scope: matrix.value(), extra: extra.value,
+          reminders: rOn.checked, reminder_days: rDays.filter(([, cb]) => cb.checked).map(([n]) => n), reminder_hour: Number(rHour.value), reminder_recipients: sameCb.checked ? null : rPicks.filter(([, cb]) => cb.checked).map(([p]) => p.id), r_email: rEmail.checked, r_sms: rSms.checked } });
+        toast(t("saved")); load();
+      } catch (err) { toast(errorText(err)); }
+    };
+    // runs
+    const resLine = (r) => h("li", {}, `${r.restaurant} · ${t(`dept.${r.department}`)} : `, r.status === "created" ? `${r.shifts} ${t("autoShifts")}` : r.status === "failed" ? `${t("autoRes_failed")}${r.error ? ` (${r.error})` : ""}` : t(`autoRes_${r.status}`));
+    const runCard = (r) => h("div", { class: `card auto-run ${r.status}` },
+      h("div", {}, h("b", {}, `${t("autoWeekOf")} ${weekLabel(r.week)}`), " · ", h("span", { class: "badge" }, t(`autoSt_${r.status}`)), " · ", h("span", { class: "meta" }, new Date(r.started_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))),
+      r.summary?.error ? h("p", { class: "alert" }, r.summary.error === "no_ai_key" ? t("autoNoKey") : r.summary.error) : null,
+      h("ul", { class: "auto-results" }, (r.summary?.results ?? []).filter((x) => x.status !== "no_staff").map(resLine)),
+      r.reminders_sent?.length ? h("p", { class: "meta" }, `${t("autoRemindersSent")} : ${r.reminders_sent.map((n) => `+${n} ${t("autoDayShort")}`).join(", ")}`) : null,
+      h("p", { class: "meta" }, r.notified_at ? `${t("autoNoticeSent")} · ${new Date(r.notified_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : r.notify_at ? `${t("autoNoticePlanned")} · ${r.notify_at.replace("T", " ")}` : t("autoNoNotice")));
+    const busy = d.runs.some((r) => r.status === "running");
+    const runNow = h("button", { class: "btn", type: "button", disabled: busy || !d.has_ai_key, onClick: async () => {
+      if (!(await ask(t("autoRunConfirm").replace("{week}", weekLabel(d.next_week))))) return;
+      try { await api("/admin/auto-schedule/run", { method: "POST" }); toast(t("autoRunStarted")); load(); } catch (err) { toast(err.body?.error === "already_running" ? t("autoAlreadyRunning") : errorText(err)); }
+    } }, `▶ ${t("autoRunNow")} ${weekLabel(d.next_week)}`);
+    // regenerate with extra instructions
+    const rExtra = h("textarea", { rows: 3, maxLength: 2000, placeholder: t("autoRegenPh"), "aria-label": t("autoRegenExtra") });
+    const rMatrix = scopeMatrix(d, s.scope);
+    const rNotify = h("input", { type: "checkbox" });
+    const regen = h("button", { class: "btn danger", type: "button", disabled: busy || !d.has_ai_key, onClick: async () => {
+      if (!(await ask(t("autoRegenConfirm").replace("{week}", weekLabel(d.next_week)), t("autoRegenYes")))) return;
+      try { await api("/admin/auto-schedule/regenerate", { method: "POST", body: { extra: rExtra.value, scope: rMatrix.value(), notify: rNotify.checked } }); toast(t("autoRegenStarted")); rExtra.value = ""; load(); }
+      catch (err) { toast(err.body?.error === "already_running" ? t("autoAlreadyRunning") : err.body?.error === "no_ai_key" ? t("autoNoKey") : errorText(err)); }
+    } }, `↻ ${t("autoRegenBtn")} ${weekLabel(d.next_week)}`);
+    box.replaceChildren(h("h2", {}, `🌙 ${t("autoTitle")}`), h("p", { class: "meta" }, t("autoHelp")),
+      d.has_ai_key ? null : h("div", { class: "alert", role: "alert" }, t("autoNoKey")),
+      h("form", { class: "acc-form", onSubmit: save },
+        h("label", { class: "check" }, enabled, h("span", {}, t("autoEnabled"))),
+        h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("autoDay")), dow), h("label", { class: "field" }, h("span", {}, t("autoHour")), hour)), when,
+        h("div", { class: "field" }, h("span", {}, t("autoScope")), h("span", { class: "meta" }, t("autoScopeHelp")), matrix.node),
+        h("label", { class: "field" }, h("span", {}, t("autoExtra")), h("span", { class: "meta" }, t("autoExtraHelp")), extra),
+        h("h3", {}, t("autoNotice")), h("p", { class: "meta" }, t("autoNoticeHelp")),
+        h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("autoNoticeHour")), nHour),
+          h("div", { class: "field" }, h("span", {}, t("autoNoticeBy")), h("label", { class: "check" }, email, h("span", {}, t("autoNoticeEmail"))), h("label", { class: "check" }, sms, h("span", {}, t("autoNoticeSms"))))),
+        h("p", { class: "meta" }, t("autoNoticeOwn")),
+        h("div", { class: "field" }, h("span", {}, t("autoRecipients")), h("span", { class: "meta" }, t("autoRecipientsHelp")),
+          h("div", { class: "auto-people" }, picks.map(([p, cb]) => h("label", { class: "check auto-person" }, cb, h("span", {}, p.name, " ", h("small", { class: "meta" }, `${p.is_admin ? t("autoAdminTag") : t("autoManagerTag")} · ${p.email ?? t("autoNoEmail")} · ${p.phone ?? t("autoNoPhone")}`)))))),
+        h("h3", {}, t("autoReminders")), h("p", { class: "meta" }, t("autoRemindersHelp")),
+        h("label", { class: "check" }, rOn, h("span", {}, t("autoRemindersOn"))),
+        h("div", { class: "field" }, h("span", {}, t("autoRemindDays")), h("div", { class: "auto-days" }, rDays.map(([n, cb]) => h("label", { class: "check" }, cb, h("span", {}, `+${n} ${t("autoDayShort")}`))))),
+        h("div", { class: "form-row r2" }, h("label", { class: "field" }, h("span", {}, t("autoRemindHour")), rHour),
+          h("div", { class: "field" }, h("span", {}, t("autoNoticeBy")), h("label", { class: "check" }, rEmail, h("span", {}, t("autoNoticeEmail"))), h("label", { class: "check" }, rSms, h("span", {}, t("autoNoticeSms"))))),
+        h("div", { class: "field" }, h("span", {}, t("autoRemindWho")), h("label", { class: "check" }, sameCb, h("span", {}, t("autoRemindSame"))),
+          h("div", { class: "auto-people" }, rPicks.map(([p, cb]) => h("label", { class: "check auto-person" }, cb, h("span", {}, p.name, " ", h("small", { class: "meta" }, `${p.is_admin ? t("autoAdminTag") : t("autoManagerTag")} · ${p.email ?? t("autoNoEmail")} · ${p.phone ?? t("autoNoPhone")}`)))))),
+        h("button", { class: "btn primary", type: "submit" }, t("save"))),
+      h("h3", {}, t("autoRuns")), d.runs.length ? d.runs.map(runCard) : h("p", { class: "meta" }, t("autoNoRuns")),
+      h("div", { class: "actions" }, runNow), h("p", { class: "meta" }, t("autoRunNowHelp")),
+      h("details", { class: "auto-regen" }, h("summary", {}, `↻ ${t("autoRegen")}`), h("p", { class: "meta" }, t("autoRegenHelp")),
+        h("label", { class: "field" }, h("span", {}, t("autoRegenExtra")), rExtra), h("div", { class: "field" }, h("span", {}, t("autoScope")), rMatrix.node),
+        h("label", { class: "check" }, rNotify, h("span", {}, t("autoRegenNotify"))), h("div", { class: "actions" }, regen)));
+    clearTimeout(timer);
+    if (busy) timer = setTimeout(() => { if (box.isConnected) load().catch(() => {}); }, 5000); // a run takes a few minutes: follow it
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 function usagePanel() {
   const box = h("section", { class: "panel usage-panel" });
   const st = { month: null };

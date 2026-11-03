@@ -23,6 +23,7 @@ import { transcribe, type AiBinding } from "./transcribe.ts";
 import { closingTasksOf, closingAssignee } from "./closing.ts";
 import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
+import { AUTO_DEPTS, parseAuto, validateAuto, nextMonday, autoDue, inAutoScope, autoNotice, autoReminder, reminderDue, type AutoSettings, type AutoResult } from "./autoschedule.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
 import { newApiToken, bearerToken, tokenForbidden, MAX_ACTIVE_TOKENS, CODE_TTL_MS, SESSION_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, MIN_GAP_MS, COOKIE_NAME, sha256Hex, newCode, newSessionToken, codeHash, safeEqual, readCookie, sessionCookie, clearCookie, looksLikeEmail, loginMessage } from "./auth.ts";
@@ -1975,6 +1976,20 @@ app.post("/api/admin/ai-schedule", requireAdmin, async (c) => {
   return c.json({ summary, week: b.week, proposal: { shifts: checked.shifts, summary: proposal.summary, concerns: proposal.concerns }, warnings: checked.warnings, dropped: checked.dropped.length, employees: ctx.employees.map((e) => ({ id: e.id, first_name: e.first_name, promised_hours: e.promised_hours, roles: e.roles })) });
 });
 
+/** Checks each proposed shift like a hand-made one and adds the valid ones. `c` only needs `env` and the signed-in person (see sysCtx). */
+async function insertProposedShifts(c: any, restaurantId: number, bounds: { start: string; end: string }, shifts: { staff_id: number; role_id: number; start_at: string; end_at: string; until_close?: boolean; notes?: string }[]) {
+  let created = 0; const skipped: { staff_id: number; start_at: string; error: string }[] = [];
+  for (const s of shifts) {
+    const input: ShiftInput = { staff_id: s.staff_id, restaurant_id: restaurantId, role_id: s.role_id, start_at: s.start_at, end_at: s.end_at, until_close: !!s.until_close, notes: s.notes, force: true };
+    if (s.start_at < bounds.start || s.start_at >= bounds.end) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: "outside_week" }); continue; }
+    const problem = await validateShift(c, input);
+    if (problem) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: String((problem.body as { error?: string }).error) }); continue; }
+    await c.env.DB.prepare("INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes, until_close) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(s.staff_id, restaurantId, s.role_id, s.start_at, s.end_at, s.notes ?? null, s.until_close ? 1 : 0).run();
+    created++;
+  }
+  return { created, skipped };
+}
+
 // Applies a proposal the admin reviewed: creates the shifts, optionally replacing the week's existing ones for these departments.
 app.post("/api/admin/ai-schedule/apply", requireAdmin, async (c) => {
   const b = await c.req.json<{ restaurant_id?: number; departments?: string[]; week?: string; replace?: boolean; shifts?: { staff_id: number; role_id: number; start_at: string; end_at: string; until_close?: boolean; notes?: string }[] }>();
@@ -1988,17 +2003,196 @@ app.post("/api/admin/ai-schedule/apply", requireAdmin, async (c) => {
     const r = await c.env.DB.prepare(`DELETE FROM shifts WHERE restaurant_id = ? AND start_at >= ? AND start_at < ? AND role_id IN (SELECT id FROM roles WHERE department_id IN (${dm}))`).bind(b.restaurant_id, bounds.start, bounds.end, ...b.departments).run();
     removed = r.meta.changes ?? 0;
   }
-  let created = 0; const skipped: { staff_id: number; start_at: string; error: string }[] = [];
-  for (const s of b.shifts) {
-    const input: ShiftInput = { staff_id: s.staff_id, restaurant_id: b.restaurant_id, role_id: s.role_id, start_at: s.start_at, end_at: s.end_at, until_close: !!s.until_close, notes: s.notes, force: true };
-    if (s.start_at < bounds.start || s.start_at >= bounds.end) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: "outside_week" }); continue; }
-    const problem = await validateShift(c, input);
-    if (problem) { skipped.push({ staff_id: s.staff_id, start_at: s.start_at, error: String((problem.body as { error?: string }).error) }); continue; }
-    await c.env.DB.prepare("INSERT INTO shifts (staff_id, restaurant_id, role_id, start_at, end_at, notes, until_close) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(s.staff_id, b.restaurant_id, s.role_id, s.start_at, s.end_at, s.notes ?? null, s.until_close ? 1 : 0).run();
-    created++;
-  }
+  const { created, skipped } = await insertProposedShifts(c, b.restaurant_id, bounds, b.shifts);
   emit(c, "schedule.applied", async () => ({ restaurant_id: b.restaurant_id, week: b.week, created, removed }));
   return c.json({ ok: true, created, removed, skipped });
+});
+
+// ---------- Automatic schedules: next week's, created overnight (default: night of Wednesday to Thursday) ----------
+// The platform acts as an administrator of the client for these runs. The shifts are plain drafts: nobody sees them until they are published.
+const sysCtx = (env: Env, clientId: number): any => ({ env, get: (k: string) => (k === "me" ? { id: 0, name: "Automatique", email: "", is_admin: true, client_id: clientId, home_client: clientId, is_super: false } : undefined) });
+
+async function mailConn(env: Env, clientId: number) {
+  const db = env.DB;
+  let conn = await loadConnections(env, db, clientId);
+  if (!conn.smtp && clientId !== 1) conn = { ...conn, smtp: (await loadConnections(env, db, 1)).smtp };
+  const brand = await loadBrand(db, clientId);
+  return { conn: { ...conn, smtp: conn.smtp ? { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } : null }, brand };
+}
+
+/** Makes the week's schedules for one client. Returns false when this week was already taken by another run. */
+interface AutoRunOpts { replace?: boolean; extra?: string; scope?: string[] | null }
+async function runAutoSchedule(env: Env, clientId: number, week: string, auto0: AutoSettings, notifyAt: string | null, opts: AutoRunOpts = {}): Promise<boolean> {
+  const db = env.DB;
+  // a regeneration may narrow the scope and adds one-time instructions to the saved ones
+  const auto: AutoSettings = { ...auto0, scope: opts.scope !== undefined ? opts.scope : auto0.scope, extra: [auto0.extra, opts.extra ?? ""].map((x) => x.trim()).filter(Boolean).join("\n") };
+  const today = localNow(env.TIMEZONE).slice(0, 10);
+  const claimed = opts.replace
+    // a regeneration takes the week over again (and restarts the reminders), unless a run is going on right now
+    ? await db.prepare("INSERT INTO auto_schedule_runs (client_id, week, started_at, status, notify_at, run_date) VALUES (?1, ?2, ?3, 'running', ?4, ?6) ON CONFLICT (client_id, week) DO UPDATE SET started_at = ?3, finished_at = NULL, status = 'running', summary = NULL, notify_at = ?4, notified_at = NULL, run_date = ?6, reminders_sent = '[]' WHERE auto_schedule_runs.status != 'running' OR auto_schedule_runs.started_at < ?5").bind(clientId, week, Date.now(), notifyAt, Date.now() - 30 * 60_000, today).run()
+    : await db.prepare("INSERT OR IGNORE INTO auto_schedule_runs (client_id, week, started_at, status, notify_at, run_date) VALUES (?, ?, ?, 'running', ?, ?)").bind(clientId, week, Date.now(), notifyAt, today).run();
+  if (!claimed.meta.changes) return false;
+  const results: AutoResult[] = [];
+  let failure: string | null = null;
+  try {
+    const key = await anthropicKey(env, clientId);
+    const bounds = weekBounds(week);
+    if (!key) failure = "no_ai_key";
+    else if (!bounds) failure = "bad_week";
+    else {
+      const restaurants = (await db.prepare("SELECT id, name FROM restaurants WHERE client_id = ? ORDER BY name").bind(clientId).all<{ id: number; name: string }>()).results;
+      const c = sysCtx(env, clientId);
+      const deadline = Date.now() + 10 * 60_000; // one by one (each sees the shifts of the previous ones); stop before the platform stops us
+      for (const r of restaurants) for (const dep of AUTO_DEPTS) {
+        if (!inAutoScope(auto, r.id, dep)) continue;
+        const base = { restaurant_id: r.id, restaurant: r.name, department: dep };
+        try {
+          if (Date.now() > deadline) { results.push({ ...base, status: "failed", error: "timeout" }); continue; }
+          if (await db.prepare("SELECT 1 FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(r.id, dep, week).first()) { results.push({ ...base, status: "published" }); continue; }
+          const has = await db.prepare("SELECT 1 FROM shifts sh JOIN roles ro ON ro.id = sh.role_id WHERE sh.restaurant_id = ? AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ? AND sh.status = 'ok' LIMIT 1").bind(r.id, dep, bounds.start, bounds.end).first();
+          if (has && !opts.replace) { results.push({ ...base, status: "has_shifts" }); continue; } // already planned by hand: never touched
+          const ctx = await buildAiContext(c, r.id, [dep], week, "fr");
+          if (!ctx) { results.push({ ...base, status: "no_staff" }); continue; }
+          if (opts.replace) ctx.existing_next_week = []; // the draft being replaced must not steer the new one
+          let usage: Record<string, number> | null = null, usedModel = "";
+          const text = await callClaude(key, SYSTEM_PROMPT, buildUserPrompt(ctx, auto.extra), fetch, env.ANTHROPIC_API_BASE, (u, m) => { usage = u; usedModel = m; });
+          if (usage) await logClaude(db, clientId, "ai_schedule", usedModel, usage, `${ctx.restaurant.name} · ${week} · auto`);
+          const checked = checkProposal(ctx, parseProposal(text));
+          // replaced only now that the AI has answered: a failed call leaves the current draft as it was
+          if (opts.replace && has) await db.prepare("DELETE FROM shifts WHERE restaurant_id = ? AND start_at >= ? AND start_at < ? AND role_id IN (SELECT id FROM roles WHERE department_id = ?)").bind(r.id, bounds.start, bounds.end, dep).run();
+          const ins = await insertProposedShifts(c, r.id, bounds, checked.shifts);
+          results.push({ ...base, status: "created", shifts: ins.created, skipped: ins.skipped.length + checked.dropped.length, warnings: checked.warnings.length });
+          if (ins.created) await queueEvent(db, clientId, "schedule.applied", { restaurant_id: r.id, week, created: ins.created, removed: 0, auto: true }).catch(() => {});
+        } catch (e) { results.push({ ...base, status: "failed", error: String((e as Error)?.message ?? e).slice(0, 160) }); }
+      }
+    }
+  } catch (e) { failure = String((e as Error)?.message ?? e).slice(0, 160); }
+  const made = results.some((x) => x.status === "created");
+  const status = failure ? "failed" : results.some((x) => x.status === "failed") ? (made ? "partial" : "failed") : "done";
+  await db.prepare("UPDATE auto_schedule_runs SET status = ?, finished_at = ?, summary = ? WHERE client_id = ? AND week = ?").bind(status, Date.now(), JSON.stringify({ results, error: failure }), clientId, week).run();
+  await flushDeliveries(db).catch(() => {});
+  return true;
+}
+
+/** Sends one message to the chosen people (null = every administrator), by the ticked channels, or the way each person's file says when none is ticked. */
+async function notifyPeople(env: Env, clientId: number, ids: number[] | null, ch: { email: boolean; sms: boolean }, build: (lang: Lang, sms: boolean, c: { url: string; brand: string }) => { subject: string; text: string }, kind: string) {
+  const db = env.DB;
+  const people = (await db.prepare("SELECT id, name, email, phone, lang, notify_channel, is_admin FROM staff WHERE client_id = ? AND active = 1").bind(clientId).all<StaffContact & { is_admin: number }>()).results;
+  const chosen = ids === null ? people.filter((p) => p.is_admin === 1) : people.filter((p) => ids.includes(p.id));
+  const { conn, brand } = await mailConn(env, clientId);
+  const ctx = { url: `${conn.appUrl}/?view=schedule`, brand: brand.name };
+  for (const p of chosen) {
+    const lang: Lang = p.lang === "en" ? "en" : "fr";
+    if (!ch.email && !ch.sms) { await notifyStaff(db, conn, p, (_l, c2) => build(lang, c2 === "sms", ctx), kind); continue; } // each person's own preference
+    if (ch.email && p.email && conn.smtp) await deliver(db, conn, "email", p.email, build(lang, false, ctx), kind, p.id);
+    if (ch.sms && p.phone && conn.twilio) await deliver(db, conn, "sms", p.phone, build(lang, true, ctx), kind, p.id);
+  }
+}
+
+/** The morning notice: tells the chosen people to check the new schedules and publish them. */
+async function sendAutoNotice(env: Env, run: { client_id: number; week: string; summary: string | null }) {
+  const auto = parseAuto(await getSetting(env.DB, run.client_id, "auto_schedule"));
+  let sum: { results?: AutoResult[]; error?: string | null } = {};
+  try { sum = JSON.parse(run.summary ?? "{}"); } catch { /* an unreadable summary is told as "nothing created" */ }
+  await notifyPeople(env, run.client_id, auto.recipients, { email: auto.email, sms: auto.sms }, (lang, sms, c) => autoNotice(lang, { week: run.week, url: c.url, brand: c.brand, results: sum.results ?? [], error: sum.error, sms }), "auto_schedule");
+}
+
+/** Reminders while schedules made by a run are still not published: one for each chosen day, until the week starts. */
+async function sendAutoReminders(env: Env, now: string) {
+  const db = env.DB, today = now.slice(0, 10), hour = Number(now.slice(11, 13));
+  const runs = (await db.prepare("SELECT id, client_id, week, summary, run_date, reminders_sent FROM auto_schedule_runs WHERE notify_at IS NOT NULL AND status IN ('done','partial') AND run_date IS NOT NULL AND week > ?").bind(today).all<{ id: number; client_id: number; week: string; summary: string | null; run_date: string; reminders_sent: string }>()).results;
+  for (const run of runs) {
+    const auto = parseAuto(await getSetting(db, run.client_id, "auto_schedule"));
+    let sent: number[] = []; try { sent = JSON.parse(run.reminders_sent); } catch { /* none */ }
+    const due = reminderDue(today, hour, run.run_date, run.week, sent, auto);
+    if (!due) continue;
+    let results: AutoResult[] = []; try { results = (JSON.parse(run.summary ?? "{}") as { results?: AutoResult[] }).results ?? []; } catch { /* nothing to remind about */ }
+    const published = new Set((await db.prepare("SELECT restaurant_id, department_id FROM schedule_publications WHERE week_start = ?").bind(run.week).all<{ restaurant_id: number; department_id: string }>()).results.map((x) => `${x.restaurant_id}:${x.department_id}`));
+    const pending = results.filter((x) => x.status === "created" && (x.shifts ?? 0) > 0 && !published.has(`${x.restaurant_id}:${x.department}`));
+    // claim (the list of sent days is the lock), then tell; when everything is published there is nothing to remind about
+    const claim = await db.prepare("UPDATE auto_schedule_runs SET reminders_sent = ? WHERE id = ? AND reminders_sent = ?").bind(JSON.stringify(due.sent), run.id, run.reminders_sent).run();
+    if (!claim.meta.changes || !pending.length) continue;
+    const daysLeft = Math.round((Date.parse(`${run.week}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+    await notifyPeople(env, run.client_id, auto.reminder_recipients ?? auto.recipients, { email: auto.r_email, sms: auto.r_sms },
+      (lang, sms, c) => autoReminder(lang, { week: run.week, url: c.url, brand: c.brand, pending: pending.map((x) => ({ restaurant: x.restaurant, department: x.department })), days: due.day, daysLeft, sms }), "auto_schedule_reminder").catch(() => {});
+  }
+}
+
+/** Every five minutes: start what is due, close runs that got stuck, send the notices that are due. */
+async function autoScheduleTick(env: Env) {
+  await ensureMigrated(env.DB);
+  const db = env.DB, now = localNow(env.TIMEZONE);
+  for (const cl of (await db.prepare("SELECT id FROM clients WHERE active = 1").all<{ id: number }>()).results) {
+    const auto = parseAuto(await getSetting(db, cl.id, "auto_schedule"));
+    const due = autoDue(now, auto);
+    if (due) await runAutoSchedule(env, cl.id, due.week, auto, due.notifyAt);
+  }
+  await db.prepare("UPDATE auto_schedule_runs SET status = 'failed', finished_at = ?, summary = ? WHERE status = 'running' AND started_at < ?").bind(Date.now(), JSON.stringify({ results: [], error: "timeout" }), Date.now() - 30 * 60_000).run();
+  const due = (await db.prepare("SELECT id, client_id, week, summary FROM auto_schedule_runs WHERE notified_at IS NULL AND notify_at IS NOT NULL AND notify_at <= ? AND status != 'running'").bind(now).all<{ id: number; client_id: number; week: string; summary: string | null }>()).results;
+  for (const run of due) {
+    const claim = await db.prepare("UPDATE auto_schedule_runs SET notified_at = ? WHERE id = ? AND notified_at IS NULL").bind(Date.now(), run.id).run();
+    if (claim.meta.changes) await sendAutoNotice(env, run).catch(() => {});
+  }
+  await sendAutoReminders(env, now).catch(() => {});
+}
+
+app.get("/api/admin/auto-schedule", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const auto = parseAuto(await getSetting(db, cid, "auto_schedule"));
+  const staff = (await db.prepare("SELECT s.id, s.name, s.email, s.phone, s.is_admin, (SELECT COUNT(*) FROM managers m WHERE m.staff_id = s.id) AS managed FROM staff s WHERE s.client_id = ? AND s.active = 1 ORDER BY s.name").bind(cid).all<{ id: number; name: string; email: string | null; phone: string | null; is_admin: number; managed: number }>()).results;
+  const candidates = staff.filter((x) => x.is_admin === 1 || x.managed > 0).map((x) => ({ id: x.id, name: x.name, email: x.email, phone: x.phone, is_admin: x.is_admin === 1 }));
+  const runs = (await db.prepare("SELECT week, status, started_at, finished_at, summary, notify_at, notified_at, reminders_sent FROM auto_schedule_runs WHERE client_id = ? ORDER BY id DESC LIMIT 6").bind(cid).all<{ week: string; status: string; started_at: number; finished_at: number | null; summary: string | null; notify_at: string | null; notified_at: number | null; reminders_sent: string }>()).results
+    .map((r) => { let sum: unknown = {}, rem: number[] = []; try { sum = JSON.parse(r.summary ?? "{}"); } catch { /* shown empty */ } try { rem = JSON.parse(r.reminders_sent); } catch { /* none */ } return { ...r, summary: sum, reminders_sent: rem }; });
+  return c.json({
+    settings: auto, recipients_now: auto.recipients ?? candidates.filter((x) => x.is_admin).map((x) => x.id), candidates,
+    restaurants: (await db.prepare("SELECT id, name FROM restaurants WHERE client_id = ? ORDER BY name").bind(cid).all()).results, departments: AUTO_DEPTS,
+    runs, has_ai_key: !!(await anthropicKey(c.env, cid)), next_week: nextMonday(localNow(c.env.TIMEZONE).slice(0, 10)), timezone: c.env.TIMEZONE ?? "America/Toronto",
+  });
+});
+app.put("/api/admin/auto-schedule", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const v = validateAuto(await c.req.json().catch(() => null));
+  if ("error" in v) return c.json({ error: "invalid", field: v.error }, 400);
+  // only this client's active people and restaurants can be chosen
+  const people = new Set((await db.prepare("SELECT id FROM staff WHERE client_id = ? AND active = 1").bind(cid).all<{ id: number }>()).results.map((x) => x.id));
+  const restos = new Set((await db.prepare("SELECT id FROM restaurants WHERE client_id = ?").bind(cid).all<{ id: number }>()).results.map((x) => x.id));
+  const value = { ...v.value, recipients: v.value.recipients === null ? null : v.value.recipients.filter((id) => people.has(id)), reminder_recipients: v.value.reminder_recipients === null ? null : v.value.reminder_recipients.filter((id) => people.has(id)), scope: v.value.scope === null ? null : v.value.scope.filter((x) => restos.has(Number(x.split(":")[0])) && (AUTO_DEPTS as readonly string[]).includes(x.split(":")[1])) };
+  await putSettingStmt(db, cid, "auto_schedule", JSON.stringify(value)).run();
+  return c.json({ ok: true, settings: value });
+});
+// "Run now": makes next week's schedules right away (what is already planned is never touched), without sending the notice.
+app.post("/api/admin/auto-schedule/run", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  if (!(await anthropicKey(c.env, cid))) return c.json({ error: "no_ai_key" }, 422);
+  const week = nextMonday(localNow(c.env.TIMEZONE).slice(0, 10));
+  const existing = await db.prepare("SELECT status, started_at FROM auto_schedule_runs WHERE client_id = ? AND week = ?").bind(cid, week).first<{ status: string; started_at: number }>();
+  if (existing?.status === "running" && Date.now() - existing.started_at < 30 * 60_000) return c.json({ error: "already_running" }, 409);
+  await db.prepare("DELETE FROM auto_schedule_runs WHERE client_id = ? AND week = ?").bind(cid, week).run();
+  const auto = parseAuto(await getSetting(db, cid, "auto_schedule"));
+  c.executionCtx.waitUntil(runAutoSchedule(c.env, cid, week, auto, null).catch(() => false));
+  return c.json({ ok: true, week }, 202);
+});
+
+// Regenerate: for a setting that was missed. The unpublished schedules of the week are replaced by new ones made with the extra instructions;
+// published schedules are never touched. The notice can be sent again.
+app.post("/api/admin/auto-schedule/regenerate", requireAdmin, async (c) => {
+  const cid = c.get("me").client_id, db = c.env.DB;
+  const b = await c.req.json<{ extra?: string; scope?: string[] | null; week?: string; notify?: boolean }>().catch(() => ({} as { extra?: string; scope?: string[] | null; week?: string; notify?: boolean }));
+  const first = nextMonday(localNow(c.env.TIMEZONE).slice(0, 10));
+  const week = b.week ?? first;
+  if (!weekBounds(week) || week < first || week > new Date(Date.parse(`${first}T00:00:00Z`) + 28 * 86_400_000).toISOString().slice(0, 10)) return c.json({ error: "invalid_week" }, 400);
+  if (typeof (b.extra ?? "") !== "string" || (b.extra ?? "").length > 2000) return c.json({ error: "invalid_extra" }, 400);
+  if (b.scope != null && (!Array.isArray(b.scope) || b.scope.length > 200 || b.scope.some((x) => typeof x !== "string" || !/^\d+:[a-z]+$/.test(x)))) return c.json({ error: "invalid_scope" }, 400);
+  if (!(await anthropicKey(c.env, cid))) return c.json({ error: "no_ai_key" }, 422);
+  const restos = new Set((await db.prepare("SELECT id FROM restaurants WHERE client_id = ?").bind(cid).all<{ id: number }>()).results.map((x) => x.id));
+  const scope = b.scope == null ? null : b.scope.filter((x) => restos.has(Number(x.split(":")[0])));
+  const auto = parseAuto(await getSetting(db, cid, "auto_schedule"));
+  const notifyAt = b.notify ? localNow(c.env.TIMEZONE) : null;
+  // claim first so that a second click cannot start a second run
+  const running = await db.prepare("SELECT 1 FROM auto_schedule_runs WHERE client_id = ? AND week = ? AND status = 'running' AND started_at >= ?").bind(cid, week, Date.now() - 30 * 60_000).first();
+  if (running) return c.json({ error: "already_running" }, 409);
+  c.executionCtx.waitUntil(runAutoSchedule(c.env, cid, week, auto, notifyAt, { replace: true, extra: (b.extra ?? "").trim(), scope }).catch(() => false));
+  return c.json({ ok: true, week }, 202);
 });
 
 // Promised hours and planner notes of one employee (admin).
@@ -3863,6 +4057,7 @@ export default {
   fetch: app.fetch,
   // Cloudflare cron (every 5 minutes): tell the managers to act when nobody accepted a replacement in time.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(autoScheduleTick(env).catch(() => {})); // on its own: creating schedules takes minutes and must not hold back the reminders
     ctx.waitUntil((async () => { await ensureMigrated(env.DB); await escalateDue(env, env.DB); await sendShiftReminders(env, env.DB).catch(() => 0); await env.DB.prepare("DELETE FROM community_media WHERE post_id IS NULL AND created_at < ?").bind(Date.now() - 86_400_000).run().catch(() => {}); await env.DB.prepare("DELETE FROM voice_calls WHERE created_at < ?").bind(Date.now() - 90 * 86_400_000).run().catch(() => {}); await fillTwilioPrices(env.DB, async (cid) => (await loadConnections(env, env.DB, cid)).twilio).catch(() => 0); await flushDeliveries(env.DB); })());
   },
 };
