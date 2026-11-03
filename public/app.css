@@ -1329,3 +1329,8 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .dm-new-view .dm-new { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .dm-new-view .dm-people { max-height: min(320px, 38vh); flex: none; overflow-y: auto; overscroll-behavior: contain; }
 .dm-new-view .dm-new .actions { position: sticky; bottom: 0; background: var(--card, #fff); padding: .6rem 0; margin: 0; border-top: 1px solid rgba(128,128,128,.25); z-index: 1; }
+/* a long community name goes on two lines (the rest is cut) instead of one line that runs off or scrolls sideways */
+.dm-row-top b, .dm-title-tx b { white-space: normal; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: clip; min-width: 0; }
+.dm-row-top { align-items: flex-start; }
+.dm-title-tx { overflow: hidden; }
+.dm-row, .dm-chat-head { overflow-x: hidden; }

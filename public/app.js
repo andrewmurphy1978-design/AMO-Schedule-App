@@ -209,8 +209,8 @@ function renderChrome() {
   document.title = `${state.brand.name} · ${t("app")}`;
   // Desktop is for managing the schedule; on a phone people mostly look at their own shifts, so that comes first.
   const tabs = mqDesktop.matches
-    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("community")], ["account", t("account")]]
-    : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("community")], ["account", t("account")]];
+    ? [["schedule", t("schedule")], ["mine", t("myShifts")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("messagesNav")], ["account", t("account")]]
+    : [["mine", t("myShifts")], ["schedule", t("schedule")], ...(state.checklistShifts?.length || state.restock?.length ? [["checklist", t("listsTab")]] : []), ["community", t("messagesNav")], ["account", t("account")]];
   // the kitchen managers (and administrators) get the screen where posts are put on the day's shifts
   if (state.me?.me.is_admin || state.me?.managed.some((m) => m.department_id === "kitchen")) tabs.splice(tabs.findIndex(([id]) => id === "community"), 0, ["posts", t("postsTab")]);
   // assisted phone calls (the person types, the other hears it read aloud)
@@ -3014,7 +3014,7 @@ async function renderCommunity() {
   const topTabs = h("div", { class: "subtabs comm-top", role: "tablist" }, [["communities", `🏘️ ${t("communityTab")}`, postsUnread], ["messages", `💬 ${t("dmTab")}`, state.dmUnread ?? 0]].map(([id, label, n]) =>
     h("button", { type: "button", role: "tab", "aria-selected": String(tab === id), onClick: () => { state.commTab = id; if (id === "messages") state.dmThread = null; else state.commOpen = false; renderCommunity(); } }, label, n > 0 && tab !== id ? h("span", { class: "nav-badge" }, String(n)) : null)));
   const inner = h("div", { class: "dm" });
-  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("community")), topTabs, inner));
+  $app.replaceChildren(h("div", { class: "account community" }, h("h2", {}, t("messagesNav")), topTabs, inner));
   if (dmMode) { await renderMessages(inner); return; }
   if (!list.length) { inner.replaceChildren(h("div", { class: "empty" }, t("noCommunity"))); return; }
   inner.classList.add("comm-boards");
