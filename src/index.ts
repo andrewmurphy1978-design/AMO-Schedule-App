@@ -24,6 +24,7 @@ import { closingTasksOf, closingAssignee } from "./closing.ts";
 import { logClaude, logUsage, fillTwilioPrices } from "./usage.ts";
 import { cleanSpeech, intro, goodbye, sayAndListen, listenOnly, hangUp, redirectTo, VOICE_IDLE_MS, VOICE_MAX_SECONDS, type VoiceLang } from "./voice.ts";
 import { AUTO_DEPTS, parseAuto, validateAuto, nextMonday, autoDue, inAutoScope, autoNotice, autoReminder, reminderDue, type AutoSettings, type AutoResult } from "./autoschedule.ts";
+import { describeDevice } from "./devices.ts";
 import { parseVehicleSettings, validateVehicleSettings, currentSeason, tireReminderDue, tireNotice, issueNotice, VEHICLE_CATEGORIES, type SeasonNow } from "./vehicles.ts";
 import { T, formatWhen, formatDate, ABSENCE_REASONS, type Lang } from "./templates.ts";
 import { answerOffer, cancelRequest, escalateDue, fillRequest, gatherCandidates, startSickCall, FlowError } from "./sick.ts";
@@ -573,13 +574,14 @@ app.post("/api/auth/verify", async (c) => {
   await db.prepare("UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?").bind(row.id).run();
   if (!safeEqual(row.code_hash, await codeHash(c.env.SIN_KEY ?? "", email, code))) return c.json({ error: "invalid_code" }, 400);
   await db.prepare("DELETE FROM login_codes WHERE email = ?").bind(email).run();
-  await startSession(c, email);
+  await startSession(c, email, "code");
   return c.json({ ok: true });
 });
 
-async function startSession(c: Context<any>, email: string) {
+async function startSession(c: Context<any>, email: string, method: "code" | "password" | "passkey" = "code") {
   const token = newSessionToken(), now = Date.now();
-  await c.env.DB.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now).run();
+  const dev = describeDevice(c.req.header("user-agent"));
+  await c.env.DB.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at, device, browser, method) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now, dev.device || null, dev.browser || null, method).run();
   c.header("Set-Cookie", sessionCookie(token, isSecure(c)));
 }
 
@@ -613,7 +615,7 @@ app.post("/api/auth/password", async (c) => {
     return c.json({ error: "invalid_credentials" }, 400);
   }
   await db.prepare("UPDATE login_passwords SET fail_count = 0, locked_until = 0 WHERE email = ?").bind(email).run();
-  await startSession(c, email);
+  await startSession(c, email, "password");
   return c.json({ ok: true });
 });
 
@@ -659,8 +661,9 @@ app.post("/api/auth/passkey/verify", async (c) => {
       credential: { id: key.id, publicKey: fromB64u(key.public_key), counter: key.counter, transports: key.transports ? (JSON.parse(key.transports) as never) : undefined },
     });
     if (!v.verified || !(await mayEnter(c, key.email))) return c.json({ error: "invalid_passkey" }, 400);
-    await c.env.DB.prepare("UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?").bind(v.authenticationInfo.newCounter, Date.now(), key.id).run();
-    await startSession(c, key.email);
+    const dev = describeDevice(c.req.header("user-agent"));
+    await c.env.DB.prepare("UPDATE passkeys SET counter = ?, last_used_at = ?, last_used_device = ? WHERE id = ?").bind(v.authenticationInfo.newCounter, Date.now(), [dev.device, dev.browser].filter(Boolean).join(" · ") || null, key.id).run();
+    await startSession(c, key.email, "passkey");
     return c.json({ ok: true });
   } catch {
     return c.json({ error: "invalid_passkey" }, 400);
@@ -670,16 +673,21 @@ app.post("/api/auth/passkey/verify", async (c) => {
 // Managing one's own password and passkeys (needs a signed-in session; never available to API tokens).
 app.get("/api/account/security", async (c) => {
   const email = c.get("me").email.toLowerCase();
-  const [pw, keys] = await Promise.all([
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  const current = sid ? (await sha256Hex(sid)).slice(0, 16) : "";
+  const [pw, keys, sess] = await Promise.all([
     c.env.DB.prepare("SELECT 1 AS x FROM login_passwords WHERE email = ?").bind(email).first(),
-    c.env.DB.prepare("SELECT id, name, created_at, last_used_at FROM passkeys WHERE email = ? ORDER BY created_at").bind(email).all<{ id: string; name: string | null; created_at: number; last_used_at: number | null }>(),
+    c.env.DB.prepare("SELECT id, name, created_at, last_used_at, last_used_device FROM passkeys WHERE email = ? ORDER BY created_at").bind(email).all<{ id: string; name: string | null; created_at: number; last_used_at: number | null; last_used_device: string | null }>(),
+    c.env.DB.prepare("SELECT substr(token_hash, 1, 16) AS id, device, browser, method, standalone, created_at, COALESCE(last_seen_at, created_at) AS last_seen_at FROM sessions WHERE email = ? AND expires_at > ? ORDER BY COALESCE(last_seen_at, created_at) DESC").bind(email, Date.now()).all<{ id: string }>(),
   ]);
   const inst = await c.env.DB.prepare("SELECT app_installed_at FROM staff WHERE id = ?").bind(c.get("me").id).first<{ app_installed_at: number | null }>();
-  return c.json({ has_password: !!pw, passkeys: keys.results, installed: !!inst?.app_installed_at });
+  return c.json({ has_password: !!pw, passkeys: keys.results, installed: !!inst?.app_installed_at, sessions: sess.results.map((x) => ({ ...x, current: x.id === current })) });
 });
 // The installed app (standalone window) reports itself once, so the first-time guidance can move on to the next step.
 app.post("/api/account/installed", async (c) => {
   await c.env.DB.prepare("UPDATE staff SET app_installed_at = ? WHERE id = ? AND app_installed_at IS NULL").bind(Date.now(), c.get("me").id).run();
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  if (sid) await c.env.DB.prepare("UPDATE sessions SET standalone = 1 WHERE token_hash = ?").bind(await sha256Hex(sid)).run(); // this device runs the installed app
   return c.json({ ok: true });
 });
 app.put("/api/account/password", async (c) => {
@@ -733,6 +741,19 @@ app.post("/api/account/passkeys", async (c) => {
   } catch {
     return c.json({ error: "invalid_passkey" }, 400);
   }
+});
+// sign a device out (its session ends at once), or every other one
+app.delete("/api/account/sessions/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{16}$/.test(id)) return c.json({ error: "bad_id" }, 400);
+  const r = await c.env.DB.prepare("DELETE FROM sessions WHERE email = ? AND substr(token_hash, 1, 16) = ?").bind(c.get("me").email.toLowerCase(), id).run();
+  return r.meta.changes ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404);
+});
+app.post("/api/account/sessions/sign-out-others", async (c) => {
+  const sid = readCookie(c.req.header("cookie"), COOKIE_NAME);
+  const keep = sid ? await sha256Hex(sid) : "";
+  const r = await c.env.DB.prepare("DELETE FROM sessions WHERE email = ? AND token_hash != ?").bind(c.get("me").email.toLowerCase(), keep).run();
+  return c.json({ ok: true, signed_out: r.meta.changes ?? 0 });
 });
 app.delete("/api/account/passkeys/:id", async (c) => {
   await c.env.DB.prepare("DELETE FROM passkeys WHERE id = ? AND email = ?").bind(c.req.param("id"), c.get("me").email.toLowerCase()).run();

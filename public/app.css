@@ -1114,3 +1114,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .veh-head{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}.veh-head h3{margin:0;flex:1 1 auto}.veh-out{background:#c0392b;color:#fff}
 .veh-issue{padding:.5rem .75rem;margin:.4rem 0;border-radius:10px;background:rgba(128,128,128,.12)}.veh-issue.urgent{background:rgba(192,57,43,.14)}.veh-issue.resolved{opacity:.75}.veh-desc{margin:.3rem 0;white-space:pre-wrap}
 .veh-dialog .modal-body{display:grid;gap:.75rem;min-width:min(92vw,460px)}.veh-dialog textarea{width:100%}.veh-settings{margin-top:1.5rem;padding:.75rem 1rem;border:1px solid rgba(128,128,128,.35);border-radius:10px}.veh-settings summary{cursor:pointer;font-weight:600}
+.dev-row.current{background:rgba(34,165,89,.08);border-radius:10px;padding-left:.5rem;padding-right:.5rem}.dev-row .badge{margin-left:.4rem}

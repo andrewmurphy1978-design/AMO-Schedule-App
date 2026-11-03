@@ -2846,7 +2846,7 @@ async function renderAccount() {
       try { info = await api("/account/security"); } catch (e) { box.replaceChildren(h("p", { class: "meta" }, t("genericError"))); return; }
       const when = (ms) => new Date(ms).toLocaleDateString(getLang() === "en" ? "en-CA" : "fr-CA");
       const keys = info.passkeys.length ? info.passkeys.map((k) => h("div", { class: "pk-row" },
-        h("div", {}, h("b", {}, k.name || "—"), h("div", { class: "meta" }, `${t("secLastUsed")} : ${k.last_used_at ? when(k.last_used_at) : t("secNeverUsed")}`)),
+        h("div", {}, h("b", {}, k.name || "—"), h("div", { class: "meta" }, `${t("secLastUsed")} : ${k.last_used_at ? `${when(k.last_used_at)}${k.last_used_device ? ` · ${k.last_used_device}` : ""}` : t("secNeverUsed")}`)),
         h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemoveConfirm"))) { await api(`/account/passkeys/${encodeURIComponent(k.id)}`, { method: "DELETE" }); toast(t("secPasskeyRemoved")); draw(); } } }, t("secRemove"))))
         : [h("p", { class: "meta" }, t("secNoPasskeys"))];
       const add = passkeysSupported()
@@ -2867,7 +2867,15 @@ async function renderAccount() {
         ...(info.has_password ? [h("label", { class: "field" }, h("span", {}, t("secPasswordCurrent")), cur)] : []),
         h("label", { class: "field" }, h("span", {}, t("secPasswordNew")), pw1), h("label", { class: "field" }, h("span", {}, t("secPasswordConfirm")), pw2),
         h("button", { class: "btn primary", type: "submit" }, info.has_password ? t("secChangePassword") : t("secSetPassword")));
+      const ago = (ms) => new Date(ms).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      const icon = (x) => (/iPhone|Android|iPad|Samsung|Pixel/.test(x.device ?? "") ? "📱" : "💻");
+      const sessions = (info.sessions ?? []).map((x) => h("div", { class: `pk-row dev-row ${x.current ? "current" : ""}` },
+        h("div", {}, h("b", {}, `${icon(x)} ${x.device || t("secUnknownDevice")}${x.browser ? ` · ${x.browser}` : ""}`), x.current ? h("span", { class: "badge" }, t("secThisDevice")) : null, x.standalone ? h("span", { class: "badge" }, `📲 ${t("secInstalledApp")}`) : null,
+          h("div", { class: "meta" }, `${t("secSignedBy")} ${t(`secMethod_${x.method ?? "code"}`)} · ${t("secLastActivity")} : ${ago(x.last_seen_at)}`)),
+        x.current ? null : h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secSignOutConfirm"))) { try { await api(`/account/sessions/${x.id}`, { method: "DELETE" }); toast(t("secSignedOut")); draw(); } catch (e) { toast(errorText(e)); } } } }, t("secSignOut"))));
       box.replaceChildren(
+        h("div", { class: "sec-block" }, h("h3", {}, `${t("secDevices")} (${sessions.length})`), h("p", { class: "meta" }, t("secDevicesHelp")), ...sessions,
+          sessions.length > 1 ? h("button", { class: "btn", type: "button", onClick: async () => { if (await ask(t("secSignOutOthersConfirm"))) { try { const r = await api("/account/sessions/sign-out-others", { method: "POST" }); toast(`${r.signed_out} ${t("secSignedOutN")}`); draw(); } catch (e) { toast(errorText(e)); } } } }, t("secSignOutOthers")) : null),
         h("div", { class: "sec-block" }, h("h3", {}, t("secPasskeys")), h("p", { class: "meta" }, t("secPasskeysHelp")), h("p", { class: "meta" }, t("secSyncedHint")), ...keys, add),
         h("div", { class: "sec-block" }, h("h3", {}, t("secPassword")), h("p", { class: "meta" }, info.has_password ? t("secPasswordSet") : t("secPasswordNone")), h("p", { class: "meta" }, t("secPasswordHelp")), pwForm,
           ...(info.has_password ? [h("button", { class: "btn danger", type: "button", onClick: async () => { if (await ask(t("secRemovePasswordConfirm"))) { await api("/account/password", { method: "DELETE" }); toast(t("secPasswordRemoved")); draw(); } } }, t("secRemovePassword"))] : [])));
@@ -4808,7 +4816,7 @@ async function onboarding() {
   onboardingStarted = true;
   try {
     const info = await api("/account/security");
-    if (isStandalone()) { if (!info.installed) api("/account/installed", { method: "POST" }).catch(() => {}); await appStage(info); return; }
+    if (isStandalone()) { api("/account/installed", { method: "POST" }).catch(() => {}); await appStage(info); return; } // marks this device as running the installed app
     if (!isIos() && !isSafariMac()) for (let i = 0; i < 6 && !installEvent; i++) await wait(250); // Chrome / Edge announce they can install a moment after loading
     const canInstall = isIos() || isSafariMac() || !!installEvent;
     if (!canInstall) { await appStage(info); return; } // a browser that cannot install the app: do the app steps right here
