@@ -1325,3 +1325,7 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
   .dm-send:not(.like) { width: auto; padding: 0 1rem; border-radius: 999px; display: inline-flex; align-items: center; gap: .4rem; font-weight: 700; font-size: 1rem; }
   .dm-send:not(.like) .dm-send-tx { display: inline; }
 }
+/* new message: the form scrolls inside its pane, the colleagues list scrolls on its own, and the send button stays in view */
+.dm-new-view .dm-new { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.dm-new-view .dm-people { max-height: min(320px, 38vh); flex: none; overflow-y: auto; overscroll-behavior: contain; }
+.dm-new-view .dm-new .actions { position: sticky; bottom: 0; background: var(--card, #fff); padding: .6rem 0; margin: 0; border-top: 1px solid rgba(128,128,128,.25); z-index: 1; }
