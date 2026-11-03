@@ -150,8 +150,9 @@ const weekLabel = (mon) => {
 };
 
 function toast(msg) {
-  const el = h("div", { class: "toast", role: "status" }, msg);
+  const el = h("div", { class: "toast", role: "status", popover: "manual" }, msg);
   document.body.append(el);
+  try { el.showPopover(); } catch { /* old browser: the toast stays in the normal layer */ } // the top layer puts it above an open dialog
   setTimeout(() => el.remove(), 2200);
 }
 

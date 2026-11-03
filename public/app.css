@@ -158,6 +158,7 @@ details.staff > summary::-webkit-details-marker { display: none; }
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom)); background: var(--ink);
   color: var(--bg); padding: .6rem 1rem; border-radius: 999px; z-index: 20;
+  top: auto; right: auto; margin: 0; border: 0; width: max-content; max-width: 92vw; height: auto; /* it is a popover (top layer, above dialogs) */
 }
 
 /* ---------- Coverage timeline (vertical: time runs top to bottom) ---------- */
