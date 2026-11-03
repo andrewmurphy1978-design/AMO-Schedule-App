@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_DM, parseDm, validateDm, canStartGroup } from "../src/messaging.ts";
 
-test("by default one writes to the people of one's own restaurant and department; groups are open, up to 20", () => {
+test("by default one writes to the people of one's own restaurant and department; groups are off (up to 20 once allowed)", () => {
   assert.deepEqual(parseDm(null), DEFAULT_DM);
-  assert.equal(DEFAULT_DM.scope, "department"); assert.equal(DEFAULT_DM.groups, "all"); assert.equal(DEFAULT_DM.max_group, 20);
+  assert.equal(DEFAULT_DM.scope, "department"); assert.equal(DEFAULT_DM.groups, "off"); assert.equal(DEFAULT_DM.max_group, 20);
   assert.deepEqual(parseDm('{"scope":"all","groups":"managers","max_group":8}'), { scope: "all", groups: "managers", max_group: 8 });
   assert.deepEqual(parseDm('{"scope":"everybody","groups":3,"max_group":2}'), DEFAULT_DM);
   assert.deepEqual(parseDm("not json"), DEFAULT_DM);

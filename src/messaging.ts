@@ -2,10 +2,10 @@
 
 export interface DmSettings {
   scope: "department" | "restaurant" | "all"; // whom one can write to: people of the same restaurant AND department, of the same restaurant, or everyone in the company
-  groups: "all" | "managers" | "off";          // who may start a conversation with several people
+  groups: "all" | "managers" | "off";          // who may start a group (a conversation with several people); off by default
   max_group: number;                           // people in a group, counting the creator
 }
-export const DEFAULT_DM: DmSettings = { scope: "department", groups: "all", max_group: 20 };
+export const DEFAULT_DM: DmSettings = { scope: "department", groups: "off", max_group: 20 }; // private conversations only, until an administrator allows groups
 
 const SCOPES = ["department", "restaurant", "all"] as const;
 const GROUPS = ["all", "managers", "off"] as const;

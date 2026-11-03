@@ -2501,79 +2501,123 @@ function dmName(th, myId) {
 }
 const dmIcon = (th, myId, size = 40) => { const others = th.members.filter((m) => m.id !== myId); return others.length === 1 && !th.is_group ? avatar(others[0].id, others[0].name, others[0].color, others[0].photo_v, size) : h("span", { class: "dm-group-ic", style: `--s:${size}px`, "aria-hidden": "true" }, "👥"); };
 
+// Desktop: the conversations on the left, the chosen one on the right. Phone: like Messenger: the list, then a full-screen chat with a back arrow.
 async function renderMessages(box) {
-  clearInterval(state.dmTimer);
+  clearInterval(state.dmTimer); clearInterval(state.dmListTimer);
   const myId = state.me.me.id;
-  const toList = () => { state.dmThread = null; renderMessages(box); };
-  const toThread = (id) => { state.dmThread = id; renderMessages(box); };
-  if (state.dmThread === "new") return messageComposer(box, toThread, toList);
-  if (state.dmThread) return messageThread(box, state.dmThread, myId, toList);
-  const draw = async () => {
-    const threads = await api("/messages/threads");
-    dmSetUnread(threads.reduce((n, x) => n + x.unread, 0));
-    box.replaceChildren(
-      h("div", { class: "dm-head" }, h("h3", {}, t("dmTab")), h("button", { class: "btn primary", type: "button", onClick: () => { state.dmThread = "new"; renderMessages(box); } }, `＋ ${t("dmNew")}`)),
-      h("p", { class: "meta" }, t("dmPrivacy")),
-      threads.length ? h("div", { class: "dm-list" }, threads.map((th) => h("button", { type: "button", class: `dm-row ${th.unread ? "unread" : ""}`, onClick: () => toThread(th.id) },
-        dmIcon(th, myId),
-        h("span", { class: "dm-row-main" }, h("b", {}, dmName(th, myId)), h("span", { class: "meta dm-preview" }, `${th.last_by === myId ? `${t("dmYou")} : ` : ""}${th.last_body || t("dmDeleted")}`)),
-        h("span", { class: "dm-row-side" }, h("span", { class: "meta" }, timeAgo(th.last_message_at)), th.unread ? h("span", { class: "nav-badge" }, String(th.unread)) : null))))
-        : h("div", { class: "empty" }, t("dmNone")));
+  const desktop = mqDesktop.matches;
+  const root = box.closest(".community");
+  const setOpen = (on) => root?.classList.toggle("dm-open", on && !desktop); // phone: the chat takes the whole screen
+  let threads = [];
+  const reach = await api("/messages/people").catch(() => ({ can_group: false, people: [] })); // who can be written to, and whether a group may be started
+  const when = (ms) => { const d = new Date(ms), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
+  const loadThreads = async () => { threads = await api("/messages/threads"); dmSetUnread(threads.reduce((n, x) => n + x.unread, 0)); };
+  const search = h("input", { type: "search", class: "dm-search", placeholder: t("dmFind"), "aria-label": t("dmFind"), autocomplete: "off" });
+  const listEl = h("div", { class: "dm-list", role: "list" });
+  const norm = (x) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const pick = (id) => { state.dmThread = id; if (desktop) { paintList(); renderPane(); } else renderMessages(box); };
+  const paintList = () => {
+    const q = norm(search.value.trim());
+    const rows = threads.filter((th) => !q || norm(dmName(th, myId)).includes(q));
+    listEl.replaceChildren(...(rows.length ? rows.map((th) => h("button", { type: "button", role: "listitem", class: `dm-row ${th.unread ? "unread" : ""} ${state.dmThread === th.id ? "selected" : ""}`, "aria-current": state.dmThread === th.id ? "true" : "false", onClick: () => pick(th.id) },
+      dmIcon(th, myId, 52),
+      h("span", { class: "dm-row-main" }, h("span", { class: "dm-row-top" }, h("b", {}, dmName(th, myId)), h("span", { class: "meta dm-when" }, when(th.last_message_at))),
+        h("span", { class: "dm-preview-line" }, h("span", { class: "meta dm-preview" }, `${th.last_by === myId ? `${t("dmYou")} : ` : ""}${th.last_body || t("dmDeleted")}`), th.unread ? h("span", { class: "dm-dot", "aria-label": `${th.unread}` }, th.unread > 9 ? "9+" : String(th.unread)) : null)))) : [h("div", { class: "empty" }, threads.length ? t("dmNoMatch") : t("dmNone"))]));
   };
-  await draw();
-  state.dmTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmTimer); return; } if (!document.hidden && !state.dmThread) draw().catch(() => {}); }, 20000);
+  search.addEventListener("input", paintList);
+  const startNew = (kind) => { state.dmThread = kind; if (desktop) { paintList(); renderPane(); } else renderMessages(box); };
+  const newBtn = h("button", { class: "btn primary dm-new-btn", type: "button", "aria-label": t("dmNew"), title: t("dmNew"), onClick: () => startNew("new") }, h("span", { "aria-hidden": "true" }, "✎"), h("span", { class: "dm-new-tx" }, ` ${t("dmNew")}`));
+  const groupBtn = reach.can_group ? h("button", { class: "btn dm-new-btn", type: "button", "aria-label": t("dmNewGroup"), title: t("dmNewGroup"), onClick: () => startNew("newgroup") }, h("span", { "aria-hidden": "true" }, "👥"), h("span", { class: "dm-new-tx" }, ` ${t("dmNewGroup")}`)) : null;
+  const sideHead = () => [h("div", { class: "dm-head" }, h("h3", {}, t("dmTab")), h("div", { class: "dm-head-btns" }, groupBtn, newBtn)), h("p", { class: "meta dm-privacy" }, t("dmPrivacy")), search, listEl];
+  const pane = h("section", { class: "dm-main" });
+  const toList = async () => { state.dmThread = null; if (desktop) { await loadThreads(); paintList(); renderPane(); } else renderMessages(box); };
+  const toThread = async (id) => { await loadThreads(); state.dmThread = id; if (desktop) { paintList(); renderPane(); } else renderMessages(box); };
+  async function renderPane() {
+    clearInterval(state.dmTimer);
+    if (state.dmThread === "new" || state.dmThread === "newgroup") { setOpen(true); return messageComposer(pane, toThread, toList, state.dmThread === "newgroup"); }
+    if (state.dmThread) { setOpen(true); await messageThread(pane, state.dmThread, myId, toList, () => { loadThreads().then(paintList).catch(() => {}); }); return; }
+    setOpen(false);
+    pane.replaceChildren(h("div", { class: "dm-placeholder" }, h("div", { class: "dm-placeholder-ic", "aria-hidden": "true" }, "💬"), h("p", {}, t("dmPick"))));
+  }
+  await loadThreads();
+  if (state.dmThread === "newgroup" && !reach.can_group) state.dmThread = null;
+  if (desktop) {
+    if (!state.dmThread && threads.length) state.dmThread = threads.find((x) => x.unread)?.id ?? threads[0].id; // like Messenger on a computer: a conversation is already open
+    box.replaceChildren(h("div", { class: "dm-split" }, h("aside", { class: "dm-side" }, ...sideHead()), pane));
+    paintList(); await renderPane();
+    state.dmListTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmListTimer); return; } if (!document.hidden) loadThreads().then(paintList).catch(() => {}); }, 20000);
+    return;
+  }
+  if (state.dmThread) { box.replaceChildren(pane); await renderPane(); return; }
+  setOpen(false);
+  box.replaceChildren(...sideHead()); paintList();
+  state.dmListTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmListTimer); return; } if (!document.hidden && !state.dmThread) loadThreads().then(paintList).catch(() => {}); }, 20000);
 }
 
-/** New conversation: pick one or more colleagues, write the first message. */
-async function messageComposer(box, toThread, toList) {
-  const { people, can_group: canGroup, max_group: maxGroup, groups: groupsRule } = await api("/messages/people");
+/** New conversation. Direct: pick ONE colleague and write. Group (when an administrator allows it): pick two or more, name it, write; it then shows in the list like any conversation. */
+async function messageComposer(box, toThread, toList, group = false) {
+  const { people, can_group: canGroup, max_group: maxGroup } = await api("/messages/people");
+  if (group && !canGroup) { toList(); return; }
   const chosen = new Map();
   const search = h("input", { type: "search", placeholder: t("dmSearch"), "aria-label": t("dmSearch"), autocomplete: "off" });
   const chips = h("div", { class: "dm-chips" });
   const list = h("div", { class: "dm-people" });
   const title = h("input", { maxLength: 60, placeholder: t("dmGroupName"), "aria-label": t("dmGroupName") });
-  const titleField = h("label", { class: "field", hidden: true }, h("span", {}, t("dmGroupName")), title);
   const body = h("textarea", { rows: 3, maxLength: 2000, placeholder: t("dmWrite"), "aria-label": t("dmWrite") });
   const send = h("button", { class: "btn primary", type: "submit", disabled: true }, t("dmSend"));
+  const need = group ? 2 : 1;
   const norm = (x) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  const refresh = () => {
-    chips.replaceChildren(...[...chosen.values()].map((p) => h("button", { type: "button", class: "dm-chip", "aria-label": `${t("dmRemove")} ${p.name}`, onClick: () => { chosen.delete(p.id); refresh(); } }, `${p.name} ✕`)));
-    titleField.hidden = chosen.size < 2;
-    send.disabled = !chosen.size || !body.value.trim();
-    const q = norm(search.value.trim());
-    list.replaceChildren(...people.filter((p) => !q || norm(p.name).includes(q)).map((p) => h("label", { class: "dm-person" },
-      h("input", { type: "checkbox", checked: chosen.has(p.id), onChange: (e) => {
-        if (e.target.checked) { if (!canGroup) chosen.clear(); else if (chosen.size >= maxGroup - 1) { toast(t("dmGroupFull").replace("{n}", String(maxGroup))); e.target.checked = false; return; } chosen.set(p.id, p); } else chosen.delete(p.id);
-        refresh();
-      } }),
-      avatar(p.id, p.name, p.color, p.photo_v, 30), h("span", {}, p.name))));
+  const ready = () => { send.disabled = chosen.size < need || !body.value.trim(); };
+  const choose = (p) => {
+    if (!group) { chosen.clear(); chosen.set(p.id, p); }                                   // one person: tapping another one replaces the first
+    else if (chosen.has(p.id)) chosen.delete(p.id);
+    else if (chosen.size >= maxGroup - 1) { toast(t("dmGroupFull").replace("{n}", String(maxGroup))); return; }
+    else chosen.set(p.id, p);
+    refresh();
   };
-  search.addEventListener("input", refresh); body.addEventListener("input", () => { send.disabled = !chosen.size || !body.value.trim(); });
+  function refresh() {
+    chips.replaceChildren(...[...chosen.values()].map((p) => h("button", { type: "button", class: "dm-chip", "aria-label": `${t("dmRemove")} ${p.name}`, onClick: () => { chosen.delete(p.id); refresh(); } }, `${p.name} ✕`)));
+    ready();
+    const q = norm(search.value.trim());
+    list.replaceChildren(...(people.length ? people.filter((p) => !q || norm(p.name).includes(q)).map((p) => h("button", { type: "button", class: `dm-person ${chosen.has(p.id) ? "on" : ""}`, "aria-pressed": String(chosen.has(p.id)), onClick: () => choose(p) },
+      avatar(p.id, p.name, p.color, p.photo_v, 34), h("span", { class: "dm-person-name" }, p.name), h("span", { class: "dm-check", "aria-hidden": "true" }, chosen.has(p.id) ? "✓" : ""))) : [h("div", { class: "empty" }, t("dmNoPeople"))]));
+  }
+  search.addEventListener("input", refresh); body.addEventListener("input", ready);
   refresh();
-  box.replaceChildren(
-    h("div", { class: "dm-head" }, h("button", { class: "btn", type: "button", onClick: toList }, `← ${t("dmTab")}`), h("h3", {}, t("dmNew"))),
-    canGroup ? null : h("p", { class: "meta" }, groupsRule === "off" ? t("dmGroupsOff") : t("dmGroupsManagers")),
-    people.length ? null : h("div", { class: "empty" }, t("dmNoPeople")),
+  box.replaceChildren(h("div", { class: "dm-new-view" },
+    h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"), h("h3", {}, group ? `👥 ${t("dmNewGroup")}` : t("dmNew"))),
     h("form", { class: "acc-form dm-new", onSubmit: async (e) => {
       e.preventDefault();
-      try { const r = await api("/messages/threads", { method: "POST", body: { member_ids: [...chosen.keys()], title: title.value, body: body.value } }); toThread(r.id); }
-      catch (err) { toast(err.body?.error === "too_many_requests" ? t("loginTooMany") : errorText(err)); }
-    } }, h("div", { class: "field" }, h("span", {}, t("dmTo")), chips, search, list), titleField, body,
-      h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); body.dispatchEvent(new Event("input")); }) }, "😊"), send)));
+      try { const r = await api("/messages/threads", { method: "POST", body: { member_ids: [...chosen.keys()], title: group ? title.value : undefined, body: body.value } }); toThread(r.id); }
+      catch (err) { toast(err.body?.error === "too_many_requests" ? t("loginTooMany") : err.body?.error === "groups_not_allowed" ? t("dmGroupsOff") : err.body?.error === "not_reachable" ? t("dmNotReachable") : errorText(err)); }
+    } }, h("div", { class: "field" }, h("span", {}, group ? t("dmToMany") : t("dmTo")), chips, search, list), group ? h("label", { class: "field" }, h("span", {}, t("dmGroupName")), title) : null, group ? h("p", { class: "meta" }, t("dmGroupNeedTwo")) : null, body,
+      h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); ready(); }) }, "😊"), send))));
 }
 
-/** One conversation: the messages, and a box to answer. */
-async function messageThread(box, id, myId, toList) {
+/** One conversation: a header (back arrow, who), the messages, and a bar to answer. */
+async function messageThread(box, id, myId, toList, onChange) {
   let d = await api(`/messages/threads/${id}`);
   const msgs = h("div", { class: "dm-msgs", "aria-live": "polite" });
-  const body = h("textarea", { rows: 2, maxLength: 2000, placeholder: t("dmWrite"), "aria-label": t("dmWrite") });
+  const finePointer = window.matchMedia("(pointer: fine)").matches;
+  const body = h("textarea", { rows: 1, maxLength: 2000, class: "dm-input", placeholder: t("dmWrite"), "aria-label": t("dmWrite") });
+  const grow = () => { body.style.height = "auto"; body.style.height = `${Math.min(body.scrollHeight, 140)}px`; };
+  body.addEventListener("input", grow);
   const nameOf = (sid) => { const p = d.members.find((m) => m.id === sid); return p ? dmFirst(p) : "—"; };
+  const person = (sid) => d.members.find((m) => m.id === sid);
   const th = () => ({ ...d.thread, members: d.members });
-  const bubble = (m) => h("div", { class: `dm-msg ${m.mine ? "mine" : "theirs"} ${m.deleted ? "deleted" : ""}` },
-    !m.mine && d.thread.is_group ? h("b", { class: "dm-from" }, nameOf(m.staff_id)) : null,
-    m.deleted ? h("i", {}, t("dmDeleted")) : h("span", { class: "dm-text" }, m.body),
-    h("span", { class: "meta dm-time" }, timeAgo(m.created_at)),
-    m.mine && !m.deleted ? h("button", { type: "button", class: "dm-del", "aria-label": t("delete"), title: t("delete"), onClick: async () => { if (await ask(t("dmDeleteConfirm"))) { try { await api(`/messages/messages/${m.id}`, { method: "DELETE" }); await reload(false); } catch (e) { toast(errorText(e)); } } } }, "✕") : null);
+  const dayLabel = (ms) => { const x = new Date(ms), n = new Date(); const y = new Date(n); y.setDate(n.getDate() - 1); return x.toDateString() === n.toDateString() ? t("today") : x.toDateString() === y.toDateString() ? t("yesterday") : x.toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "long" }); };
+  const hhmm = (ms) => new Date(ms).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+  const bubble = (m, prev, next) => {
+    const first = !prev || prev.staff_id !== m.staff_id || m.created_at - prev.created_at > 300000, last = !next || next.staff_id !== m.staff_id || next.created_at - m.created_at > 300000;
+    const p = person(m.staff_id);
+    return h("div", { class: `dm-line ${m.mine ? "mine" : "theirs"}` },
+      !m.mine ? (last ? (p ? avatar(p.id, p.name, p.color, p.photo_v, 28) : h("span", { class: "dm-av-gap" })) : h("span", { class: "dm-av-gap" })) : null,
+      h("div", { class: `dm-msg ${m.mine ? "mine" : "theirs"} ${m.deleted ? "deleted" : ""}`, title: hhmm(m.created_at) },
+        !m.mine && d.thread.is_group && first ? h("b", { class: "dm-from" }, nameOf(m.staff_id)) : null,
+        m.deleted ? h("i", {}, t("dmDeleted")) : h("span", { class: "dm-text" }, m.body),
+        last ? h("span", { class: "meta dm-time" }, hhmm(m.created_at)) : null,
+        m.mine && !m.deleted ? h("button", { type: "button", class: "dm-del", "aria-label": t("delete"), title: t("delete"), onClick: async () => { if (await ask(t("dmDeleteConfirm"))) { try { await api(`/messages/messages/${m.id}`, { method: "DELETE" }); await reload(false); } catch (e) { toast(errorText(e)); } } } }, "✕") : null));
+  };
   const older = h("button", { class: "btn sm", type: "button", hidden: true, onClick: async () => {
     const first = d.messages[0]?.id; if (!first) return;
     const more = await api(`/messages/threads/${id}?before=${first}`);
@@ -2581,30 +2625,38 @@ async function messageThread(box, id, myId, toList) {
   } }, t("dmOlder"));
   function paint(stick) {
     const nearBottom = stick || msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
-    msgs.replaceChildren(older, ...d.messages.map(bubble));
+    const out = [older];
+    d.messages.forEach((m, i) => {
+      const prev = d.messages[i - 1], next = d.messages[i + 1];
+      if (!prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString()) out.push(h("div", { class: "dm-day" }, dayLabel(m.created_at)));
+      out.push(bubble(m, prev && new Date(prev.created_at).toDateString() === new Date(m.created_at).toDateString() ? prev : null, next && new Date(next.created_at).toDateString() === new Date(m.created_at).toDateString() ? next : null));
+    });
+    msgs.replaceChildren(...out);
     older.hidden = !d.more;
     if (nearBottom) msgs.scrollTop = msgs.scrollHeight;
   }
-  async function reload(stick) { d = await api(`/messages/threads/${id}`); paint(stick); dmSetUnread(Math.max(0, (state.dmUnread ?? 0) - 0)); api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {}); }
+  async function reload(stick) { d = await api(`/messages/threads/${id}`); paint(stick); api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {}); onChange?.(); }
   const sendNow = async (e) => {
     e?.preventDefault();
     const text = body.value.trim(); if (!text) return;
-    try { await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: text } }); body.value = ""; await reload(true); }
+    try { await api(`/messages/threads/${id}/messages`, { method: "POST", body: { body: text } }); body.value = ""; grow(); await reload(true); }
     catch (err) { toast(err.body?.error === "too_many_requests" ? t("dmSlow") : errorText(err)); }
   };
-  body.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendNow(e); });
-  box.replaceChildren(
-    h("div", { class: "dm-head" }, h("button", { class: "btn", type: "button", onClick: toList }, `← ${t("dmTab")}`),
-      h("div", { class: "dm-title" }, dmIcon(th(), myId, 34), h("div", {}, h("b", {}, dmName(th(), myId)), d.thread.is_group ? h("div", { class: "meta" }, d.members.map((m) => dmFirst(m)).join(", ")) : null)),
+  // a computer: Enter sends (Shift+Enter = new line); a phone: Enter is a new line and the arrow sends
+  body.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && (finePointer ? !e.shiftKey : false)) sendNow(e); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendNow(e); });
+  const members = d.members.filter((m) => m.id !== myId);
+  box.replaceChildren(h("div", { class: "dm-chat" },
+    h("div", { class: "dm-chat-head" }, h("button", { class: "dm-back", type: "button", "aria-label": t("dmBack"), onClick: toList }, "‹"),
+      h("div", { class: "dm-title" }, dmIcon(th(), myId, 40), h("div", { class: "dm-title-tx" }, h("b", {}, dmName(th(), myId)), d.thread.is_group ? h("div", { class: "meta" }, `${d.members.length} ${t("dmPeople")} · ${members.map(dmFirst).join(", ")}`) : null)),
       d.thread.is_group ? h("button", { class: "btn sm danger", type: "button", onClick: async () => { if (await ask(t("dmLeaveConfirm"))) { try { await api(`/messages/threads/${id}/leave`, { method: "POST" }); toList(); } catch (e) { toast(errorText(e)); } } } }, t("dmLeave")) : null),
     msgs,
-    h("form", { class: "dm-compose", onSubmit: sendNow }, body,
-      h("div", { class: "actions" }, h("button", { class: "btn sm", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => insertAtCursor(body, em)) }, "😊"),
-        h("button", { class: "btn primary", type: "submit" }, t("dmSend")))));
+    h("form", { class: "dm-compose", onSubmit: sendNow },
+      h("button", { class: "dm-ic", type: "button", "aria-label": t("emojis"), title: t("emojis"), onClick: (e) => emojiPopover(e.currentTarget, (em) => { insertAtCursor(body, em); grow(); }) }, "😊"),
+      body, h("button", { class: "dm-send", type: "submit", "aria-label": t("dmSend"), title: t("dmSend") }, "➤"))));
   paint(true);
   api("/messages/unread").then((u) => dmSetUnread(u.unread)).catch(() => {});
   state.dmTimer = setInterval(() => { if (!box.isConnected) { clearInterval(state.dmTimer); return; } if (!document.hidden && !body.value.trim()) reload(false).catch(() => {}); }, 12000); // new messages arrive while it is open
-  body.focus();
+  if (finePointer) body.focus();
 }
 
 async function renderCommunity() {
