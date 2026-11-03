@@ -4414,9 +4414,11 @@ function passwordRequired() {
 
 /** The steps done inside the installed app: biometrics (a choice), then the password (required). */
 async function appStage(info) {
-  if (passkeysSupported() && !info.passkeys.length && !lsGet("pk_asked")) {
-    lsSet("pk_asked", "1");
-    if (await ask(t("passkeyOffer"), t("passkeyOfferYes"))) { try { await registerPasskey(); toast(t("secPasskeyAdded")); } catch { toast(t("secPasskeyCancelled")); } }
+  // "Later" asks again after a day; it can always be done in Account → Security.
+  if (passkeysSupported() && !info.passkeys.length && Date.now() - Number(lsGet("pk_later") ?? 0) > 24 * 3600 * 1000) {
+    const yes = await confirmDialog({ title: t("confirmTitle"), message: t("passkeyOffer"), yes: t("passkeyOfferYes"), no: t("onbLater") });
+    if (yes) { try { await registerPasskey(); toast(t("secPasskeyAdded")); } catch { lsSet("pk_later", String(Date.now())); toast(t("secPasskeyCancelled")); } }
+    else { lsSet("pk_later", String(Date.now())); toast(t("passkeyLaterHint")); }
   }
   if (!info.has_password) await passwordRequired();
 }
