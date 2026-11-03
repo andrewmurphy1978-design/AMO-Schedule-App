@@ -4365,18 +4365,75 @@ function renderLogin(prefill = "") {
   stepEmail();
 }
 
-let passkeyOffered = false;
-/** Once per device, after a sign-in by code or password: offer to turn on biometrics. */
-async function offerPasskey() {
-  if (passkeyOffered || !passkeysSupported()) return;
-  passkeyOffered = true;
+// ---------- First-time guidance ----------
+// 1) In the browser: offer to install the app, then to sign in again inside it.
+// 2) In the installed app: offer biometrics, then require a password (an employee who signs in with Google would be exempt; Google sign-in does not exist yet).
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
+const isSafariMac = () => /Macintosh/.test(navigator.userAgent) && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+
+function modal(id, content, { dismissible }) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById(id);
+    if (!dlg) { dlg = h("dialog", { id }); document.body.append(dlg); }
+    dlg.replaceChildren(h("div", { class: "modal-body" }, ...content(() => { dlg.close(); resolve(true); })));
+    if (!dismissible) dlg.addEventListener("cancel", (e) => e.preventDefault()); // Escape cannot close it
+    dlg.addEventListener("close", () => resolve(false), { once: true });
+    dlg.showModal();
+  });
+}
+
+function installOffer() {
+  return modal("onboard-modal", (done) => [
+    h("h2", {}, t("onbInstallTitle")), h("p", {}, t("onbInstallBody")), installControls(),
+    h("ol", { class: "onb-steps" }, h("li", {}, t("onbStep1")), h("li", {}, t("onbStep2")), h("li", {}, t("onbStep3"))),
+    h("div", { class: "actions" },
+      h("button", { class: "btn", type: "button", onClick: () => { lsSet("install_later", String(Date.now())); done(); } }, t("onbLater")),
+      h("button", { class: "btn primary", type: "button", onClick: () => { lsSet("install_later", String(Date.now())); done(); } }, t("onbOk")))], { dismissible: true });
+}
+
+function passwordRequired() {
+  return modal("password-modal", (done) => {
+    const pw1 = h("input", { type: "password", autocomplete: "new-password", minLength: 10, maxLength: 200, required: true });
+    const pw2 = h("input", { type: "password", autocomplete: "new-password", minLength: 10, maxLength: 200, required: true });
+    const msg = h("div", { class: "alert", role: "alert" });
+    return [h("h2", {}, t("onbPasswordTitle")), h("p", {}, t("onbPasswordBody")),
+      h("form", { class: "acc-form", onSubmit: async (e) => {
+        e.preventDefault(); msg.textContent = "";
+        if (pw1.value !== pw2.value) { msg.textContent = t("secPasswordMismatch"); return; }
+        try { await api("/account/password", { method: "PUT", body: { password: pw1.value } }); toast(t("secPasswordSaved")); done(); }
+        catch (err) { const k = err?.body?.error; msg.textContent = k === "too_short" ? t("secTooShort") : k === "too_common" ? t("secTooCommon") : k === "too_long" ? t("secTooLong") : t("genericError"); }
+      } }, h("label", { class: "field" }, h("span", {}, t("secPasswordNew")), pw1), h("label", { class: "field" }, h("span", {}, t("secPasswordConfirm")), pw2), msg,
+        h("button", { class: "btn primary", type: "submit" }, t("secSetPassword"))),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: async () => { await api("/auth/logout", { method: "POST" }).catch(() => {}); state.me = null; document.getElementById("password-modal").close(); renderLogin(); } }, t("logout")))];
+  }, { dismissible: false });
+}
+
+/** The steps done inside the installed app: biometrics (a choice), then the password (required). */
+async function appStage(info) {
+  if (passkeysSupported() && !info.passkeys.length && !lsGet("pk_asked")) {
+    lsSet("pk_asked", "1");
+    if (await ask(t("passkeyOffer"), t("passkeyOfferYes"))) { try { await registerPasskey(); toast(t("secPasskeyAdded")); } catch { toast(t("secPasskeyCancelled")); } }
+  }
+  if (!info.has_password) await passwordRequired();
+}
+
+let onboardingStarted = false;
+async function onboarding() {
+  if (onboardingStarted) return;
+  onboardingStarted = true;
   try {
-    if (localStorage.getItem("pk_asked")) return;
     const info = await api("/account/security");
-    if (info.passkeys.length) { localStorage.setItem("pk_asked", "1"); return; }
-    localStorage.setItem("pk_asked", "1");
-    if (await ask(t("passkeyOffer"), t("passkeyOfferYes"))) { await registerPasskey(); toast(t("secPasskeyAdded")); }
-  } catch { /* declined or unsupported: nothing to do */ }
+    if (isStandalone()) { if (!info.installed) api("/account/installed", { method: "POST" }).catch(() => {}); await appStage(info); return; }
+    if (!isIos() && !isSafariMac()) for (let i = 0; i < 6 && !installEvent; i++) await wait(250); // Chrome / Edge announce they can install a moment after loading
+    const canInstall = isIos() || isSafariMac() || !!installEvent;
+    if (!canInstall) { await appStage(info); return; } // a browser that cannot install the app: do the app steps right here
+    const later = Number(lsGet("install_later") ?? 0);
+    if (!info.installed && Date.now() - later > 3 * 24 * 3600 * 1000) await installOffer();
+  } catch { /* guidance is never allowed to get in the way */ }
 }
 
 async function boot() {
@@ -4395,7 +4452,7 @@ async function boot() {
   state.posts = localizePosts(state.posts);
   openFromLink();
   render();
-  offerPasskey();
+  onboarding();
 }
 // A notification opens the app on the right screen: /?view=community&c=3, /?view=account&tab=timeoff, /?view=admin&section=timeoff
 function openFromLink() {

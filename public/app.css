@@ -1094,3 +1094,4 @@ small.cl-issue{display:block;grid-column:1/-1;padding:0}
 .ing-qtys{display:grid;gap:.3rem}.ing-qty-row{display:grid;grid-template-columns:1fr 6rem 7rem;gap:.4rem;align-items:center}.ing-qty-row span{font-weight:600;overflow-wrap:anywhere}@media (max-width:700px){.ing-qty-row{grid-template-columns:1fr 5rem 6rem}}
 
 .presence{display:inline-block;flex:none;width:10px;height:10px;border-radius:50%;margin:0 .45rem 0 .35rem;box-sizing:border-box}.presence.on{background:#22a559;box-shadow:0 0 0 3px rgba(34,165,89,.25)}.presence.off{border:2px solid #9aa0a6;background:transparent}
+.onb-steps{padding-left:1.25rem;display:grid;gap:.4rem;margin:.75rem 0}#password-modal::backdrop,#onboard-modal::backdrop{background:rgba(0,0,0,.6)}

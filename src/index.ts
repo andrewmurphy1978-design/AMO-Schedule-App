@@ -669,7 +669,13 @@ app.get("/api/account/security", async (c) => {
     c.env.DB.prepare("SELECT 1 AS x FROM login_passwords WHERE email = ?").bind(email).first(),
     c.env.DB.prepare("SELECT id, name, created_at, last_used_at FROM passkeys WHERE email = ? ORDER BY created_at").bind(email).all<{ id: string; name: string | null; created_at: number; last_used_at: number | null }>(),
   ]);
-  return c.json({ has_password: !!pw, passkeys: keys.results });
+  const inst = await c.env.DB.prepare("SELECT app_installed_at FROM staff WHERE id = ?").bind(c.get("me").id).first<{ app_installed_at: number | null }>();
+  return c.json({ has_password: !!pw, passkeys: keys.results, installed: !!inst?.app_installed_at });
+});
+// The installed app (standalone window) reports itself once, so the first-time guidance can move on to the next step.
+app.post("/api/account/installed", async (c) => {
+  await c.env.DB.prepare("UPDATE staff SET app_installed_at = ? WHERE id = ? AND app_installed_at IS NULL").bind(Date.now(), c.get("me").id).run();
+  return c.json({ ok: true });
 });
 app.put("/api/account/password", async (c) => {
   const me = c.get("me"), email = me.email.toLowerCase(), db = c.env.DB;
