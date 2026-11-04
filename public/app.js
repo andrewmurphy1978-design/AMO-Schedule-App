@@ -63,6 +63,31 @@ function h(tag, attrs = {}, ...kids) {
   };
 }
 
+
+// Every dialog keeps its buttons in its header: when one opens, the title and the row of buttons (Save / Cancel / Delete...) that sit at the bottom
+// of a form are moved into a sticky header, so they stay in view however long the form is. Small question dialogs keep theirs under the message.
+{
+  const SKIP = ["confirm-modal", "prompt-modal", "password-modal"];
+  const headerize = (dlg) => {
+    if (SKIP.includes(dlg.id)) return;
+    const body = dlg.querySelector(".modal-body");
+    if (!body || body.querySelector(".dlg-head, .sup-head")) return;
+    const title = [...body.children].find((c) => c.tagName === "H2");
+    const actions = [...body.children].reverse().find((c) => c.classList.contains("actions") && c.querySelector("button"));
+    if (!title || !actions) return;
+    const alerts = [...body.children].filter((c) => c.classList.contains("form-error") || c.classList.contains("alert"));
+    const bar = document.createElement("div"); bar.className = "dlg-actions wrap";
+    bar.append(...actions.children);
+    const top = document.createElement("div"); top.className = "dlg-top";
+    const head = document.createElement("div"); head.className = "dlg-head";
+    head.append(title, bar); top.append(head, ...alerts);
+    body.prepend(top);
+    actions.remove();
+  };
+  const nativeShow = HTMLDialogElement.prototype.showModal;
+  HTMLDialogElement.prototype.showModal = function (...a) { try { headerize(this); } catch { /* keep the dialog as it is */ } return nativeShow.apply(this, a); };
+}
+
 function timeField(value = "00:00") {
   const p2 = (n) => String(n).padStart(2, "0");
   const hh = h("select", { "aria-label": "HH" }, Array.from({ length: 24 }, (_, i) => h("option", { value: p2(i) }, p2(i))));
@@ -4621,10 +4646,10 @@ function ingredientsPanel() {
       min_qty: ivIn("min_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_cost: ivIn("pack_cost", { type: "number", min: "0", step: "0.01", inputmode: "decimal" }) };
     const families = [...new Set(st.groups.flatMap((g) => g.items.map((i) => i.inv?.family)).filter(Boolean))];
     const lab = (k) => h("label", { class: "field" }, h("span", {}, t(`invF_${k}`)), ivf[k]);
-    const packBox = h("details", { class: "ing-pack", open: Object.values(iv).some((v) => v) }, h("summary", {}, `📦 ${t("ingPackTitle")}`), h("p", { class: "meta" }, t("ingPackHelp")),
+    const packBox = h("div", { class: "ing-pack-body" }, h("p", { class: "meta" }, t("ingPackHelp")),
       h("datalist", { id: "ing-families" }, families.map((f) => h("option", { value: f }))),
       lab("family"), lab("base_unit"), h("div", { class: "ing-two" }, lab("pack_unit"), lab("pack_qty")),
-      h("div", { class: "ing-two" }, lab("pack_weight"), lab("unit_weight")), h("div", { class: "ing-two" }, lab("min_qty"), lab("pack_cost")));
+      h("div", { class: "ing-two" }, lab("pack_weight"), lab("unit_weight")), lab("min_qty"));
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
     // the supplier's product numbers: the preferred one and the ones that can replace it, for each supplier ticked above
@@ -4639,16 +4664,32 @@ function ingredientsPanel() {
     };
 
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); drawQty(); };
+    // one tab per theme: general, home-made, packaging / stock taking, suppliers
+    const generalPane = h("div", { class: "sup-pane" },
+      h("label", { class: "field" }, h("span", {}, t("ingName")), name),
+      h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCategory")), cat), h("label", { class: "field" }, h("span", {}, t("ingLocation")), loc)),
+      thawRow, fopenRow,
+      h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g))))))
+    );
+    const homePane = h("div", { class: "sup-pane" }, h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox);
+    const packPane = h("div", { class: "sup-pane" }, packBox);
+    const supPane = h("div", { class: "sup-pane" },
+      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); drawCodes(); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
+      codesBox);
+    const ingPanes = { general: generalPane, home: homePane, pack: packPane, suppliers: supPane };
+    const ingTabBar = h("div", { class: "dlg-tabs sup-tabs", role: "tablist" });
+    const showIngTab = (id) => { for (const [k, el] of Object.entries(ingPanes)) el.hidden = k !== id; ingTabBar.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === id))); };
+    ingTabBar.append(...[["general", `📝 ${t("ingTabGeneral")}`], ["home", `🏠 ${t("ingTabHome")}`], ["pack", `📦 ${t("ingTabPack")}`], ["suppliers", `🚚 ${t("ingTabSuppliers")}`]].map(([id, label]) => h("button", { type: "button", role: "tab", "data-tab": id, onClick: () => showIngTab(id) }, label)));
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
         e.preventDefault();
         err.hidden = true;
-        const nn = name.value.trim(); if (!nn) { fail(t("ingNameRequired")); name.focus(); return; }
+        const nn = name.value.trim(); if (!nn) { showIngTab("general"); fail(t("ingNameRequired")); name.focus(); return; }
         const old = entry?.name;
-        if ((!entry || !same(entry.name, nn)) && unique().some((x) => same(x.name, nn))) { fail(t("ingNameTaken")); name.focus(); return; }
+        if ((!entry || !same(entry.name, nn)) && unique().some((x) => same(x.name, nn))) { showIngTab("general"); fail(t("ingNameTaken")); name.focus(); return; }
         // an ingredient lives in the posts it is ticked for: with none it would silently disappear
         if (!gboxes.some((x) => x.checked)) {
-          if (!entry) { fail(t("ingPickPost")); return; }
+          if (!entry) { showIngTab("general"); fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
         const codes = Object.fromEntries([...supSel].map((sid) => [sid, codeValue(codesBy[sid] ?? {})]).filter(([, c]) => codeFilled(c)));
@@ -4667,14 +4708,8 @@ function ingredientsPanel() {
         close();
       } },
       h("h2", {}, entry ? t("ingEditTitle") : t("ingAdd")),
-      h("label", { class: "field" }, h("span", {}, t("ingName")), name),
-      h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCategory")), cat), h("label", { class: "field" }, h("span", {}, t("ingLocation")), loc)),
-      thawRow, fopenRow,
-      h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
-      packBox,
-      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); drawCodes(); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
-      codesBox,
-      h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
+      ingTabBar,
+      generalPane, homePane, packPane, supPane,
       err,
       h("div", { class: "actions" },
         entry ? h("button", { class: "btn danger", type: "button", onClick: async () => {
@@ -4685,7 +4720,7 @@ function ingredientsPanel() {
         } }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: close }, t("cancel")),
         h("button", { class: "btn primary", type: "submit" }, t("save")))));
-    sync(); drawCodes();
+    sync(); drawCodes(); showIngTab("general");
     dlg.addEventListener("close", () => { done = true; }, { once: true });
     dlg.showModal();
   }
@@ -4847,10 +4882,10 @@ function ingredientsPanel() {
         await save(sp ? st.suppliers.map((x) => (x.id === sp.id ? { ...x, ...one } : x)) : [...st.suppliers, one]);
       } },
       // the buttons sit in the header so they stay in view whatever the tab
-      h("div", { class: "sup-head" }, h("h2", {}, sp ? sp.name : t("supAdd")),
-        h("div", { class: "sup-head-btns" },
+      h("div", { class: "dlg-top" }, h("div", { class: "dlg-head" }, h("h2", {}, sp ? sp.name : t("supAdd")),
+        h("div", { class: "dlg-actions wrap" },
           sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("delete")) : null,
-          h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))),
+          h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save"))))),
       tabBar, err, cardPane, settingsPane, ingPane, histPane, curPane));
     showTab(tabDefs.some(([id]) => id === startTab) ? startTab : "card");
     dlg.showModal();
