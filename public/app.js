@@ -2722,7 +2722,7 @@ async function renderOrders(box, restaurantIds) {
   const note = h("input", { maxLength: 200, placeholder: t("orderNote"), "aria-label": t("orderNote") });
   const report = async () => {
     if (!input.value.trim()) return;
-    try { await api("/orders", { method: "POST", body: { restaurant_id: rid, name: input.value, note: note.value } }); toast(t("orderReported")); reload(); } catch (e) { toast(errorText(e)); }
+    try { const r = await api("/orders", { method: "POST", body: { restaurant_id: rid, name: input.value, note: note.value } }); toast(r.names?.length > 1 ? `${t("orderReported")} : ${r.names.join(", ")}` : t("orderReported")); reload(); } catch (e) { toast(errorText(e)); }
   };
   const when = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const supName = (id) => d.suppliers.find((x) => x.id === id)?.name;
@@ -4647,9 +4647,9 @@ function ingredientsPanel() {
     e.supplier_ids?.length ? h("span", { class: "ing-badge sup" }, `🚚 ${e.supplier_ids.map((id) => st.suppliers.find((x) => x.id === id)?.name).filter(Boolean).join(", ")}`) : null);
 
   // ---- ingredient dialog (also used to add one) ----
-  function ingredientDialog(entry, presetGroup) {
+  function ingredientDialog(entry, presetGroup, preset) {
     const dlg = dialog("ing-modal");
-    const cur = entry ?? { name: "", category: null, location: "fridge", thaw: false, homemade: false, components: [], prep_note: "", groups: presetGroup !== undefined ? [presetGroup] : [] };
+    const cur = entry ?? { name: "", category: null, location: "fridge", thaw: false, homemade: !!preset?.homemade, components: [], prep_note: "", groups: presetGroup !== undefined ? [presetGroup] : [] };
     const name = h("input", { value: cur.name, maxLength: 80, "aria-label": t("ingName") });
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
     const fail = (msg) => { err.textContent = `⚠ ${msg}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); };
@@ -4972,6 +4972,46 @@ function ingredientsPanel() {
         h("span", { class: "ing-badges" }, ...supplierMethods(sp).map((m) => h("span", { class: "ing-badge sup" }, orderMethodLabel(m))), sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${formatPhone(sp.phone)}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
         sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];
   }
+  // ---- mixes: the ingredients a mix is made of, and where an ingredient is used ----
+  function viewMixes() {
+    const all = unique(), k = (n) => n.trim().toLowerCase();
+    const byName = new Map(all.map((e) => [k(e.name), e]));
+    const compQty = (mix, name) => { const key = Object.keys(mix.component_qty ?? {}).find((x) => k(x) === k(name)); const q = key ? mix.component_qty[key] : null; return q?.qty ? `${q.qty}${q.unit ? ` ${q.unit}` : ""}` : ""; };
+    const usedIn = new Map(); // ingredient -> the mixes that use it
+    for (const m of all.filter((e) => e.homemade)) for (const c of m.components ?? []) usedIn.set(k(c), [...(usedIn.get(k(c)) ?? []), m]);
+    const q = (st.mixQ ?? "").trim().toLowerCase();
+    const edit = (e) => h("button", { type: "button", class: "link-btn", onClick: () => ingredientDialog(e) }, e.name);
+    const badge = (e) => [e.homemade ? h("span", { class: "ing-badge" }, `🏠 ${t("mixIsMix")}`) : null, LOCATION_INFO[e.location] ? h("span", { class: "ing-badge" }, LOCATION_INFO[e.location][0]) : null];
+    // a mix and what it is made of, down to the ingredients (a component can itself be a mix)
+    const tree = (mix, path) => h("ul", { class: "mix-tree" }, (mix.components ?? []).map((c) => {
+      const e = byName.get(k(c)), qty = compQty(mix, c);
+      return h("li", {}, e ? edit(e) : h("span", { class: "meta" }, `${c} ⚠ ${t("mixMissing")}`), qty ? h("small", { class: "meta" }, ` — ${qty}`) : null, ...(e ? badge(e) : []),
+        e?.homemade && !path.includes(k(c)) && path.length < 5 ? tree(e, [...path, k(c)]) : null);
+    }));
+    // an ingredient and the mixes that use it (and where those mixes are used in turn)
+    const upTree = (e, path) => h("ul", { class: "mix-tree" }, (usedIn.get(k(e.name)) ?? []).map((m) => {
+      const qty = compQty(m, e.name), deeper = !path.includes(k(m.name)) && path.length < 5 && (usedIn.get(k(m.name)) ?? []).length;
+      return h("li", {}, edit(m), qty ? h("small", { class: "meta" }, ` — ${qty}`) : null, ...badge(m), deeper ? upTree(m, [...path, k(m.name)]) : null);
+    }));
+    const modes = [["mix", t("mixByMix")], ["ingredient", t("mixByIngredient")]];
+    st.mixMode ??= "mix";
+    const head = [h("p", { class: "meta" }, t("mixHelp")),
+      h("div", { class: "ing-add" }, h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null, undefined, { homemade: true }) }, `+ ${t("mixAdd")}`),
+        h("input", { type: "search", value: st.mixQ ?? "", placeholder: t("mixSearch"), "aria-label": t("mixSearch"), onInput: (e) => { st.mixQ = e.target.value; clearTimeout(st.mixT); st.mixT = setTimeout(() => { draw(); document.querySelector(".ing-add input[type=search]")?.focus(); }, 250); } })),
+      h("div", { class: "chip-row", role: "group" }, modes.map(([id, label]) => h("button", { type: "button", class: `chip-btn${st.mixMode === id ? " on" : ""}`, "aria-pressed": String(st.mixMode === id), onClick: () => { st.mixMode = id; draw(); } }, label)))];
+    if (st.mixMode === "mix") {
+      const mixes = all.filter((e) => e.homemade).filter((m) => !q || m.name.toLowerCase().includes(q) || (m.components ?? []).some((c) => c.toLowerCase().includes(q))).sort((a, b) => a.name.localeCompare(b.name, getLang()));
+      return [...head, ...(mixes.length ? mixes.map((m) => h("section", { class: "card mix-card" }, h("h3", {}, edit(m), ...badge(m).slice(1)),
+        m.prep_note ? h("p", { class: "meta" }, `📝 ${m.prep_note}`) : null,
+        m.portion_g || m.portion_qty ? h("p", { class: "meta" }, `⚖ ${m.portion_g ? `${m.portion_g} g` : ""}${m.portion_qty ? ` ${m.portion_qty} ${m.portion_unit ?? ""}` : ""}`) : null,
+        (m.components ?? []).length ? tree(m, [k(m.name)]) : h("p", { class: "meta" }, t("mixNoComponents")))) : [h("p", { class: "meta" }, t("mixNone"))])];
+    }
+    const used = all.filter((e) => (usedIn.get(k(e.name)) ?? []).length), unused = all.filter((e) => !e.homemade && !(usedIn.get(k(e.name)) ?? []).length);
+    const match = (e) => !q || e.name.toLowerCase().includes(q) || (usedIn.get(k(e.name)) ?? []).some((m) => m.name.toLowerCase().includes(q));
+    return [...head, ...used.filter(match).sort((a, b) => a.name.localeCompare(b.name, getLang())).map((e) => h("section", { class: "card mix-card" }, h("h3", {}, edit(e), ...badge(e)), h("p", { class: "meta" }, `${t("mixUsedIn")} ${(usedIn.get(k(e.name)) ?? []).length}`), upTree(e, [k(e.name)]))),
+      used.length ? null : h("p", { class: "meta" }, t("mixNone")),
+      unused.length ? h("details", { class: "order-done" }, h("summary", {}, `${t("mixUnused")} (${unused.length})`), h("ul", { class: "mix-tree" }, unused.filter(match).sort((a, b) => a.name.localeCompare(b.name, getLang())).map((e) => h("li", {}, edit(e))))) : null];
+  }
   function viewByPost() {
     const uniq = unique();
     return st.groups.map((g, gi) => h("div", { class: "card ing-group" },
@@ -5011,7 +5051,7 @@ function ingredientsPanel() {
   function draw() {
     const others = state.restaurants.filter((r) => r.id !== st.restaurant);
     const copySel = h("select", { "aria-label": t("ingCopyFrom") }, others.map((r) => h("option", { value: r.id }, r.name)));
-    const views = [["post", t("ingViewByPost")], ["category", t("ingViewByCategory")], ["table", t("ingViewTable")], ["suppliers", t("ingViewSuppliers")]];
+    const views = [["post", t("ingViewByPost")], ["category", t("ingViewByCategory")], ["table", t("ingViewTable")], ["mixes", `🧪 ${t("ingViewMixes")}`], ["suppliers", t("ingViewSuppliers")]];
     box.replaceChildren(h("h2", {}, t("adminIngredients")), h("p", { class: "meta" }, t("ingredientsHelp")),
       h("div", { class: "ing-top" },
         h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: state.restaurants, value: st.restaurant, onChange: (id) => { st.restaurant = id; load(); } })),
@@ -5022,8 +5062,8 @@ function ingredientsPanel() {
           await persist(); toast(t("ingCopied"));
         } }, t("ingCopyBtn")))) : null),
       h("div", { class: "subtabs", role: "tablist" }, views.map(([id, label]) => h("button", { type: "button", role: "tab", "aria-selected": String(st.view === id), onClick: () => { st.view = id; draw(); } }, label))),
-      ...(st.view === "table" ? viewTable() : st.view === "suppliers" ? viewSuppliers() : st.view === "category" ? viewByCategory() : viewByPost()),
-      st.view === "table" || st.view === "suppliers" ? null : h("div", { class: "actions" }, st.view === "post" ? h("button", { class: "btn", type: "button", onClick: () => groupDialog(null) }, `+ ${t("ingAddGroup")}`) : h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`)));
+      ...(st.view === "table" ? viewTable() : st.view === "mixes" ? viewMixes() : st.view === "suppliers" ? viewSuppliers() : st.view === "category" ? viewByCategory() : viewByPost()),
+      st.view === "table" || st.view === "suppliers" || st.view === "mixes" ? null : h("div", { class: "actions" }, st.view === "post" ? h("button", { class: "btn", type: "button", onClick: () => groupDialog(null) }, `+ ${t("ingAddGroup")}`) : h("button", { class: "btn", type: "button", onClick: () => ingredientDialog(null) }, `+ ${t("ingAdd")}`)));
   }
   load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
   return box;

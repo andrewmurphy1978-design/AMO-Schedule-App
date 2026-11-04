@@ -3317,6 +3317,12 @@ app.get("/api/suppliers/:id/orders", async (c) => {
 app.get("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
   if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
+  // requests made before this rule (a home-made ingredient waiting to be ordered) become requests for what it is made of
+  for (const o of (await db.prepare("SELECT id, name, note, reported_by, reported_at FROM order_requests WHERE restaurant_id = ? AND ordered_at IS NULL").bind(rid).all<{ id: number; name: string; note: string | null; reported_by: number | null; reported_at: number }>()).results) {
+    const names = await orderNames(db, rid, o.name);
+    if (names.length === 1 && names[0].name.toLowerCase() === o.name.toLowerCase()) continue;
+    await db.batch([db.prepare("DELETE FROM order_requests WHERE id = ?").bind(o.id), ...names.map((w) => db.prepare("INSERT OR IGNORE INTO order_requests (restaurant_id, name, note, reported_by, reported_at) VALUES (?, ?, ?, ?, ?)").bind(rid, w.name, [o.note, w.viaMix ? `pour ${w.viaMix}` : null].filter(Boolean).join(" · ") || null, o.reported_by, o.reported_at))]);
+  }
   const open = (await db.prepare("SELECT o.id, o.name, o.note, o.reported_at, s.name AS reported_by FROM order_requests o LEFT JOIN staff s ON s.id = o.reported_by WHERE o.restaurant_id = ? AND o.ordered_at IS NULL ORDER BY o.reported_at").bind(rid).all<{ id: number; name: string; note: string | null; reported_at: number; reported_by: string | null }>()).results;
   const done = (await db.prepare("SELECT o.id, o.name, o.ordered_at, sp.name AS supplier FROM order_requests o LEFT JOIN suppliers sp ON sp.id = o.supplier_id WHERE o.restaurant_id = ? AND o.ordered_at IS NOT NULL AND o.ordered_at > ? ORDER BY o.ordered_at DESC LIMIT 30").bind(rid, Date.now() - 7 * 86_400_000).all()).results;
   const nowLocal = localNow(c.env.TIMEZONE);
@@ -3328,24 +3334,48 @@ app.get("/api/orders", async (c) => {
   const names = (await db.prepare("SELECT i.name, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND i.homemade = 0 GROUP BY lower(i.name) ORDER BY i.name").bind(rid).all<{ name: string; category: string | null }>()).results;
   return c.json({ open: open.map((o) => ({ ...o, codes: codes.get(o.name.toLowerCase()) ?? {}, supplier_ids: [...new Set(links.filter((l) => l.k === o.name.toLowerCase()).map((l) => l.supplier_id))] })), done, suppliers, ingredients: names, can_order: await canManage(db, me, rid, "kitchen") });
 });
+/** A home-made ingredient is never ordered: what is ordered is what it is made of (down to the ingredients that are bought). */
+async function orderNames(db: D1Database, rid: number, name: string): Promise<{ name: string; viaMix: string | null }[]> {
+  const rows = (await db.prepare("SELECT i.name, max(i.homemade) AS homemade, max(i.components) AS components FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name)").bind(rid).all<{ name: string; homemade: number; components: string | null }>()).results;
+  const by = new Map(rows.map((r) => [r.name.toLowerCase(), r]));
+  const out = new Map<string, { name: string; viaMix: string | null }>();
+  const walk = (n: string, mix: string | null, depth: number) => {
+    const r = by.get(n.toLowerCase());
+    if (r?.homemade === 1 && depth < 6) {
+      let comps: string[] = []; try { const v = JSON.parse(r.components ?? "[]"); if (Array.isArray(v)) comps = v.filter((x) => typeof x === "string"); } catch { /* none */ }
+      for (const c of comps) walk(c, mix ?? r.name, depth + 1);
+      return;
+    }
+    const final = r?.name ?? n;
+    if (!out.has(final.toLowerCase())) out.set(final.toLowerCase(), { name: final, viaMix: mix });
+  };
+  walk(name, null, 0);
+  return [...out.values()];
+}
 app.post("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB;
   const b = await c.req.json<{ restaurant_id?: number; name?: string; note?: string }>().catch(() => ({} as { restaurant_id?: number; name?: string; note?: string }));
   const name = (b.name ?? "").trim().slice(0, 80), note = (b.note ?? "").trim().slice(0, 200) || null;
   if (!b.restaurant_id || !name) return c.json({ error: "bad_request" }, 400);
   if (!(await restockRestaurants(db, me)).includes(b.restaurant_id)) return c.json({ error: "forbidden" }, 403);
-  // use the spelling of the ingredient when it exists; it can no longer be fetched, so it leaves the fetch list
-  const known = await db.prepare("SELECT i.name FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND lower(i.name) = lower(?) LIMIT 1").bind(b.restaurant_id, name).first<{ name: string }>();
-  const final = known?.name ?? name;
-  const r = await db.prepare("INSERT OR IGNORE INTO order_requests (restaurant_id, name, note, reported_by, reported_at) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, final, note, me.id, Date.now()).run();
-  await db.prepare("DELETE FROM restock_needs WHERE restaurant_id = ?1 AND ingredient_id IN (SELECT i.id FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?1 AND lower(i.name) = lower(?2))").bind(b.restaurant_id, final).run();
+  // a home-made ingredient is replaced by what it is made of; a bought one keeps the spelling of the ingredient (it can no longer be fetched, so it leaves the fetch list)
+  const wanted = await orderNames(db, b.restaurant_id, name);
+  const en = (await db.prepare("SELECT lang FROM staff WHERE id = ?").bind(me.id).first<{ lang: string | null }>())?.lang === "en";
+  let created = 0; const finals: string[] = [];
+  for (const w of wanted) {
+    const r0 = await db.prepare("INSERT OR IGNORE INTO order_requests (restaurant_id, name, note, reported_by, reported_at) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, w.name, [note, w.viaMix ? `${en ? "for" : "pour"} ${w.viaMix}` : null].filter(Boolean).join(" · ") || null, me.id, Date.now()).run();
+    created += r0.meta.changes ?? 0; finals.push(w.name);
+    await db.prepare("DELETE FROM restock_needs WHERE restaurant_id = ?1 AND ingredient_id IN (SELECT i.id FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?1 AND lower(i.name) = lower(?2))").bind(b.restaurant_id, w.name).run();
+  }
+  const final = finals.join(", ");
+  const r = { meta: { changes: created } };
   if (r.meta.changes) c.executionCtx.waitUntil((async () => {
     try {
       const rest = (await db.prepare("SELECT name FROM restaurants WHERE id = ?").bind(b.restaurant_id).first<{ name: string }>())?.name ?? "";
       for (const m of await managersOf(db, b.restaurant_id!, "kitchen")) if (m.id !== me.id) await pushToStaff(db, m.id, { title: `${m.lang === "en" ? "To order" : "À commander"} · ${rest}`, body: `${me.name.split(" ")[0]} : ${final}`.slice(0, 160), url: "/?view=checklist&sub=orders", tag: `order-${b.restaurant_id}` }, { appUrl: c.env.APP_URL ?? new URL(c.req.url).origin });
     } catch { /* the request is saved anyway */ }
   })());
-  return c.json({ ok: true, name: final, created: !!r.meta.changes }, 201);
+  return c.json({ ok: true, name: final, names: finals, created: !!r.meta.changes }, 201);
 });
 app.post("/api/orders/email", async (c) => {
   const me = c.get("me"), db = c.env.DB;
