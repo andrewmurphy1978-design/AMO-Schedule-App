@@ -3595,9 +3595,12 @@ const voiceView = (k: VoiceCall) => ({ id: k.id, to_name: k.to_name, lang: k.lan
 app.get("/api/voice/contacts", requireVoice, async (c) => {
   const me = c.get("me");
   const rows = (await c.env.DB.prepare("SELECT id, name, first_name, lang, substr(phone, -4) AS tail FROM staff WHERE client_id = ? AND active = 1 AND id != ? AND phone IS NOT NULL AND phone != '' ORDER BY name").bind(me.client_id, me.id).all<{ id: number; name: string; first_name: string | null; lang: string; tail: string }>()).results;
+  // every supplier that has a phone number can be called
+  const suppliers = (await c.env.DB.prepare("SELECT id, name, phone FROM suppliers WHERE client_id = ? AND phone IS NOT NULL AND phone != '' ORDER BY name COLLATE NOCASE").bind(me.client_id).all<{ id: number; name: string; phone: string }>()).results
+    .filter((r) => normalizePhone(r.phone)).map((r) => ({ id: r.id, name: r.name, lang: "fr", tail: (normalizePhone(r.phone) ?? "").slice(-4) }));
   const extra = (await c.env.DB.prepare("SELECT id, name, label, lang, substr(phone, -4) AS tail FROM voice_contacts WHERE client_id = ? ORDER BY name COLLATE NOCASE").bind(me.client_id).all<{ id: number; name: string; label: string | null; lang: string; tail: string }>()).results;
   const conn = await loadConnections(c.env, c.env.DB, me.client_id);
-  return c.json({ contacts: sortByName(rows), extra, ready: !!conn.twilio && !!conn.appUrl, missing: !conn.twilio ? "twilio" : !conn.appUrl ? "app_url" : null });
+  return c.json({ contacts: sortByName(rows), extra, suppliers, ready: !!conn.twilio && !!conn.appUrl, missing: !conn.twilio ? "twilio" : !conn.appUrl ? "app_url" : null });
 });
 app.get("/api/admin/voice-contacts", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, label, phone, lang, notes FROM voice_contacts WHERE client_id = ? ORDER BY name COLLATE NOCASE").bind(c.get("me").client_id).all()).results));
 async function voiceContactBody(c: Context<any>) {
@@ -3635,7 +3638,7 @@ app.get("/api/voice/calls/:id", requireVoice, async (c) => {
 });
 app.post("/api/voice/calls", requireVoice, async (c) => {
   const me = c.get("me"), db = c.env.DB;
-  const b = await c.req.json<{ staff_id?: number; contact_id?: number; phone?: string; lang?: string; text?: string }>().catch(() => ({} as { staff_id?: number; contact_id?: number; phone?: string; lang?: string; text?: string }));
+  const b = await c.req.json<{ staff_id?: number; contact_id?: number; supplier_id?: number; phone?: string; lang?: string; text?: string }>().catch(() => ({} as { staff_id?: number; contact_id?: number; supplier_id?: number; phone?: string; lang?: string; text?: string }));
   const text = cleanSpeech(b.text);
   if (!text) return c.json({ error: "empty_text" }, 400);
   const conn = await loadConnections(c.env, db, me.client_id);
@@ -3644,7 +3647,12 @@ app.post("/api/voice/calls", requireVoice, async (c) => {
   if (await db.prepare(`SELECT 1 FROM voice_calls WHERE caller_id = ? AND status IN ('queued', 'in_progress', 'ending') AND created_at > ?`).bind(me.id, Date.now() - 20 * 60_000).first()) return c.json({ error: "call_in_progress" }, 409);
   if (((await db.prepare("SELECT COUNT(*) AS n FROM voice_calls WHERE caller_id = ? AND created_at > ?").bind(me.id, Date.now() - 86_400_000).first<{ n: number }>())?.n ?? 0) >= 40) return c.json({ error: "too_many_calls" }, 429);
   let name = "", phone: string | null = null, lang: VoiceLang = b.lang === "en" ? "en" : "fr", staffId: number | null = null;
-  if (b.contact_id) {
+  if (b.supplier_id) {
+    const t = await db.prepare("SELECT name, phone FROM suppliers WHERE id = ? AND client_id = ?").bind(b.supplier_id, me.client_id).first<{ name: string; phone: string | null }>();
+    if (!t) return c.json({ error: "not_found" }, 404);
+    name = t.name; phone = normalizePhone(t.phone);
+    if (!phone) return c.json({ error: "no_phone" }, 422);
+  } else if (b.contact_id) {
     const t = await db.prepare("SELECT name, phone, lang FROM voice_contacts WHERE id = ? AND client_id = ?").bind(b.contact_id, me.client_id).first<{ name: string; phone: string; lang: string }>();
     if (!t) return c.json({ error: "not_found" }, 404);
     name = t.name; phone = t.phone; if (!b.lang) lang = t.lang === "en" ? "en" : "fr";

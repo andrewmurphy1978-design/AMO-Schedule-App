@@ -2739,7 +2739,7 @@ async function renderOrders(box, restaurantIds) {
     ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone"), g.sp && supplierMethods(g.sp).length ? h("small", { class: "meta" }, ` · ${supplierMethods(g.sp).map(orderMethodLabel).join(" · ")}`) : null, g.sp?.customer_number ? h("small", { class: "meta" }, ` · ${t("supClientShort")} ${g.sp.customer_number}`) : null),
       g.sp ? windowNode(g.sp) : null,
       g.sp ? h("div", { class: "ord-actions" }, ...orderActions({ sp: g.sp, items: g.items, rid, canOrder: d.can_order, reload })) : null,
-      g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
+      g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${formatPhone(g.sp.phone)}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
       g.items.map((o) => row(o, g.sp?.id ?? null)))) : [h("p", { class: "meta" }, t("orderEmpty"))]),
     d.done.length ? h("details", { class: "order-done" }, h("summary", {}, t("orderRecent")), d.done.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${t("orderOrderedAt")} ${when(o.ordered_at)}${o.supplier ? ` · ${o.supplier}` : ""}`)))) : null);
 }
@@ -2939,10 +2939,11 @@ async function renderVoice() {
   if (state.voiceCall || active) { conversation(state.voiceCall ?? active.id); return; }
 
   // ---- a new call ----
-  const pick = (v) => v.startsWith("c") ? info.extra.find((x) => `c${x.id}` === v) : info.contacts.find((x) => `s${x.id}` === v);
+  const pick = (v) => v.startsWith("c") ? info.extra.find((x) => `c${x.id}` === v) : v.startsWith("v") ? info.suppliers?.find((x) => `v${x.id}` === v) : info.contacts.find((x) => `s${x.id}` === v);
   const who = h("select", { "aria-label": t("voiceTo"), onChange: () => { const c = who.value === "p" ? null : pick(who.value); if (c) langSel.value = c.lang === "en" ? "en" : "fr"; } }, h("option", { value: "" }, `— ${t("voiceChoose")}`),
     h("optgroup", { label: t("voiceGroupTeam") }, info.contacts.map((c) => h("option", { value: `s${c.id}` }, `${c.name} (…${c.tail})`))),
-    info.extra?.length ? h("optgroup", { label: t("voiceGroupContacts") }, info.extra.map((c) => h("option", { value: `c${c.id}` }, `${c.name}${c.label ? ` · ${c.label}` : ""} (…${c.tail})`))) : null);
+    info.extra?.length ? h("optgroup", { label: t("voiceGroupContacts") }, info.extra.map((c) => h("option", { value: `c${c.id}` }, `${c.name}${c.label ? ` · ${c.label}` : ""} (…${c.tail})`))) : null,
+    info.suppliers?.length ? h("optgroup", { label: t("voiceGroupSuppliers") }, info.suppliers.map((c) => h("option", { value: `v${c.id}` }, `🚚 ${c.name} (…${c.tail})`))) : null);
   const pre = state.voicePrefill; state.voicePrefill = null;
   if (pre) who.prepend(h("option", { value: "p", selected: true }, `${pre.name} (…${pre.phone.slice(-4)})`));
   const langSel = h("select", { "aria-label": t("voiceLangLabel") }, [["fr", "Français"], ["en", "English"]].map(([v, l]) => h("option", { value: v, selected: v === lang }, l)));
@@ -2950,7 +2951,7 @@ async function renderVoice() {
   const go = h("button", { class: "btn primary big", type: "button", disabled: !info.ready, onClick: async () => {
     if (!who.value) { toast(t("voiceChoose")); return; }
     go.disabled = true;
-    try { const r = await api("/voice/calls", { method: "POST", body: { ...(who.value === "p" ? { phone: pre.phone } : { [who.value[0] === "c" ? "contact_id" : "staff_id"]: Number(who.value.slice(1)) }), lang: langSel.value, text: msg.value } }); state.voiceCall = r.id; render(); }
+    try { const r = await api("/voice/calls", { method: "POST", body: { ...(who.value === "p" ? { phone: pre.phone } : { [{ c: "contact_id", v: "supplier_id", s: "staff_id" }[who.value[0]]]: Number(who.value.slice(1)) }), lang: langSel.value, text: msg.value } }); state.voiceCall = r.id; render(); }
     catch (e) { toast(errMsg(e)); go.disabled = false; }
   } }, t("voiceCallBtn"));
   box.append(h("p", { class: "meta" }, t("voiceHelp")), info.ready ? null : h("div", { class: "info" }, `⚠ ${t("voiceNotReady")}`),
@@ -3948,7 +3949,7 @@ function voiceContactsPanel() {
     const form = (c) => {
       const name = h("input", { value: c?.name ?? "", maxLength: 80, required: true, placeholder: t("vcName") });
       const label = h("input", { value: c?.label ?? "", maxLength: 60, placeholder: t("vcLabelEx") });
-      const phone = h("input", { type: "tel", value: c?.phone ?? "", required: true, placeholder: "+1 819 555 1234" });
+      const phone = h("input", { type: "tel", value: formatPhone(c?.phone), required: true, autocomplete: "off", placeholder: "+1 (514) 953-6985" }); phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
       const lang = h("select", {}, [["fr", "Français"], ["en", "English"]].map(([v, l]) => h("option", { value: v, selected: (c?.lang ?? "fr") === v }, l)));
       const notes = h("input", { value: c?.notes ?? "", maxLength: 300, placeholder: t("vcNotes") });
       return { name, label, phone, lang, notes, body: () => ({ name: name.value, label: label.value, phone: phone.value, lang: lang.value, notes: notes.value }) };
@@ -3960,7 +3961,7 @@ function voiceContactsPanel() {
         c ? h("button", { class: "btn", type: "button", onClick: () => load() }, t("cancel")) : null);
     };
     box.replaceChildren(h("h2", {}, `📞 ${t("adminContacts")}`), h("p", { class: "meta" }, t("vcHelp")),
-      ...list.map((c) => h("div", { class: "card vc-admin-row" }, h("div", {}, h("strong", {}, c.name), c.label ? h("span", { class: "meta" }, ` · ${c.label}`) : null, h("div", { class: "meta" }, `${c.phone} · ${c.lang.toUpperCase()}${c.notes ? ` · ${c.notes}` : ""}`)),
+      ...list.map((c) => h("div", { class: "card vc-admin-row" }, h("div", {}, h("strong", {}, c.name), c.label ? h("span", { class: "meta" }, ` · ${c.label}`) : null, h("div", { class: "meta" }, `${formatPhone(c.phone)} · ${c.lang.toUpperCase()}${c.notes ? ` · ${c.notes}` : ""}`)),
         h("div", { class: "actions" },
           h("button", { class: "btn", type: "button", onClick: (e) => e.currentTarget.closest(".vc-admin-row").replaceChildren(editor(c)) }, t("edit")),
           h("button", { class: "btn danger", type: "button", onClick: async () => { if (await confirmDialog({ title: t("delete"), message: t("vcDelete").replace("{name}", c.name), yes: t("delete"), no: t("cancel") })) { await api(`/admin/voice-contacts/${c.id}`, { method: "DELETE" }); load(); } } }, t("delete"))))),
@@ -4820,7 +4821,8 @@ function ingredientsPanel() {
   function supplierDialog(sp, startTab = "card") {
     const dlg = dialog("ing-supplier-modal");
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
-    const name = h("input", { value: sp?.name ?? "", maxLength: 80, "aria-label": t("supName") }), phone = h("input", { type: "tel", value: sp?.phone ?? "", maxLength: 40, "aria-label": t("supPhone") });
+    const name = h("input", { value: sp?.name ?? "", maxLength: 80, "aria-label": t("supName") }), phone = h("input", { type: "tel", value: formatPhone(sp?.phone), maxLength: 40, autocomplete: "off", placeholder: "+1 (514) 953-6985", "aria-label": t("supPhone") });
+    phone.addEventListener("blur", () => { phone.value = formatPhone(phone.value); });
     const email = h("input", { type: "email", value: sp?.email ?? "", maxLength: 120, "aria-label": t("supEmail") }), notes = h("textarea", { rows: 3, maxLength: 300, "aria-label": t("supNotes") }, sp?.notes ?? "");
     const customer = h("input", { value: sp?.customer_number ?? "", maxLength: 60, "aria-label": t("supCustomer") });
     // the ways to order (several at once)
@@ -4967,7 +4969,7 @@ function ingredientsPanel() {
     return [h("label", { class: "field labor-rate" }, h("span", {}, `${t("ingLaborRate")} ($/h)`), rate, h("small", { class: "meta" }, t("ingLaborHelp"))),
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
       st.suppliers.length ? h("div", { class: "ing-lines tree" }, st.suppliers.map((sp) => h("div", { class: "ing-line" }, h("b", {}, sp.name),
-        h("span", { class: "ing-badges" }, ...supplierMethods(sp).map((m) => h("span", { class: "ing-badge sup" }, orderMethodLabel(m))), sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
+        h("span", { class: "ing-badges" }, ...supplierMethods(sp).map((m) => h("span", { class: "ing-badge sup" }, orderMethodLabel(m))), sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${formatPhone(sp.phone)}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
         sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];
   }
   function viewByPost() {
