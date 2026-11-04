@@ -1334,3 +1334,4 @@ a.btn{display:flex;align-items:center;justify-content:center;text-align:center;t
 .dm-row-top { align-items: flex-start; }
 .dm-title-tx { overflow: hidden; }
 .dm-row, .dm-chat-head { overflow-x: hidden; }
+.auto-scope input[type=checkbox]{width:1.4rem;height:1.4rem;min-height:0;padding:0;margin:0;flex:none;accent-color:var(--brand,#da291c)}
