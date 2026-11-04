@@ -34,9 +34,10 @@ function enhanceDateInput(el) {
 }
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
-  if (tag === "input" && attrs?.type === "date") { attrs = { ...attrs }; delete attrs.type; enhanceDateInput(el); }
+  const native = !!attrs?.native;
+  if (tag === "input" && attrs?.type === "date" && !native) { attrs = { ...attrs }; delete attrs.type; enhanceDateInput(el); }
   for (const [k, v] of Object.entries(attrs ?? {})) {
-    if (v === false || v == null) continue;
+    if (v === false || v == null || k === "native") continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === "class") el.className = v;
     else if (k === "value") el.value = v;
@@ -1719,14 +1720,15 @@ function availabilityEditor(staffId, part = "both") {
     const st = timeField("08:00"), en = timeField("15:30");
     const note = h("input", { maxLength: 120, placeholder: t("availabilityNote") });
     const lastDates = availDates.get(staffId) ?? {};
-    const vf = h("input", { type: "date", value: lastDates.from ?? "" }), vt = h("input", { type: "date", value: lastDates.to ?? "" });
+    const touch = matchMedia("(pointer: coarse)").matches; // a phone: the native date picker (reliable when the fields are pre-filled with the last dates)
+    const vf = h("input", { type: "date", native: touch, value: lastDates.from ?? "" }), vt = h("input", { type: "date", native: touch, value: lastDates.to ?? "" });
     const list = rows.filter((r) => r.kind !== "day_off");
     const daysPart = [
       h("h4", {}, t("fixedDaysOff")), h("p", { class: "meta" }, t("fixedDaysOffHelp")), days,
       // On each fixed day off: can this person still be asked to cover a sick colleague that day?
-      [...dayOffs.entries()].sort((a, b) => a[0] - b[0]).map(([i, r]) => h("label", { class: "check" },
+      [...dayOffs.entries()].sort((a, b) => a[0] - b[0]).map(([i, r]) => h("label", { class: "check repl-row" },
         h("input", { type: "checkbox", checked: !!r.replacement_ok, onChange: async (e) => { try { await api(`/availability/${r.id}`, { method: "PUT", body: { replacement_ok: e.target.checked } }); toast(t("saved")); } catch (err) { e.target.checked = !e.target.checked; toast(errorText(err)); } } }),
-        h("span", {}, `${weekdayName(i)} : ${t("replacementOk")}`)))];
+        h("span", { class: "repl-text" }, h("b", {}, weekdayName(i)), h("small", {}, t("replacementOk")))))];
     const timesPart = [
       h("h4", {}, t("unavailableTimes")), h("p", { class: "meta" }, t("unavailableHelp")),
       list.length ? h("div", { class: "log" }, list.map((r) => h("div", { class: "log-row avail-row" },
@@ -1735,8 +1737,9 @@ function availabilityEditor(staffId, part = "both") {
           r.valid_from || r.valid_to ? h("span", { class: "meta" }, `${r.valid_from ? longDate(r.valid_from) : "…"} → ${r.valid_to ? longDate(r.valid_to) : "…"}`) : null),
         h("button", { class: "icon-btn avail-del", type: "button", title: t("delete"), "aria-label": t("delete"), onClick: async () => { await api(`/availability/${r.id}`, { method: "DELETE" }); load(); } }, "🗑️")))) : h("p", { class: "meta" }, t("noUnavailable")),
       h("div", { class: "inline-form", style: "grid-template-columns:1fr" },
-        h("div", { class: "inline-form day-time-line" }, h("label", { class: "field" }, h("span", {}, t("weekday")), dow), h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
-        h("div", { class: "inline-form", style: "grid-template-columns:1fr 1fr" }, h("label", { class: "field" }, h("span", {}, t("validFrom")), vf), h("label", { class: "field" }, h("span", {}, t("validTo")), vt)),
+        h("div", { class: "avail-line" },
+          h("div", { class: "inline-form day-time-line" }, h("label", { class: "field" }, h("span", {}, t("weekday")), dow), h("label", { class: "field" }, h("span", {}, t("from")), st), h("label", { class: "field" }, h("span", {}, t("to")), en)),
+          h("div", { class: "inline-form avail-valid" }, h("label", { class: "field" }, h("span", {}, t("validFrom")), vf), h("label", { class: "field" }, h("span", {}, t("validTo")), vt))),
         h("label", { class: "field" }, h("span", {}, t("note")), note),
         h("button", { class: "btn primary", type: "button", onClick: async () => {
           try { await api("/availability", { method: "POST", body: { staff_id: staffId, dow: Number(dow.value), start_time: st.value, end_time: en.value, note: note.value, valid_from: vf.value || undefined, valid_to: vt.value || undefined } }); availDates.set(staffId, { from: vf.value, to: vt.value }); load(); }
@@ -1837,7 +1840,7 @@ async function timeOffNodes(part = "mine") {
     ...leaveGroups(review, reviewRow)) : null;
   // administrators decide in Administration → Congés; managers (no Administration access) keep the list here
   if (part === "review") return [reviewBox ?? h("p", { class: "meta" }, t("nothingToReview"))];
-  return [form, myList, state.me.me.is_admin ? null : reviewBox].filter(Boolean);
+  return [h("div", { class: "leave-cols" }, form, myList), state.me.me.is_admin ? null : reviewBox].filter(Boolean);
 }
 
 // Photos are shrunk in the browser before they are sent; videos go as they are (20 MB at most).
@@ -3394,8 +3397,7 @@ function reminderControls() {
     });
     box.replaceChildren(h("p", { class: "meta acc-help" }, t("remindersHelp")), ...(rows.length ? rows : [h("p", { class: "meta" }, t("noReminders"))]),
       h("div", { class: "actions push-actions reminder-add" },
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push", anchor: "start" }); draw(); } }, `+ ${t("addReminderShort")}`) : null,
-        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: 30, channel: "push", anchor: "end" }); draw(); } }, `+ ${t("addEndReminderShort")}`) : null));
+        items.length < 5 ? h("button", { class: "btn", type: "button", onClick: () => { items.push({ minutes_before: items.some((x) => x.minutes_before === 60) ? 30 : 60, channel: "push", anchor: "start" }); draw(); } }, `+ ${t("addReminder")}`) : null));
   };
   // saved together with the rest of the form (the main Enregistrer button)
   box.save = async () => { if (loaded) await api("/account/reminders", { method: "PUT", body: { items } }); };

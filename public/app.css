@@ -1440,3 +1440,29 @@ a.btn.small { color: inherit; }
 .mix-card > .mix-tree { margin-left: 0; }
 .link-btn { border: 0; background: none; padding: 0; font: inherit; font-weight: 700; color: inherit; text-align: left; cursor: pointer; text-decoration: underline dotted; }
 .chip-row { display: flex; gap: .4rem; flex-wrap: wrap; margin: .5rem 0; }
+
+/* Mon compte: the sub-tabs sit right under the header tabs (no title, no gap) */
+main:has(> .acc-screen) { padding-top: 0; }
+.acc-screen { padding-top: 0 !important; }
+.acc-screen > h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; margin: 0; padding: 0; } /* still read by screen readers */
+.acc-screen .acc-tabs { margin: 0 -16px .6rem !important; padding: 0 16px; }
+@media (max-width: 899px) { .acc-screen .acc-tabs { padding: 0 .5rem; } }
+/* fixed days off: all seven days on one line, then each day with its replacement choice on two lines */
+.availability h4 { margin-bottom: .15rem; }
+.availability h4 + p.meta { margin-top: 0; }
+.availability .seg { flex-wrap: nowrap; gap: .2rem; }
+.availability .seg button { flex: 1 1 0; min-width: 0; padding: .45rem .1rem; font-size: clamp(.6rem, 2.9vw, .95rem); white-space: nowrap; }
+.repl-row { align-items: flex-start; }
+.repl-text { display: grid; gap: 0; line-height: 1.25; }
+.repl-text small { color: var(--muted, #6b6b6b); font-size: .85rem; }
+/* unavailability form: everything on one line on a computer */
+@media (min-width: 900px) {
+  .avail-line { display: flex; gap: .8rem; align-items: flex-end; }
+  .avail-line .day-time-line { grid-template-columns: minmax(8rem, 1.2fr) auto auto; flex: 0 1 auto; }
+  .avail-line .avail-valid { grid-template-columns: 1fr 1fr; flex: 1 1 auto; }
+  .avail-line .inline-form { margin: 0; }
+}
+@media (max-width: 899px) { .avail-line { display: grid; gap: .6rem; } .avail-valid { grid-template-columns: 1fr 1fr; } }
+/* leave request: the request on the left, "my leave" on the right (computer) */
+@media (min-width: 900px) { .leave-cols { display: grid; grid-template-columns: minmax(320px, 440px) 1fr; gap: 1rem; align-items: start; } .leave-cols > * { margin: 0; } }
+.acc-screen .acc-tabs { max-width: none; width: calc(100% + 32px); box-sizing: border-box; }
