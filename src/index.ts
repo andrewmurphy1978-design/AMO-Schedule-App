@@ -593,6 +593,7 @@ async function startSession(c: Context<any>, email: string, method: "code" | "pa
   const token = newSessionToken(), now = Date.now();
   const dev = describeDevice(c.req.header("user-agent"));
   await c.env.DB.prepare("INSERT INTO sessions (token_hash, email, expires_at, created_at, device, browser, method) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(await sha256Hex(token), email, now + SESSION_TTL_MS, now, dev.device || null, dev.browser || null, method).run();
+  await c.env.DB.prepare("UPDATE staff SET first_login_at = COALESCE(first_login_at, ?) WHERE lower(email) = ?").bind(now, email.toLowerCase()).run(); // Messages only offer people who have signed in
   c.header("Set-Cookie", sessionCookie(token, isSecure(c)));
 }
 
@@ -3954,8 +3955,8 @@ async function dmReachable(db: D1Database, me: Me, s: DmSettings): Promise<{ id:
     ? "m.restaurant_id = sr.restaurant_id" : "m.restaurant_id = sr.restaurant_id AND m.department_id = ro.department_id";
   const sameMgr = s.scope === "restaurant" ? "m.restaurant_id = mg.restaurant_id" : "m.restaurant_id = mg.restaurant_id AND m.department_id = mg.department_id";
   const sql = everyone
-    ? `SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 ORDER BY s.name`
-    : `${mine} SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 AND (s.is_admin = 1
+    ? `SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 AND s.first_login_at IS NOT NULL ORDER BY s.name`
+    : `${mine} SELECT ${dmPerson} FROM staff s WHERE s.client_id = ?2 AND s.active = 1 AND s.id != ?1 AND s.first_login_at IS NOT NULL AND (s.is_admin = 1
          OR EXISTS (SELECT 1 FROM staff_roles sr JOIN roles ro ON ro.id = sr.role_id JOIN mine m ON ${same} WHERE sr.staff_id = s.id)
          OR EXISTS (SELECT 1 FROM managers mg JOIN mine m ON ${sameMgr} WHERE mg.staff_id = s.id)) ORDER BY s.name`;
   return (await db.prepare(sql).bind(me.id, me.client_id).all<{ id: number; name: string; first_name: string | null; color: string | null; photo_v: number | null }>()).results;
