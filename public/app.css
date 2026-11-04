@@ -1367,3 +1367,4 @@ a.btn.small { color: inherit; }
 .sup-tabs button { white-space: nowrap; }
 .sup-tabs { flex-wrap: wrap; overflow: visible; }
 .sup-tabs button { padding: .45rem .55rem; }
+.sup-cutoff { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }

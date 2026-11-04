@@ -1405,7 +1405,7 @@ function scheduleAccessPane(person, ov) {
 function attendancePane(person, ov) {
   const box = h("div", { class: "attendance" });
   const st = { filter: "all" };
-  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short" });
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
   async function load() {
     const d = await api(`/staff/${person.id}/attendance`);
     const m = d.last_12_months;
@@ -2213,7 +2213,7 @@ async function renderVehicles(box, restaurantIds) {
   if (!restaurantIds.includes(state.vehicleRestaurant)) state.vehicleRestaurant = restaurantIds.includes(state.sel?.restaurant) ? state.sel.restaurant : restaurantIds[0];
   const reload = () => renderChecklist();
   const d = await api(`/vehicles?restaurant=${state.vehicleRestaurant}`);
-  const fmtTime = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fmtTime = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const picker = d.restaurants.length > 1 ? h("label", { class: "field veh-resto" }, h("span", {}, t("restaurant")), h("select", { "aria-label": t("restaurant"), onChange: (e) => { state.vehicleRestaurant = Number(e.target.value); reload(); } }, d.restaurants.map((r) => h("option", { value: r.id, selected: r.id === d.restaurant_id }, r.name)))) : null;
   // the next tire deadline, in words
   const sn = d.season, winter = sn.target === "winter";
@@ -2381,7 +2381,7 @@ async function renderInventory(box, restaurantIds) {
   const rid = state.restockRestaurant;
   if (!rid) { box.append(h("div", { class: "empty" }, t("noSchedules"))); return; }
   const d = await api(`/inventory?restaurant=${rid}`);
-  const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
+  const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
   const fmt = (l) => (l ? `${l.qty}${l.unit ? ` ${l.unit}` : ""}` : "");
   const head = [h("p", { class: "meta" }, t("invHelp")),
     restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; state.invLoc = null; render(); } })) : null];
@@ -2561,7 +2561,7 @@ async function renderOrders(box, restaurantIds) {
     if (!input.value.trim()) return;
     try { await api("/orders", { method: "POST", body: { restaurant_id: rid, name: input.value, note: note.value } }); toast(t("orderReported")); reload(); } catch (e) { toast(errorText(e)); }
   };
-  const when = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const when = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const supName = (id) => d.suppliers.find((x) => x.id === id)?.name;
   const row = (o, supplierId) => h("div", { class: "order-row" },
     h("div", {}, h("b", {}, o.name), o.note ? h("small", { class: "meta" }, ` · ${o.note}`) : null,
@@ -2736,7 +2736,7 @@ async function renderVoice() {
     const mine = m.direction === "out";
     return h("div", { class: `vc-row ${mine ? "mine" : "theirs"}` }, h("div", { class: "vc-bubble" }, h("small", {}, mine ? t("voiceWho") : toName), h("p", {}, m.text),
       mine ? h("small", { class: "vc-state" }, m.delivered ? `🔊 ${t("voiceSpoken")}` : `⏳ ${t("voiceWaiting")}`) : null),
-      h("time", {}, new Date(m.created_at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" })));
+      h("time", {}, new Date(m.created_at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })));
   };
   const phrases = (target) => h("div", { class: "vc-quick", role: "group", "aria-label": t("voiceQuick") }, quick.map((q) => h("button", { type: "button", class: "chip-btn", onClick: () => { target.value = target.value ? `${target.value} ${q}` : q; target.focus(); } }, q)));
 
@@ -2794,12 +2794,12 @@ async function renderVoice() {
     h("div", { class: "card vc-new" }, h("div", { class: "vc-two" }, h("label", { class: "field" }, h("span", {}, t("voiceTo")), who), h("label", { class: "field" }, h("span", {}, t("voiceLangLabel")), langSel)),
       h("label", { class: "field" }, h("span", {}, t("voiceMessage")), msg), phrases(msg), go));
   if (calls.length) box.append(h("h3", { class: "restock-title" }, t("voiceHistory")), h("div", { class: "vc-history" }, calls.map((c) => h("button", { type: "button", class: "vc-hist-row", onClick: () => { state.voiceCall = c.id; render(); } },
-    h("b", {}, c.to_name), h("small", {}, new Date(c.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })), h("small", { class: "meta" }, statusText(c, null))))));
+    h("b", {}, c.to_name), h("small", {}, new Date(c.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })), h("small", { class: "meta" }, statusText(c, null))))));
 }
 
 // ---------- Communities ----------
 // A message board per restaurant and group of departments; people are in the ones matching their roles.
-const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const timeAgo = (iso) => new Date(iso).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 // ---------- Personal messages (the Messages tab of Communities) ----------
 function dmSetUnread(n) { const d = n - (state.dmUnread ?? 0); state.dmUnread = n; state.communityUnread = Math.max(0, (state.communityUnread ?? 0) + d); renderChrome(); }
 const dmFirst = (p) => p.first_name || p.name.split(" ")[0];
@@ -2820,7 +2820,7 @@ async function renderMessages(box) {
   const setOpen = (on) => root?.classList.toggle("dm-open", on && !desktop); // phone: the chat takes the whole screen
   let threads = [];
   const reach = await api("/messages/people").catch(() => ({ can_group: false, people: [] })); // who can be written to, and whether a group may be started
-  const when = (ms) => { const d = new Date(ms), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
+  const when = (ms) => { const d = new Date(ms), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
   const loadThreads = async () => { threads = await api("/messages/threads"); dmSetUnread(threads.reduce((n, x) => n + x.unread, 0)); };
   const search = h("input", { type: "search", class: "dm-search", placeholder: t("dmFind"), "aria-label": t("dmFind"), autocomplete: "off" });
   const listEl = h("div", { class: "dm-list", role: "list" });
@@ -2976,7 +2976,7 @@ async function messageThread(box, id, myId, toList, onChange) {
   const person = (sid) => d.members.find((m) => m.id === sid);
   const th = () => ({ ...d.thread, members: d.members });
   const dayLabel = (ms) => { const x = new Date(ms), n = new Date(); const y = new Date(n); y.setDate(n.getDate() - 1); return x.toDateString() === n.toDateString() ? t("today") : x.toDateString() === y.toDateString() ? t("yesterday") : x.toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "long" }); };
-  const hhmm = (ms) => new Date(ms).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+  const hhmm = (ms) => new Date(ms).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const snippet = (m) => (m.deleted ? t("dmDeleted") : m.body || (m.media?.[0] ? dmMediaLabel(m.media[0].kind) : m.kind ? dmMediaLabel(m.kind) : ""));
   // what is being written: pictures / voice already uploaded, the message being answered
   let replyTo = null;
@@ -3071,7 +3071,7 @@ async function renderBoards(box, list) {
   const short = (n) => n.split(/-des-|\sdes\s/)[0];
   const shortIcons = (deps) => { const l = deps.filter((d) => d !== "admin"); return [...(l.length ? l : deps)].sort((a, b) => DEPTS.indexOf(a) - DEPTS.indexOf(b)).map(deptIcon).join(""); };
   const title = (x) => (manyRestos ? `${short(x.restaurant)} · ${x.name}` : x.name);
-  const when = (iso) => { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
+  const when = (iso) => { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : d.toLocaleDateString(locale(), { day: "numeric", month: "short" }); };
   const preview = (x) => (x.last_body ? `${x.last_by}: ${x.last_body}` : x.last_media ? `${x.last_by}: ${dmMediaLabel(x.last_media)}` : t("noPosts"));
   const search = h("input", { type: "search", class: "dm-search", placeholder: t("commFind"), "aria-label": t("commFind"), autocomplete: "off" });
   const listEl = h("div", { class: "dm-list", role: "list" });
@@ -3344,7 +3344,7 @@ async function renderAccount() {
         ...(info.has_password ? [h("label", { class: "field" }, h("span", {}, t("secPasswordCurrent")), cur)] : []),
         h("label", { class: "field" }, h("span", {}, t("secPasswordNew")), pw1), h("label", { class: "field" }, h("span", {}, t("secPasswordConfirm")), pw2),
         h("button", { class: "btn primary", type: "submit" }, info.has_password ? t("secChangePassword") : t("secSetPassword")));
-      const ago = (ms) => new Date(ms).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      const ago = (ms) => new Date(ms).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
       const icon = (x) => (/iPhone|Android|iPad|Samsung|Pixel/.test(x.device ?? "") ? "📱" : "💻");
       const sessions = (info.sessions ?? []).map((x) => h("div", { class: `pk-row dev-row ${x.current ? "current" : ""}` },
         h("div", {}, h("b", {}, `${icon(x)} ${x.device || t("secUnknownDevice")}${x.browser ? ` · ${x.browser}` : ""}`), x.current ? h("span", { class: "badge" }, t("secThisDevice")) : null, x.standalone ? h("span", { class: "badge" }, `📲 ${t("secInstalledApp")}`) : null,
@@ -3550,7 +3550,7 @@ function messageLogPanel() {
   const box = h("section", { class: "panel" });
   api("/admin/notifications").then((rows) => {
     box.replaceChildren(h("h2", {}, t("messageLog")), rows.length ? h("div", { class: "log" }, rows.map((r) =>
-      h("div", { class: "log-row" }, h("span", { class: "meta" }, `${new Date(r.created_at).toLocaleString(locale())} · ${r.channel.toUpperCase()} · ${r.kind}`),
+      h("div", { class: "log-row" }, h("span", { class: "meta" }, `${new Date(r.created_at).toLocaleString(locale(), { dateStyle: "short", timeStyle: "short", hourCycle: "h23" })} · ${r.channel.toUpperCase()} · ${r.kind}`),
         h("span", {}, `${r.staff_name ?? r.to_addr} — ${r.status}${r.error ? ` (${r.error})` : ""}`)))) : h("div", { class: "empty" }, t("noMessages")));
   }).catch((e) => box.replaceChildren(h("div", { class: "empty" }, errorText(e))));
   return box;
@@ -3614,7 +3614,7 @@ function payslipsAdminPanel(ov) {
 // Webhooks: the CRM is told when something changes. Each delivery is signed; failures are retried.
 function webhooksPanel() {
   const box = h("div", {});
-  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "short", timeStyle: "short" });
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "short", timeStyle: "short", hourCycle: "h23" });
   const errMsg = (e) => ({ https_required: t("whInvalidUrl"), invalid_url: t("whInvalidUrl"), ip_not_allowed: t("whInvalidUrl"), host_not_allowed: t("whInvalidUrl"), too_many_endpoints: t("whTooMany") })[e.body?.error] ?? errorText(e);
   const open = new Set();
   async function load(secret) {
@@ -3663,7 +3663,7 @@ function webhooksPanel() {
 // API tokens for other systems (the CRM): created here, shown once, revocable.
 function apiPanel() {
   const box = h("div", {});
-  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short" });
+  const when = (ms) => new Date(ms).toLocaleString(getLang() === "fr" ? "fr-CA" : "en-CA", { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
   async function load(fresh) {
     const rows = await api("/admin/tokens");
     const name = h("input", { required: true, maxLength: 60, placeholder: t("apiName") });
@@ -4361,11 +4361,11 @@ function autoSchedulePanel() {
     // runs
     const resLine = (r) => h("li", {}, `${r.restaurant} · ${t(`dept.${r.department}`)} : `, r.status === "created" ? `${r.shifts} ${t("autoShifts")}` : r.status === "failed" ? `${t("autoRes_failed")}${r.error ? ` (${r.error})` : ""}` : t(`autoRes_${r.status}`));
     const runCard = (r) => h("div", { class: `card auto-run ${r.status}` },
-      h("div", {}, h("b", {}, `${t("autoWeekOf")} ${weekLabel(r.week)}`), " · ", h("span", { class: "badge" }, t(`autoSt_${r.status}`)), " · ", h("span", { class: "meta" }, new Date(r.started_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))),
+      h("div", {}, h("b", {}, `${t("autoWeekOf")} ${weekLabel(r.week)}`), " · ", h("span", { class: "badge" }, t(`autoSt_${r.status}`)), " · ", h("span", { class: "meta" }, new Date(r.started_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }))),
       r.summary?.error ? h("p", { class: "alert" }, r.summary.error === "no_ai_key" ? t("autoNoKey") : r.summary.error) : null,
       h("ul", { class: "auto-results" }, (r.summary?.results ?? []).filter((x) => x.status !== "no_staff").map(resLine)),
       r.reminders_sent?.length ? h("p", { class: "meta" }, `${t("autoRemindersSent")} : ${r.reminders_sent.map((n) => `+${n} ${t("autoDayShort")}`).join(", ")}`) : null,
-      h("p", { class: "meta" }, r.notified_at ? `${t("autoNoticeSent")} · ${new Date(r.notified_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : r.notify_at ? `${t("autoNoticePlanned")} · ${r.notify_at.replace("T", " ")}` : t("autoNoNotice")));
+      h("p", { class: "meta" }, r.notified_at ? `${t("autoNoticeSent")} · ${new Date(r.notified_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}` : r.notify_at ? `${t("autoNoticePlanned")} · ${r.notify_at.replace("T", " ")}` : t("autoNoNotice")));
     const busy = d.runs.some((r) => r.status === "running");
     const runNow = h("button", { class: "btn", type: "button", disabled: busy || !d.has_ai_key, onClick: async () => {
       if (!(await ask(t("autoRunConfirm").replace("{week}", weekLabel(d.next_week))))) return;
@@ -4435,7 +4435,7 @@ function usagePanel() {
         card("call", t("usageCall"), (x) => `${Math.round((x.units / 60) * 10) / 10} ${t("usageMinutes")}`)),
       d.recent.length ? [h("h3", {}, t("usageRecent")), h("div", { class: "usage-table-wrap" }, h("table", { class: "usage-table" },
         h("thead", {}, h("tr", {}, [t("usageWhen"), t("usageWhat"), "", t("usageQty"), t("usageCost")].map((x) => h("th", {}, x)))),
-        h("tbody", {}, d.recent.map((r) => h("tr", {}, h("td", {}, new Date(r.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })), h("td", {}, what(r)), h("td", { class: "meta" }, r.detail ?? ""), h("td", {}, qty(r)), h("td", {}, r.cost_micro == null ? h("span", { class: "meta" }, t("usagePending")) : usd(r.cost_micro)))))))] : h("p", { class: "meta" }, t("usageNone")),
+        h("tbody", {}, d.recent.map((r) => h("tr", {}, h("td", {}, new Date(r.created_at).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })), h("td", {}, what(r)), h("td", { class: "meta" }, r.detail ?? ""), h("td", {}, qty(r)), h("td", {}, r.cost_micro == null ? h("span", { class: "meta" }, t("usagePending")) : usd(r.cost_micro)))))))] : h("p", { class: "meta" }, t("usageNone")),
       h("p", { class: "meta" }, t("usageNotes")));
   }
   load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
@@ -4657,7 +4657,9 @@ function ingredientsPanel() {
     const dayChips = (set) => h("div", { class: "sup-days", role: "group" }, Array.from({ length: 7 }, (_, i) => i + 1).map((d) => {
       const b = h("button", { type: "button", class: "chip-btn", "aria-pressed": String(set.has(d)), onClick: () => { if (set.has(d)) set.delete(d); else set.add(d); b.setAttribute("aria-pressed", String(set.has(d))); } }, dayLabel(d - 1)); return b; }));
     const orderDays = new Set(os.order_days ?? []), deliveryDays = new Set(os.delivery_days ?? []);
-    const cutoff = h("input", { type: "time", value: os.cutoff ?? "", "aria-label": t("supCutoff") });
+    const cutoffTime = timeField(os.cutoff || "14:00"), cutoffOn = h("input", { type: "checkbox", checked: !!os.cutoff, onChange: () => { cutoffTime.disabled = !cutoffOn.checked; } });
+    cutoffTime.disabled = !os.cutoff;
+    const cutoff = { get value() { return cutoffOn.checked ? cutoffTime.value : ""; } }; // "" = no cut-off
     const offset = h("input", { type: "number", min: "0", max: "14", step: "1", value: String(os.delivery_offset ?? 1), "aria-label": t("supDeliveryOffset") });
     const mode = os.delivery_mode === "days" ? "days" : "offset";
     const offsetRow = h("div", { class: "sup-delivery", hidden: mode !== "offset" }, offset, h("span", {}, t("supDaysAfter")));
@@ -4665,7 +4667,7 @@ function ingredientsPanel() {
     const modeRadios = ["offset", "days"].map((m) => h("label", { class: "check" }, h("input", { type: "radio", name: "sup-delivery-mode", value: m, checked: m === mode, onChange: () => { offsetRow.hidden = m !== "offset"; daysRow.hidden = m !== "days"; } }), h("span", {}, t(m === "offset" ? "supDeliveryOffsetMode" : "supDeliveryDaysMode"))));
     const orderNote = h("input", { value: os.note ?? "", maxLength: 200, "aria-label": t("supOrderNote"), placeholder: t("supOrderNotePh") });
     const settingsPane = h("div", { class: "sup-pane" }, h("p", { class: "meta" }, t("supSettingsHelp")),
-      h("div", { class: "field" }, h("span", {}, t("supOrderDays")), dayChips(orderDays)), h("label", { class: "field" }, h("span", {}, t("supCutoff")), cutoff),
+      h("div", { class: "field" }, h("span", {}, t("supOrderDays")), dayChips(orderDays)), h("div", { class: "field" }, h("span", {}, t("supCutoff")), h("div", { class: "sup-cutoff" }, h("label", { class: "check" }, cutoffOn, h("span", {}, t("supCutoffOn"))), cutoffTime)),
       h("div", { class: "field" }, h("span", {}, t("supDelivery")), ...modeRadios, offsetRow, daysRow), h("label", { class: "field" }, h("span", {}, t("supOrderNote")), orderNote));
     const cardPane = h("div", { class: "sup-pane" }, h("label", { class: "field" }, h("span", {}, t("supName")), name),
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supPhone")), phone), h("label", { class: "field" }, h("span", {}, t("supEmail")), email)),
@@ -4679,7 +4681,7 @@ function ingredientsPanel() {
       histPane.replaceChildren(h("p", { class: "meta" }, t("loading")));
       try {
         const d = await api(`/suppliers/${sp.id}/orders?restaurant=${rid}`);
-        const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
+        const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
         histPane.replaceChildren(h("p", { class: "meta" }, `🏪 ${restoName}`),
           ...(d.orders.length ? d.orders.map((o) => h("div", { class: "card sup-order" }, h("b", {}, stamp(o.placed_at)), h("span", { class: "meta" }, ` · ${orderMethodLabel(o.method)}${o.placed_by ? ` · ${o.placed_by}` : ""}`),
             o.delivery_date ? h("div", { class: "meta" }, `🚚 ${t("ordDelivery")} ${fmtDay(o.delivery_date)}`) : null, o.note ? h("div", { class: "meta" }, o.note) : null,
@@ -5255,7 +5257,7 @@ function staffCard(s, ov) {
   };
   const rowEl = h("button", { class: `staff-row ${s.active === false ? "inactive" : ""}`, type: "button", onClick: open },
     h("span", { class: "who-row" }, summaryAvatar, h("span", { class: `presence ${s.signed_in ? "on" : "off"}`, role: "img", "aria-label": s.signed_in ? t("signedIn") : t("notSignedIn"),
-      title: s.signed_in ? `${t("signedIn")} · ${t("lastActivity")} : ${new Date(s.last_seen_at).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { dateStyle: "short", timeStyle: "short" })}` : t("notSignedIn") }), nameEl), iconBlock,
+      title: s.signed_in ? `${t("signedIn")} · ${t("lastActivity")} : ${new Date(s.last_seen_at).toLocaleString(getLang() === "en" ? "en-CA" : "fr-CA", { dateStyle: "short", timeStyle: "short", hourCycle: "h23" })}` : t("notSignedIn") }), nameEl), iconBlock,
     h("span", { class: "inactive-badge badge" }, t("inactive")),
     s.is_admin ? h("span", { class: "badge" }, t("admin_flag")) : null);
   return rowEl;
