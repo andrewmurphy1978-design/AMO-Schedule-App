@@ -1,4 +1,5 @@
 import { splitName, joinName, shortNames, orderStaff } from "./names.js";
+import { compareOffers } from "./pricing.js";
 import { t, getLang, setLang, locale, roleName, roleIcon, deptIcon } from "./i18n.js";
 import { postGaps, hoursFor, DEFAULT_BOUNDARIES, GRID_KEYS, toMin, fromMin, shiftSpan, resolveTargets, targetWindows, targetAt, coverage, shortages, surpluses } from "./coverage.js";
 import { resolveForDate, ruleMatches, SPECIAL_PRESETS, SEASON_PRESETS, holidaysOn } from "./rules.js";
@@ -2511,21 +2512,30 @@ async function renderInventory(box, restaurantIds) {
 }
 
 // ---- ordering from a supplier: the ways it takes orders, and the buttons for them ----
-/** The inputs of one supplier's product data for an ingredient: product no., replacement nos., price and what the price is for. `c` is edited in place. */
+/** The fields of one supplier's product data for an ingredient, as typed (strings). */
+const codeInit = (c = {}) => ({ p: c.p ?? "", alt: (c.alt ?? []).join(", "), price: c.price ?? "", unit: c.unit ?? "", pack_qty: c.pack_qty ?? "", pack_weight: c.pack_weight ?? "", yield_pct: c.yield_pct ?? "", prep: c.prep ?? "", prep_min: c.prep_min ?? "" });
+/** The inputs of one supplier's product data for an ingredient: product numbers, price and the package it is sold in, and the preparation it needs here. `c` is edited in place. */
 function productCodeFields(c, onChange = () => {}) {
   const inp = (key, props) => h("input", { value: c[key] ?? "", autocomplete: "off", ...props, onInput: (e) => { c[key] = e.target.value; onChange(); } });
+  const dec = (key, step = "any") => inp(key, { type: "number", min: "0", step, inputmode: "decimal" });
+  const two = (a, b) => h("div", { class: "ing-two" }, a, b);
+  const f = (label, el) => h("label", { class: "field" }, h("span", {}, label), el);
   return h("div", { class: "ing-code-fields" },
-    h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCodePreferred")), inp("p", { maxLength: 40 })), h("label", { class: "field" }, h("span", {}, t("ingCodeAlternates")), inp("alt", { maxLength: 200, placeholder: t("ingCodeAltPh") }))),
-    h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingPrice")), inp("price", { type: "number", min: "0", step: "0.01", inputmode: "decimal", placeholder: "0.00" })), h("label", { class: "field" }, h("span", {}, t("ingPriceUnit")), inp("unit", { maxLength: 20, list: "ing-units", placeholder: t("ingPriceUnitPh") }))));
+    two(f(t("ingCodePreferred"), inp("p", { maxLength: 40 })), f(t("ingCodeAlternates"), inp("alt", { maxLength: 200, placeholder: t("ingCodeAltPh") }))),
+    two(f(t("ingPrice"), dec("price", "0.01")), f(t("ingPriceUnit"), inp("unit", { maxLength: 20, list: "ing-units", placeholder: t("ingPriceUnitPh") }))),
+    two(f(t("ingPackWeight"), dec("pack_weight")), f(t("ingPackQty"), dec("pack_qty"))),
+    two(f(t("ingYield"), dec("yield_pct")), f(t("ingPrepMin"), dec("prep_min"))),
+    f(t("ingPrepTask"), inp("prep", { maxLength: 60, placeholder: t("ingPrepPh") })));
 }
 /** The saved form of the fields above. */
-const codeValue = (c) => ({ p: (c.p ?? "").trim(), alt: (c.alt ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean), price: Number(String(c.price ?? "").replace(",", ".")) || null, unit: (c.unit ?? "").trim() });
-const codeFilled = (v) => !!(v.p || v.alt.length || v.price);
+const numOrNull = (v) => { const n = Number(String(v ?? "").replace(",", ".")); return Number.isFinite(n) && n > 0 ? n : null; };
+const codeValue = (c) => ({ p: (c.p ?? "").trim(), alt: (c.alt ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean), price: numOrNull(c.price), unit: (c.unit ?? "").trim(), pack_qty: numOrNull(c.pack_qty), pack_weight: numOrNull(c.pack_weight), yield_pct: numOrNull(c.yield_pct), prep: (c.prep ?? "").trim(), prep_min: numOrNull(c.prep_min) });
+const codeFilled = (v) => !!(v.p || v.alt.length || v.price || v.pack_weight || v.pack_qty || v.prep);
 const ORDER_METHOD_ICON = { call: "📞", email: "✉️", portal: "🔐", website: "🌐", api: "🔌" };
 const orderMethodLabel = (m) => `${ORDER_METHOD_ICON[m] ?? ""} ${t(`ordMeth_${m}`)}`;
 const supplierMethods = (sp) => (sp?.order_methods?.length ? sp.order_methods : sp?.order_method ? [sp.order_method] : []);
 const fmtDay = (ymd) => new Date(`${ymd}T12:00:00`).toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "short" });
-const codeLine = (c) => (c && (c.p || c.alt?.length || c.price) ? [c.p ? `#${c.p}` : null, c.alt?.length ? `${t("ordSubstitutes")} ${c.alt.map((a) => `#${a}`).join(", ")}` : null, c.price ? `${Number(c.price).toFixed(2)} $${c.unit ? ` / ${c.unit}` : ""}` : null].filter(Boolean).join(" · ") : "");
+const codeLine = (c) => (c && (c.p || c.alt?.length || c.price || c.prep) ? [c.p ? `#${c.p}` : null, c.alt?.length ? `${t("ordSubstitutes")} ${c.alt.map((a) => `#${a}`).join(", ")}` : null, c.price ? `${Number(c.price).toFixed(2)} $${c.unit ? ` / ${c.unit}` : ""}${c.pack_weight ? ` (${c.pack_weight} kg)` : ""}` : null, c.prep ? `🔪 ${c.prep}` : null].filter(Boolean).join(" · ") : "");
 /** "Next order: Thursday before 2:00 pm · delivery Friday" for a supplier, from the window the server worked out. */
 function windowNode(sp) {
   const w = sp.window;
@@ -2585,6 +2595,8 @@ function invoiceResult(inv, onChange) {
   const n = (st) => cmp.rows.filter((r) => r.status === st).length;
   box.append(h("p", { class: "inv-counts" }, `✅ ${n("ok")} · 🔁 ${n("substitute")} · ➕ ${n("extra")} · ❓ ${n("unknown")} · ❌ ${cmp.missing.length}`));
   if (!cmp.had_order) box.append(h("p", { class: "meta" }, t("invcNoOrder")));
+  const toPrep = cmp.rows.filter((r) => r.prep && (r.status === "ok" || r.status === "substitute" || r.status === "extra"));
+  if (toPrep.length) box.append(h("div", { class: "inv-prep" }, h("b", {}, `🔪 ${t("invcToPrep")}`), h("ul", {}, toPrep.map((r) => h("li", {}, `${r.ingredient} — ${r.prep}`)))));
   const icon = { ok: "✅", substitute: "🔁", extra: "➕", unknown: "❓" };
   box.append(h("ul", { class: "inv-lines" },
     ...cmp.missing.map((m) => h("li", { class: "bad" }, `❌ ${m.name}${m.note ? ` (${m.note})` : ""} — ${t("invcMissing")}`)),
@@ -4561,7 +4573,8 @@ function ingredientsPanel() {
   const catLabel = (v) => { const c = INGREDIENT_CATEGORIES.find(([x]) => x === v); return c ? t(c[1]) : t("ingNoCategory"); };
   const place = (v) => `${LOCATION_INFO[v]?.[0] ?? ""} ${t(LOCATION_INFO[v]?.[1] ?? "locFridge")}`;
   async function load() {
-    const [d, sup] = await Promise.all([api(`/admin/ingredients?restaurant=${st.restaurant}`), api("/admin/suppliers")]);
+    const [d, sup, lr] = await Promise.all([api(`/admin/ingredients?restaurant=${st.restaurant}`), api("/admin/suppliers"), api("/admin/labor-rate")]);
+    st.laborRate = lr.rate;
     st.suppliers = sup;
     st.groups = d.groups.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i, components: [...(i.components ?? [])], supplier_ids: [...(i.supplier_ids ?? [])] })) })); st.posts = d.posts; draw();
   }
@@ -4653,13 +4666,27 @@ function ingredientsPanel() {
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
     // the supplier's product numbers: the preferred one and the ones that can replace it, for each supplier ticked above
-    const codesBy = {}; for (const [sid, c] of Object.entries(cur.codes ?? {})) codesBy[sid] = { p: c.p ?? "", alt: (c.alt ?? []).join(", "), price: c.price ?? "", unit: c.unit ?? "" };
+    const codesBy = {}; for (const [sid, c] of Object.entries(cur.codes ?? {})) codesBy[sid] = codeInit(c);
     const codesBox = h("div", { class: "ing-codes" });
+    const compareBox = h("div", { class: "ing-compare" });
+    // the same ingredient at each supplier, on the same basis (per usable kg, preparation counted)
+    const drawCompare = () => {
+      const offers = st.suppliers.filter((x) => supSel.has(x.id)).map((x) => ({ id: x.id, name: x.name, ...codeValue(codesBy[x.id] ?? {}) }));
+      const r = compareOffers(offers, st.laborRate);
+      if (offers.filter((o) => o.price).length < 1) { compareBox.replaceChildren(); return; }
+      const cost = (row) => row.cost;
+      compareBox.replaceChildren(h("h4", {}, `⚖ ${t("ingCompareTitle")}`), h("p", { class: "meta" }, `${t(`ingBasis_${r.basis}`)}${st.laborRate ? ` · ${t("ingLabor")} ${st.laborRate} $/h` : ` · ${t("ingNoLabor")}`}`),
+        h("div", { class: "usage-table-wrap" }, h("table", { class: "usage-table ing-cmp" },
+          h("thead", {}, h("tr", {}, [t("ingCmpSupplier"), t("ingCmpPack"), t("ingCmpValue"), t("ingCmpPrep")].map((x) => h("th", {}, x)))),
+          h("tbody", {}, r.rows.map((row) => h("tr", { class: row.best ? "best" : "" }, h("td", {}, `${row.best ? "🏆 " : ""}${row.name}`), h("td", {}, cost(row) ? `${money2(cost(row).price)}${offers.find((o) => o.id === row.id)?.unit ? ` / ${offers.find((o) => o.id === row.id).unit}` : ""}` : "—"),
+            h("td", {}, row.value !== null ? `${money2(row.value)}${r.basis === "kg" ? " / kg" : r.basis === "unit" ? ` / ${t("ingCmpUnit")}` : ""}` : "—"),
+            h("td", {}, row.prep ? `🔪 ${row.prep}${cost(row)?.prepMin ? ` · ${cost(row).prepMin} min` : ""}` : t("ingReady"))))))));
+    };
     const drawCodes = () => {
       const sel = st.suppliers.filter((x) => supSel.has(x.id));
       codesBox.replaceChildren(...(sel.length ? [h("span", {}, `🔢 ${t("ingCodesTitle")}`), h("p", { class: "meta" }, t("ingCodesHelp")), ...sel.map((x) => {
-        const c = (codesBy[x.id] ??= { p: "", alt: "", price: "", unit: "" });
-        return h("div", { class: "ing-code-row" }, h("b", {}, x.name), productCodeFields(c));
+        const c = (codesBy[x.id] ??= codeInit());
+        return h("div", { class: "ing-code-row" }, h("b", {}, x.name), productCodeFields(c, drawCompare));
       })] : []));
     };
 
@@ -4674,8 +4701,8 @@ function ingredientsPanel() {
     const homePane = h("div", { class: "sup-pane" }, h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox);
     const packPane = h("div", { class: "sup-pane" }, packBox);
     const supPane = h("div", { class: "sup-pane" },
-      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); drawCodes(); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
-      codesBox);
+      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); drawCodes(); drawCompare(); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
+      codesBox, compareBox);
     const ingPanes = { general: generalPane, home: homePane, pack: packPane, suppliers: supPane };
     const ingTabBar = h("div", { class: "dlg-tabs sup-tabs", role: "tablist" });
     const showIngTab = (id) => { for (const [k, el] of Object.entries(ingPanes)) el.hidden = k !== id; ingTabBar.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === id))); };
@@ -4720,7 +4747,7 @@ function ingredientsPanel() {
         } }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: close }, t("cancel")),
         h("button", { class: "btn primary", type: "submit" }, t("save")))));
-    sync(); drawCodes(); showIngTab("general");
+    sync(); drawCodes(); drawCompare(); showIngTab("general");
     dlg.addEventListener("close", () => { done = true; }, { once: true });
     dlg.showModal();
   }
@@ -4835,14 +4862,14 @@ function ingredientsPanel() {
     }
     // the ingredients this supplier delivers, with its product numbers (changes are saved with the dialog's Save button)
     const key = (n) => n.trim().toLowerCase();
-    const linked = new Map(unique().filter((e) => sp && e.supplier_ids?.includes(sp.id)).map((e) => [key(e.name), { name: e.name, location: e.location, p: e.codes?.[sp.id]?.p ?? "", alt: (e.codes?.[sp.id]?.alt ?? []).join(", "), price: e.codes?.[sp.id]?.price ?? "", unit: e.codes?.[sp.id]?.unit ?? "" }]));
+    const linked = new Map(unique().filter((e) => sp && e.supplier_ids?.includes(sp.id)).map((e) => [key(e.name), { name: e.name, location: e.location, ...codeInit(e.codes?.[sp.id]) }]));
     let ingDirty = false;
     const ingPane = h("div", { class: "sup-pane" });
     const drawIng = () => {
       const rows = [...linked.values()].sort((a, b) => a.name.localeCompare(b.name, getLang()));
       const addable = unique().filter((e) => !linked.has(key(e.name))).sort((a, b) => a.name.localeCompare(b.name, getLang()));
       const pick = h("select", { "aria-label": t("supIngAdd") }, h("option", { value: "" }, `+ ${t("supIngAdd")}`), addable.map((e) => h("option", { value: key(e.name) }, e.name)));
-      pick.addEventListener("change", () => { const e = addable.find((x) => key(x.name) === pick.value); if (!e) return; linked.set(key(e.name), { name: e.name, location: e.location, p: "", alt: "", price: "", unit: "" }); ingDirty = true; drawIng(); });
+      pick.addEventListener("change", () => { const e = addable.find((x) => key(x.name) === pick.value); if (!e) return; linked.set(key(e.name), { name: e.name, location: e.location, ...codeInit() }); ingDirty = true; drawIng(); });
       ingPane.replaceChildren(h("p", { class: "meta" }, t("supIngHelp")), addable.length ? pick : null,
         ...(rows.length ? rows.map((r) => h("div", { class: "ing-code-row" }, h("div", { class: "sup-ing-head" }, h("b", {}, `${LOCATION_INFO[r.location]?.[0] ?? ""} ${r.name}`),
           h("button", { type: "button", class: "icon-btn", "aria-label": t("supIngRemove"), title: t("supIngRemove"), onClick: () => { linked.delete(key(r.name)); ingDirty = true; drawIng(); } }, "✕")),
@@ -4892,7 +4919,10 @@ function ingredientsPanel() {
   }
   function viewSuppliers() {
     const count = (id) => unique().filter((e) => e.supplier_ids?.includes(id)).length;
-    return [h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
+    const rate = h("input", { type: "number", min: "0", step: "0.5", inputmode: "decimal", value: st.laborRate ?? "", placeholder: "0", "aria-label": t("ingLaborRate"), onChange: async () => {
+      try { const r = await api("/admin/labor-rate", { method: "PUT", body: { rate: rate.value } }); st.laborRate = r.rate; toast(t("saved")); } catch (e) { toast(errorText(e)); } } });
+    return [h("label", { class: "field labor-rate" }, h("span", {}, `${t("ingLaborRate")} ($/h)`), rate, h("small", { class: "meta" }, t("ingLaborHelp"))),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
       st.suppliers.length ? h("div", { class: "ing-lines tree" }, st.suppliers.map((sp) => h("div", { class: "ing-line" }, h("b", {}, sp.name),
         h("span", { class: "ing-badges" }, ...supplierMethods(sp).map((m) => h("span", { class: "ing-badge sup" }, orderMethodLabel(m))), sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
         sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];

@@ -49,10 +49,10 @@ export async function extractInvoice(apiKey: string, base64: string, mime: strin
 }
 
 // ---------- matching and comparing ----------
-export interface CatalogItem { name: string; p: string | null; alt: string[]; price: number | null; unit: string | null }
+export interface CatalogItem { name: string; p: string | null; alt: string[]; price: number | null; unit: string | null; prep?: string | null }
 export interface OrderedItem { name: string; note: string | null }
 export type RowStatus = "ok" | "substitute" | "extra" | "unknown";
-export interface ComparedRow { line: InvoiceLine; status: RowStatus; ingredient: string | null; via: "code" | "alt" | "name" | null }
+export interface ComparedRow { line: InvoiceLine; status: RowStatus; ingredient: string | null; via: "code" | "alt" | "name" | null; prep?: string | null }
 export interface PriceChange { ingredient: string; old: number | null; new: number; unit: string | null }
 export interface Comparison { rows: ComparedRow[]; missing: OrderedItem[]; price_changes: PriceChange[]; had_order: boolean }
 
@@ -84,7 +84,7 @@ export function compareInvoice(lines: InvoiceLine[], catalog: CatalogItem[], ord
     if (!hit) { rows.push({ line, status: "unknown", ingredient: null, via: null }); continue; }
     matchedKeys.add(norm(hit.name));
     const wasOrdered = ordered === null || orderedKeys.has(norm(hit.name));
-    rows.push({ line, status: via === "alt" ? "substitute" : wasOrdered ? "ok" : "extra", ingredient: hit.name, via });
+    rows.push({ line, status: via === "alt" ? "substitute" : wasOrdered ? "ok" : "extra", ingredient: hit.name, via, prep: hit.prep ?? null });
     if (line.unit_price && line.unit_price > 0 && (hit.price === null || Math.abs(hit.price - line.unit_price) > 0.004) && !changes.some((c) => norm(c.ingredient) === norm(hit!.name))) changes.push({ ingredient: hit.name, old: hit.price, new: line.unit_price, unit: line.unit ?? hit.unit });
   }
   const missing = (ordered ?? []).filter((o) => !matchedKeys.has(norm(o.name)));

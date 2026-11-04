@@ -2932,7 +2932,13 @@ function cleanCodes(raw: unknown): string | null {
     const pr = typeof rr.price === "string" ? Number(rr.price.replace(",", ".")) : rr.price;
     const price = typeof pr === "number" && Number.isFinite(pr) && pr > 0 && pr <= 1_000_000 ? Math.round(pr * 100) / 100 : null;
     const unit = typeof rr.unit === "string" && rr.unit.trim() ? rr.unit.trim().slice(0, 20) : null;
-    if (p || alt.length || price) out[k] = { p, alt: [...new Set(alt)], price, unit: price ? unit : null };
+    // how this supplier's package is made: units per package, its weight (kg), the usable share (a whole lettuce is trimmed), and the preparation it needs here
+    const rx = r as Record<string, unknown>;
+    const pos = (v: unknown, max: number, dec: number): number | null => { const n = typeof v === "string" ? Number(v.replace(",", ".")) : v; return typeof n === "number" && Number.isFinite(n) && n > 0 && n <= max ? Math.round(n * 10 ** dec) / 10 ** dec : null; };
+    const pack_qty = pos(rx.pack_qty, 100_000, 3), pack_weight = pos(rx.pack_weight, 100_000, 3), prep_min = pos(rx.prep_min, 10_000, 1);
+    const yp = pos(rx.yield_pct, 100, 1), yield_pct = yp !== null && yp < 100 ? yp : null;
+    const prep = typeof rx.prep === "string" && rx.prep.trim() ? rx.prep.trim().slice(0, 60) : null;
+    if (p || alt.length || price || pack_qty || pack_weight || prep) out[k] = { p, alt: [...new Set(alt)], price, unit: price || pack_qty || pack_weight ? unit : null, pack_qty, pack_weight, yield_pct, prep, prep_min: prep ? prep_min : null };
   }
   return Object.keys(out).length ? JSON.stringify(out) : null;
 }
@@ -3013,6 +3019,16 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
 });
 
 // Suppliers of the company (administrators edit them; an ingredient can come from several).
+// The cost of an hour of preparation ($/h): used to compare a ready-to-use product with one that has to be prepared at the restaurant.
+app.get("/api/admin/labor-rate", requireAdmin, async (c) => { const v = Number(await getSetting(c.env.DB, c.get("me").client_id, "labor_rate")); return c.json({ rate: Number.isFinite(v) && v > 0 ? v : null }); });
+app.put("/api/admin/labor-rate", requireAdmin, async (c) => {
+  const b = await c.req.json<{ rate?: number | string | null }>().catch(() => ({} as { rate?: number | string | null }));
+  const cid = c.get("me").client_id, n = typeof b.rate === "string" ? Number(b.rate.replace(",", ".")) : b.rate;
+  if (n === null || n === undefined || n === 0 || (typeof b.rate === "string" && !b.rate.trim())) { await delSettingStmt(c.env.DB, cid, "labor_rate").run(); return c.json({ rate: null }); }
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > 1000) return c.json({ error: "invalid_rate" }, 400);
+  await putSettingStmt(c.env.DB, cid, "labor_rate", String(Math.round(n * 100) / 100)).run();
+  return c.json({ rate: Math.round(n * 100) / 100 });
+});
 const supplierView = (r: Record<string, unknown>) => ({ ...r, api_key_set: r.api_key_set === 1, order_methods: (() => { try { return cleanMethods(JSON.parse(String(r.order_methods ?? "[]"))); } catch { return []; } })(), order_settings: parseOrderSettings(r.order_settings as string | null) });
 app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes, order_method, order_methods, portal_url, website_url, order_settings, customer_number, api_url, api_user, api_key IS NOT NULL AND api_key != '' AS api_key_set FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all<Record<string, unknown>>()).results.map(supplierView)));
 app.put("/api/admin/suppliers", requireAdmin, async (c) => {
@@ -3115,7 +3131,7 @@ app.get("/api/inventory/:id", async (c) => {
 });
 
 // ---------- Supplier orders: product numbers, recording an order, history ----------
-type ProductCode = { p: string | null; alt: string[]; price?: number | null; unit?: string | null };
+type ProductCode = { p: string | null; alt: string[]; price?: number | null; unit?: string | null; pack_qty?: number | null; pack_weight?: number | null; yield_pct?: number | null; prep?: string | null; prep_min?: number | null };
 /** The supplier product numbers of a restaurant's ingredients: ingredient name (lower case) -> { supplier id -> numbers }. */
 async function productCodes(db: D1Database, rid: number): Promise<Map<string, Record<string, ProductCode>>> {
   const rows = (await db.prepare("SELECT lower(i.name) AS k, max(i.codes) AS codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name)").bind(rid).all<{ k: string; codes: string | null }>()).results;
@@ -3183,7 +3199,7 @@ app.post("/api/suppliers/:id/invoices", async (c) => {
   let ordered: { name: string; note: string | null }[] | null = null;
   if (order) { try { ordered = (JSON.parse(order.items) as { name: string; note: string | null }[]).map((i) => ({ name: i.name, note: i.note ?? null })); } catch { ordered = []; } }
   const catalog = (await db.prepare("SELECT min(i.name) AS name, max(i.codes) AS codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id JOIN ingredient_suppliers l ON l.ingredient_id = i.id WHERE l.supplier_id = ? AND g.restaurant_id = ? GROUP BY lower(i.name)").bind(sid, rid).all<{ name: string; codes: string | null }>()).results
-    .map((r) => { let cc: ProductCode | undefined; try { cc = (JSON.parse(r.codes ?? "{}") as Record<string, ProductCode>)[String(sid)]; } catch { /* none */ } return { name: r.name, p: cc?.p ?? null, alt: cc?.alt ?? [], price: cc?.price ?? null, unit: cc?.unit ?? null }; });
+    .map((r) => { let cc: ProductCode | undefined; try { cc = (JSON.parse(r.codes ?? "{}") as Record<string, ProductCode>)[String(sid)]; } catch { /* none */ } return { name: r.name, p: cc?.p ?? null, alt: cc?.alt ?? [], price: cc?.price ?? null, unit: cc?.unit ?? null, prep: cc?.prep ?? null }; });
   const key = await anthropicKey(c.env, me.client_id);
   let usage: Record<string, number> | null = null, usedModel = "";
   const b64 = bytesToBase64(bytes), filename = decodeURIComponent(c.req.header("X-Filename") ?? "invoice").replace(/[^\w .()-]/g, "_").slice(0, 120);
