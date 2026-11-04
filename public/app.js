@@ -2485,6 +2485,45 @@ async function renderInventory(box, restaurantIds) {
   paintProgress(); paintChips(); paintRows();
 }
 
+// ---- ordering from a supplier: the ways it takes orders, and the buttons for them ----
+const ORDER_METHOD_ICON = { call: "📞", email: "✉️", portal: "🔐", website: "🌐", api: "🔌" };
+const orderMethodLabel = (m) => `${ORDER_METHOD_ICON[m] ?? ""} ${t(`ordMeth_${m}`)}`;
+const supplierMethods = (sp) => (sp?.order_methods?.length ? sp.order_methods : sp?.order_method ? [sp.order_method] : []);
+const fmtDay = (ymd) => new Date(`${ymd}T12:00:00`).toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "short" });
+const codeLine = (c) => (c && (c.p || c.alt?.length) ? [c.p ? `#${c.p}` : null, c.alt?.length ? `${t("ordSubstitutes")} ${c.alt.map((a) => `#${a}`).join(", ")}` : null].filter(Boolean).join(" · ") : "");
+/** "Next order: Thursday before 2:00 pm · delivery Friday" for a supplier, from the window the server worked out. */
+function windowNode(sp) {
+  const w = sp.window;
+  if (!sp.order_settings?.order_days?.length) return h("p", { class: "meta" }, `📅 ${t("ordNoSchedule")}`);
+  if (!w) return null;
+  return h("p", { class: "ord-window" }, `📅 ${t("ordNext")} : ${fmtDay(w.order_date)}${w.deadline ? ` ${t("ordBefore")} ${w.deadline}` : ""}${w.delivery_date ? ` · 🚚 ${t("ordDelivery")} ${fmtDay(w.delivery_date)}` : ""}`,
+    w.missed_today ? h("span", { class: "inv-low" }, ` ⚠ ${t("ordMissedToday")}`) : null);
+}
+/** The buttons to place the open order of a supplier: e-mail, assisted call, portal, web site, and "mark as ordered". */
+function orderActions({ sp, items, rid, canOrder, reload }) {
+  const methods = supplierMethods(sp), out = [];
+  const lines = () => items.map((o) => `${o.name}${o.codes?.[sp.id]?.p ? ` ${t("ordNumber")} ${o.codes[sp.id].p}` : ""}${o.note ? ` (${o.note})` : ""}`).join(", ");
+  if (sp.email && canOrder && (methods.includes("email") || !methods.length)) out.push(h("button", { class: "btn small", type: "button", onClick: async (e) => {
+    if (!(await ask(t("orderEmailConfirm").replace("{n}", items.length).replace("{s}", sp.name)))) return;
+    const b = e.currentTarget; b.disabled = true;
+    try { await api("/orders/email", { method: "POST", body: { restaurant_id: rid, supplier_id: sp.id } }); toast(t("orderEmailSent")); reload(); }
+    catch (err) { b.disabled = false; toast(err.body?.error === "email_not_configured" ? t("orderEmailNotConfigured") : err.body?.error === "send_failed" ? `${t("orderEmailFailed")}${err.body.detail ? ` : ${err.body.detail}` : ""}` : errorText(err)); }
+  } }, `✉️ ${t("orderEmailBtn")}`));
+  if (methods.includes("call") && sp.phone && state.me?.voice) out.push(h("button", { class: "btn small", type: "button", onClick: () => {
+    state.voicePrefill = { name: sp.name, phone: sp.phone, text: `${t("orderCallIntro").replace("{n}", sp.customer_number || "—")} ${lines()}.` }; state.voiceTab = "call"; state.voiceCall = null; state.view = "voice"; render();
+  } }, `📞 ${t("orderCallAssist")}`));
+  if (methods.includes("portal") && sp.portal_url) out.push(h("a", { class: "btn small", href: sp.portal_url, target: "_blank", rel: "noopener noreferrer" }, `🔐 ${t("ordOpenPortal")}`));
+  if (methods.includes("website") && sp.website_url) out.push(h("a", { class: "btn small", href: sp.website_url, target: "_blank", rel: "noopener noreferrer" }, `🌐 ${t("ordOpenSite")}`));
+  if (canOrder && items.length) {
+    const how = h("select", { "aria-label": t("ordHow") }, [...new Set([...methods, "call", "email", "portal", "website"])].map((m) => h("option", { value: m }, orderMethodLabel(m))));
+    out.push(h("span", { class: "ord-mark" }, how, h("button", { class: "btn small primary", type: "button", onClick: async () => {
+      if (!(await ask(t("ordMarkConfirm").replace("{n}", items.length).replace("{s}", sp.name)))) return;
+      try { await api("/orders/place", { method: "POST", body: { restaurant_id: rid, supplier_id: sp.id, method: how.value, item_ids: items.map((o) => o.id) } }); toast(t("ordMarked")); reload(); } catch (err) { toast(errorText(err)); }
+    } }, `✔ ${t("ordMark")}`)));
+  }
+  return out;
+}
+
 // "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.
 async function renderOrders(box, restaurantIds) {
   const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
@@ -2526,7 +2565,7 @@ async function renderOrders(box, restaurantIds) {
   const supName = (id) => d.suppliers.find((x) => x.id === id)?.name;
   const row = (o, supplierId) => h("div", { class: "order-row" },
     h("div", {}, h("b", {}, o.name), o.note ? h("small", { class: "meta" }, ` · ${o.note}`) : null,
-      h("small", { class: "meta", style: "display:block" }, `${t("orderBy")} ${o.reported_by ?? "—"} · ${when(o.reported_at)}${o.supplier_ids.filter((s) => s !== supplierId).length ? ` · ${t("orderAlso")} ${o.supplier_ids.filter((s) => s !== supplierId).map(supName).join(", ")}` : ""}`)),
+      h("small", { class: "meta", style: "display:block" }, `${t("orderBy")} ${o.reported_by ?? "—"} · ${when(o.reported_at)}${supplierId && o.codes?.[supplierId] && codeLine(o.codes[supplierId]) ? ` · ${codeLine(o.codes[supplierId])}` : ""}${o.supplier_ids.filter((s) => s !== supplierId).length ? ` · ${t("orderAlso")} ${o.supplier_ids.filter((s) => s !== supplierId).map(supName).join(", ")}` : ""}`)),
     d.can_order ? h("button", { class: "btn small primary", type: "button", onClick: async () => { try { await api(`/orders/${o.id}/ordered`, { method: "PUT", body: { supplier_id: supplierId } }); reload(); } catch (e) { toast(errorText(e)); } } }, t("orderDone")) : null,
     h("button", { class: "icon-btn", type: "button", "aria-label": t("delete"), onClick: async () => { if (!(await ask(t("orderCancelConfirm")))) return; try { await api(`/orders/${o.id}`, { method: "DELETE" }); reload(); } catch (e) { toast(errorText(e)); } } }, "✕"));
   const groups = [...d.suppliers.map((sp) => ({ sp, items: d.open.filter((o) => o.supplier_ids.includes(sp.id)) })), { sp: null, items: d.open.filter((o) => !o.supplier_ids.length) }].filter((g) => g.items.length);
@@ -2534,9 +2573,9 @@ async function renderOrders(box, restaurantIds) {
     restos.length > 1 ? h("div", { class: "field", style: "max-width:320px" }, h("span", {}, t("restaurant")), restaurantSelect({ list: restos, value: rid, onChange: (id) => { state.restockRestaurant = id; render(); } })) : null,
     h("section", { class: "card order-report" }, h("h3", {}, `🛒 ${t("orderReport")}`), h("div", { class: "order-form" }, combo, note, h("button", { class: "btn primary", type: "button", onClick: report }, t("orderAddBtn")))),
     h("h3", { class: "restock-title" }, `${t("orderOpen")}${d.open.length ? ` · ${d.open.length}` : ""}`),
-    ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone"), g.sp?.order_method ? h("small", { class: "meta" }, ` · ${{ call: "📞", email: "✉️", api: "🔌" }[g.sp.order_method]} ${t({ call: "supMethodCall", email: "supMethodEmail", api: "supMethodApi" }[g.sp.order_method])}`) : null, g.sp?.customer_number ? h("small", { class: "meta" }, ` · ${t("supClientShort")} ${g.sp.customer_number}`) : null),
-      g.sp?.email && g.sp && d.can_order ? h("button", { class: "btn small", type: "button", onClick: async (e) => { if (!(await ask(t("orderEmailConfirm").replace("{n}", g.items.length).replace("{s}", g.sp.name)))) return; e.currentTarget.disabled = true; try { await api("/orders/email", { method: "POST", body: { restaurant_id: rid, supplier_id: g.sp.id } }); toast(t("orderEmailSent")); reload(); } catch (err) { e.currentTarget.disabled = false; toast(err.body?.error === "email_not_configured" ? t("orderEmailNotConfigured") : err.body?.error === "send_failed" ? `${t("orderEmailFailed")}${err.body.detail ? ` : ${err.body.detail}` : ""}` : errorText(err)); } } }, `✉️ ${t("orderEmailBtn")}`) : null,
-      g.sp?.order_method === "call" && g.sp.phone && state.me?.voice ? h("button", { class: "btn small", type: "button", onClick: () => { state.voicePrefill = { name: g.sp.name, phone: g.sp.phone, text: `${t("orderCallIntro").replace("{n}", g.sp.customer_number || "—")} ${g.items.map((o) => o.name + (o.note ? ` (${o.note})` : "")).join(", ")}.` }; state.voiceTab = "call"; state.voiceCall = null; state.view = "voice"; render(); } }, `📞 ${t("orderCallAssist")}`) : null,
+    ...(groups.length ? groups.map((g) => h("section", { class: "card order-group" }, h("h3", {}, g.sp ? `🚚 ${g.sp.name}` : t("supNone"), g.sp && supplierMethods(g.sp).length ? h("small", { class: "meta" }, ` · ${supplierMethods(g.sp).map(orderMethodLabel).join(" · ")}`) : null, g.sp?.customer_number ? h("small", { class: "meta" }, ` · ${t("supClientShort")} ${g.sp.customer_number}`) : null),
+      g.sp ? windowNode(g.sp) : null,
+      g.sp ? h("div", { class: "ord-actions" }, ...orderActions({ sp: g.sp, items: g.items, rid, canOrder: d.can_order, reload })) : null,
       g.sp && (g.sp.phone || g.sp.email) ? h("p", { class: "meta" }, g.sp.phone ? h("a", { href: `tel:${g.sp.phone}` }, `📞 ${g.sp.phone}`) : null, g.sp.phone && g.sp.email ? " · " : "", g.sp.email ? h("a", { href: `mailto:${g.sp.email}` }, `✉️ ${g.sp.email}`) : null) : null,
       g.items.map((o) => row(o, g.sp?.id ?? null)))) : [h("p", { class: "meta" }, t("orderEmpty"))]),
     d.done.length ? h("details", { class: "order-done" }, h("summary", {}, t("orderRecent")), d.done.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${t("orderOrderedAt")} ${when(o.ordered_at)}${o.supplier ? ` · ${o.supplier}` : ""}`)))) : null);
@@ -4493,17 +4532,30 @@ function ingredientsPanel() {
     // how it is packaged and counted (used by the Inventory screen)
     const iv = cur.inv ?? {};
     const ivIn = (key, extra = {}) => h("input", { value: iv[key] ?? "", "aria-label": t(`invF_${key}`), autocomplete: "off", ...extra });
-    const ivf = { family: ivIn("family", { maxLength: 60, list: "ing-families" }), sku: ivIn("sku", { maxLength: 40 }), base_unit: ivIn("base_unit", { maxLength: 20, list: "ing-units" }), pack_unit: ivIn("pack_unit", { maxLength: 20, list: "ing-units" }),
+    const ivf = { family: ivIn("family", { maxLength: 60, list: "ing-families" }), base_unit: ivIn("base_unit", { maxLength: 20, list: "ing-units" }), pack_unit: ivIn("pack_unit", { maxLength: 20, list: "ing-units" }),
       pack_qty: ivIn("pack_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_weight: ivIn("pack_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }), unit_weight: ivIn("unit_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }),
       min_qty: ivIn("min_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_cost: ivIn("pack_cost", { type: "number", min: "0", step: "0.01", inputmode: "decimal" }) };
     const families = [...new Set(st.groups.flatMap((g) => g.items.map((i) => i.inv?.family)).filter(Boolean))];
     const lab = (k) => h("label", { class: "field" }, h("span", {}, t(`invF_${k}`)), ivf[k]);
     const packBox = h("details", { class: "ing-pack", open: Object.values(iv).some((v) => v) }, h("summary", {}, `📦 ${t("ingPackTitle")}`), h("p", { class: "meta" }, t("ingPackHelp")),
       h("datalist", { id: "ing-families" }, families.map((f) => h("option", { value: f }))),
-      lab("family"), h("div", { class: "ing-two" }, lab("base_unit"), lab("sku")), h("div", { class: "ing-two" }, lab("pack_unit"), lab("pack_qty")),
+      lab("family"), lab("base_unit"), h("div", { class: "ing-two" }, lab("pack_unit"), lab("pack_qty")),
       h("div", { class: "ing-two" }, lab("pack_weight"), lab("unit_weight")), h("div", { class: "ing-two" }, lab("min_qty"), lab("pack_cost")));
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
+    // the supplier's product numbers: the preferred one and the ones that can replace it, for each supplier ticked above
+    const codesBy = {}; for (const [sid, c] of Object.entries(cur.codes ?? {})) codesBy[sid] = { p: c.p ?? "", alt: (c.alt ?? []).join(", ") };
+    const codesBox = h("div", { class: "ing-codes" });
+    const drawCodes = () => {
+      const sel = st.suppliers.filter((x) => supSel.has(x.id));
+      codesBox.replaceChildren(...(sel.length ? [h("span", {}, `🔢 ${t("ingCodesTitle")}`), h("p", { class: "meta" }, t("ingCodesHelp")), ...sel.map((x) => {
+        const c = (codesBy[x.id] ??= { p: "", alt: "" });
+        return h("div", { class: "ing-code-row" }, h("b", {}, x.name), h("div", { class: "ing-two" },
+          h("label", { class: "field" }, h("span", {}, t("ingCodePreferred")), h("input", { value: c.p, maxLength: 40, autocomplete: "off", onInput: (e) => { c.p = e.target.value; } })),
+          h("label", { class: "field" }, h("span", {}, t("ingCodeAlternates")), h("input", { value: c.alt, maxLength: 200, autocomplete: "off", placeholder: t("ingCodeAltPh"), onInput: (e) => { c.alt = e.target.value; } }))));
+      })] : []));
+    };
+
     const sync = () => { thawRow.hidden = loc.value !== "freezer"; fopenRow.hidden = loc.value !== "backstore"; homeBox.hidden = !home.checked; if (!home.checked) return; drawComps(); drawQty(); };
     let done = false; const close = () => { if (!done) { done = true; dlg.close(); } };
     dlg.replaceChildren(h("form", { class: "modal-body ing-dialog", onSubmit: async (e) => {
@@ -4517,7 +4569,8 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const fields = { inv: Object.fromEntries(Object.entries(ivf).map(([k, el]) => [k, el.value.trim()])), name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
+        const codes = Object.fromEntries([...supSel].map((sid) => [sid, { p: (codesBy[sid]?.p ?? "").trim(), alt: (codesBy[sid]?.alt ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean) }]).filter(([, c]) => c.p || c.alt.length));
+        const fields = { codes, inv: Object.fromEntries(Object.entries(ivf).map(([k, el]) => [k, el.value.trim()])), name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
           portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
           const want = gboxes[gi].checked, idx = g.items.findIndex((i) => old && same(i.name, old));
@@ -4537,7 +4590,8 @@ function ingredientsPanel() {
       thawRow, fopenRow,
       h("label", { class: "check" }, home, h("span", {}, `🏠 ${t("ingHomemade")}`)), homeBox,
       packBox,
-      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
+      h("div", { class: "field" }, h("span", {}, `🚚 ${t("ingSuppliers")}`), st.suppliers.length ? h("div", { class: "ing-posts" }, st.suppliers.map((sp) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: supSel.has(sp.id), onChange: (e) => { if (e.target.checked) supSel.add(sp.id); else supSel.delete(sp.id); drawCodes(); } }), h("span", {}, sp.name)))) : h("p", { class: "meta" }, t("ingNoSuppliers"))),
+      codesBox,
       h("div", { class: "field" }, h("span", {}, t("ingInPosts")), h("div", { class: "ing-posts" }, st.groups.map((g, gi) => h("label", { class: "check" }, gboxes[gi], h("span", {}, gname(g)))))),
       err,
       h("div", { class: "actions" },
@@ -4549,7 +4603,7 @@ function ingredientsPanel() {
         } }, t("postsRemove")) : null,
         h("button", { class: "btn", type: "button", onClick: close }, t("cancel")),
         h("button", { class: "btn primary", type: "submit" }, t("save")))));
-    sync();
+    sync(); drawCodes();
     dlg.addEventListener("close", () => { done = true; }, { once: true });
     dlg.showModal();
   }
@@ -4576,42 +4630,107 @@ function ingredientsPanel() {
   const row = (e) => h("div", { class: "ing-line" }, h("b", {}, e.name), badges(e), editBtn(e));
 
   // ---- suppliers ----
-  function supplierDialog(sp) {
+  function supplierDialog(sp, startTab = "card") {
     const dlg = dialog("ing-supplier-modal");
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
     const name = h("input", { value: sp?.name ?? "", maxLength: 80, "aria-label": t("supName") }), phone = h("input", { type: "tel", value: sp?.phone ?? "", maxLength: 40, "aria-label": t("supPhone") });
     const email = h("input", { type: "email", value: sp?.email ?? "", maxLength: 120, "aria-label": t("supEmail") }), notes = h("textarea", { rows: 3, maxLength: 300, "aria-label": t("supNotes") }, sp?.notes ?? "");
-    const method = h("select", { "aria-label": t("supMethod"), onChange: () => { apiBox.hidden = method.value !== "api"; } }, [["", t("supMethodNone")], ["call", `📞 ${t("supMethodCall")}`], ["email", `✉️ ${t("supMethodEmail")}`], ["api", `🔌 ${t("supMethodApi")}`]].map(([v, l]) => h("option", { value: v, selected: (sp?.order_method ?? "") === v }, l)));
     const customer = h("input", { value: sp?.customer_number ?? "", maxLength: 60, "aria-label": t("supCustomer") });
+    // the ways to order (several at once)
+    const methodsOn = new Set(supplierMethods(sp));
+    const urlIn = (v, label) => h("input", { type: "url", value: v ?? "", maxLength: 300, placeholder: "https://", "aria-label": label });
+    const portalUrl = urlIn(sp?.portal_url, t("supPortalUrl")), siteUrl = urlIn(sp?.website_url, t("supSiteUrl"));
     const apiUrl = h("input", { type: "url", value: sp?.api_url ?? "", maxLength: 300, placeholder: "https://", "aria-label": t("supApiUrl") }), apiUser = h("input", { value: sp?.api_user ?? "", maxLength: 120, autocomplete: "off", "aria-label": t("supApiUser") });
     const apiKey = h("input", { type: "password", value: "", maxLength: 400, autocomplete: "new-password", placeholder: sp?.api_key_set ? t("supApiKeySaved") : "", "aria-label": t("supApiKey") });
     const clearKey = h("input", { type: "checkbox" });
-    const apiBox = h("div", { class: "sup-api", hidden: (sp?.order_method ?? "") !== "api" }, h("p", { class: "meta" }, t("supApiHelp")),
+    const portalBox = h("label", { class: "field", hidden: !methodsOn.has("portal") }, h("span", {}, t("supPortalUrl")), portalUrl);
+    const siteBox = h("label", { class: "field", hidden: !methodsOn.has("website") }, h("span", {}, t("supSiteUrl")), siteUrl);
+    const apiBox = h("div", { class: "sup-api", hidden: !methodsOn.has("api") }, h("p", { class: "meta" }, t("supApiHelp")),
       h("label", { class: "field" }, h("span", {}, t("supApiUrl")), apiUrl), h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supApiUser")), apiUser), h("label", { class: "field" }, h("span", {}, t("supApiKey")), apiKey)),
       sp?.api_key_set ? h("label", { class: "check" }, clearKey, h("span", {}, t("supApiKeyClear"))) : null);
-    const save = async (list) => { try { await api("/admin/suppliers", { method: "PUT", body: { suppliers: list } }); toast(t("saved")); dlg.close(); await load(); } catch (e) { err.textContent = `⚠ ${e.body?.error === "invalid_suppliers" ? t("supInvalid") : errorText(e)}`; err.hidden = false; } };
-    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
-        e.preventDefault(); err.hidden = true;
-        if (!name.value.trim()) { err.textContent = `⚠ ${t("supNameRequired")}`; err.hidden = false; name.focus(); return; }
-        const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value, order_method: method.value || null, customer_number: customer.value, api_url: method.value === "api" ? apiUrl.value : "", api_user: method.value === "api" ? apiUser.value : "", ...(apiKey.value ? { api_key: apiKey.value } : {}), clear_api_key: clearKey.checked || undefined };
-        await save(sp ? st.suppliers.map((x) => (x.id === sp.id ? one : x)) : [...st.suppliers, one]);
-      } },
-      h("h2", {}, sp ? t("supEdit") : t("supAdd")),
-      h("label", { class: "field" }, h("span", {}, t("supName")), name),
-      h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supMethod")), method), h("label", { class: "field" }, h("span", {}, t("supCustomer")), customer)),
+    const showBoxes = () => { portalBox.hidden = !methodsOn.has("portal"); siteBox.hidden = !methodsOn.has("website"); apiBox.hidden = !methodsOn.has("api"); };
+    const methodChecks = h("div", { class: "sup-methods", role: "group", "aria-label": t("supMethods") }, ["call", "email", "portal", "website", "api"].map((m) =>
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: methodsOn.has(m), onChange: (e) => { if (e.target.checked) methodsOn.add(m); else methodsOn.delete(m); showBoxes(); } }), h("span", {}, orderMethodLabel(m)))));
+    // the order calendar
+    const os = sp?.order_settings ?? {};
+    const dayLabel = (i) => new Date(2026, 0, 5 + i).toLocaleDateString(locale(), { weekday: "short" }); // 2026-01-05 is a Monday
+    const dayChips = (set) => h("div", { class: "sup-days", role: "group" }, Array.from({ length: 7 }, (_, i) => i + 1).map((d) => {
+      const b = h("button", { type: "button", class: "chip-btn", "aria-pressed": String(set.has(d)), onClick: () => { if (set.has(d)) set.delete(d); else set.add(d); b.setAttribute("aria-pressed", String(set.has(d))); } }, dayLabel(d - 1)); return b; }));
+    const orderDays = new Set(os.order_days ?? []), deliveryDays = new Set(os.delivery_days ?? []);
+    const cutoff = h("input", { type: "time", value: os.cutoff ?? "", "aria-label": t("supCutoff") });
+    const offset = h("input", { type: "number", min: "0", max: "14", step: "1", value: String(os.delivery_offset ?? 1), "aria-label": t("supDeliveryOffset") });
+    const mode = os.delivery_mode === "days" ? "days" : "offset";
+    const offsetRow = h("div", { class: "sup-delivery", hidden: mode !== "offset" }, offset, h("span", {}, t("supDaysAfter")));
+    const daysRow = h("div", { class: "sup-delivery", hidden: mode !== "days" }, dayChips(deliveryDays));
+    const modeRadios = ["offset", "days"].map((m) => h("label", { class: "check" }, h("input", { type: "radio", name: "sup-delivery-mode", value: m, checked: m === mode, onChange: () => { offsetRow.hidden = m !== "offset"; daysRow.hidden = m !== "days"; } }), h("span", {}, t(m === "offset" ? "supDeliveryOffsetMode" : "supDeliveryDaysMode"))));
+    const orderNote = h("input", { value: os.note ?? "", maxLength: 200, "aria-label": t("supOrderNote"), placeholder: t("supOrderNotePh") });
+    const settingsPane = h("div", { class: "sup-pane" }, h("p", { class: "meta" }, t("supSettingsHelp")),
+      h("div", { class: "field" }, h("span", {}, t("supOrderDays")), dayChips(orderDays)), h("label", { class: "field" }, h("span", {}, t("supCutoff")), cutoff),
+      h("div", { class: "field" }, h("span", {}, t("supDelivery")), ...modeRadios, offsetRow, daysRow), h("label", { class: "field" }, h("span", {}, t("supOrderNote")), orderNote));
+    const cardPane = h("div", { class: "sup-pane" }, h("label", { class: "field" }, h("span", {}, t("supName")), name),
       h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("supPhone")), phone), h("label", { class: "field" }, h("span", {}, t("supEmail")), email)),
-      apiBox,
-      h("label", { class: "field" }, h("span", {}, t("supNotes")), notes), err,
-      h("div", { class: "actions" },
-        sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("delete")) : null,
-        h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+      h("div", { class: "field" }, h("span", {}, t("supMethods")), methodChecks), portalBox, siteBox, apiBox,
+      h("label", { class: "field" }, h("span", {}, t("supCustomer")), customer), h("label", { class: "field" }, h("span", {}, t("supNotes")), notes));
+    // history and current order need a saved supplier (and the restaurant chosen in the ingredients screen)
+    const rid = st.restaurant, restoName = state.restaurants.find((r) => r.id === rid)?.name ?? "";
+    const histPane = h("div", { class: "sup-pane" }), curPane = h("div", { class: "sup-pane" });
+    const loaded = {};
+    async function loadHistory() {
+      histPane.replaceChildren(h("p", { class: "meta" }, t("loading")));
+      try {
+        const d = await api(`/suppliers/${sp.id}/orders?restaurant=${rid}`);
+        const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
+        histPane.replaceChildren(h("p", { class: "meta" }, `🏪 ${restoName}`),
+          ...(d.orders.length ? d.orders.map((o) => h("div", { class: "card sup-order" }, h("b", {}, stamp(o.placed_at)), h("span", { class: "meta" }, ` · ${orderMethodLabel(o.method)}${o.placed_by ? ` · ${o.placed_by}` : ""}`),
+            o.delivery_date ? h("div", { class: "meta" }, `🚚 ${t("ordDelivery")} ${fmtDay(o.delivery_date)}`) : null, o.note ? h("div", { class: "meta" }, o.note) : null,
+            h("ul", {}, o.items.map((i) => h("li", {}, i.name, i.code && codeLine(i.code) ? h("small", { class: "meta" }, ` — ${codeLine(i.code)}`) : null, i.note ? h("small", { class: "meta" }, ` (${i.note})`) : null))))) : [h("p", { class: "meta" }, t("ordNoHistory"))]),
+          d.loose.length ? h("details", { class: "order-done" }, h("summary", {}, t("ordLoose")), d.loose.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${stamp(o.ordered_at)}`)))) : null);
+      } catch (e) { histPane.replaceChildren(h("p", { class: "meta" }, errorText(e))); }
+    }
+    async function loadCurrent() {
+      curPane.replaceChildren(h("p", { class: "meta" }, t("loading")));
+      try {
+        const d = await api(`/orders?restaurant=${rid}`);
+        const me = d.suppliers.find((x) => x.id === sp.id) ?? sp, items = d.open.filter((o) => o.supplier_ids.includes(sp.id));
+        curPane.replaceChildren(h("p", { class: "meta" }, `🏪 ${restoName}`), windowNode(me),
+          ...(items.length ? [h("ul", { class: "sup-items" }, items.map((o) => h("li", {}, h("b", {}, o.name), o.note ? h("small", { class: "meta" }, ` (${o.note})`) : null, o.codes?.[sp.id] && codeLine(o.codes[sp.id]) ? h("div", { class: "meta" }, `${t("ordNumber")} ${codeLine(o.codes[sp.id])}`) : null))),
+            h("div", { class: "ord-actions" }, ...orderActions({ sp: me, items, rid, canOrder: d.can_order, reload: () => { loaded.cur = false; loaded.hist = false; showTab("current"); } }))] : [h("p", { class: "meta" }, t("ordNothing"))]));
+      } catch (e) { curPane.replaceChildren(h("p", { class: "meta" }, errorText(e))); }
+    }
+    const panes = { card: cardPane, settings: settingsPane, history: histPane, current: curPane };
+    const tabDefs = [["card", t("supTabCard")], ["settings", t("supTabSettings")], ...(sp ? [["history", t("supTabHistory")], ["current", t("supTabCurrent")]] : [])];
+    const tabBar = h("div", { class: "dlg-tabs sup-tabs", role: "tablist" });
+    function showTab(id) {
+      for (const [k, el] of Object.entries(panes)) el.hidden = k !== id;
+      tabBar.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === id)));
+      if (id === "history" && !loaded.hist) { loaded.hist = true; loadHistory(); }
+      if (id === "current" && !loaded.cur) { loaded.cur = true; loadCurrent(); }
+    }
+    tabBar.append(...tabDefs.map(([id, label]) => h("button", { type: "button", role: "tab", "data-tab": id, onClick: () => showTab(id) }, label)));
+    const save = async (list) => { try { await api("/admin/suppliers", { method: "PUT", body: { suppliers: list } }); toast(t("saved")); dlg.close(); await load(); } catch (e) { err.textContent = `⚠ ${e.body?.error === "invalid_suppliers" ? t("supInvalid") : errorText(e)}`; err.hidden = false; } };
+    dlg.replaceChildren(h("form", { class: "modal-body sup-dialog", onSubmit: async (e) => {
+        e.preventDefault(); err.hidden = true;
+        if (!name.value.trim()) { showTab("card"); err.textContent = `⚠ ${t("supNameRequired")}`; err.hidden = false; name.focus(); return; }
+        const methods = ["call", "email", "portal", "website", "api"].filter((m) => methodsOn.has(m));
+        const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value, order_methods: methods, portal_url: methodsOn.has("portal") ? portalUrl.value : "", website_url: methodsOn.has("website") ? siteUrl.value : "", customer_number: customer.value,
+          order_settings: { order_days: [...orderDays], cutoff: cutoff.value, delivery_mode: modeRadios.find((r) => r.querySelector("input").checked).querySelector("input").value, delivery_offset: Number(offset.value) || 0, delivery_days: [...deliveryDays], note: orderNote.value },
+          api_url: methodsOn.has("api") ? apiUrl.value : "", api_user: methodsOn.has("api") ? apiUser.value : "", ...(apiKey.value ? { api_key: apiKey.value } : {}), clear_api_key: clearKey.checked || undefined };
+        await save(sp ? st.suppliers.map((x) => (x.id === sp.id ? { ...x, ...one } : x)) : [...st.suppliers, one]);
+      } },
+      // the buttons sit in the header so they stay in view whatever the tab
+      h("div", { class: "sup-head" }, h("h2", {}, sp ? sp.name : t("supAdd")),
+        h("div", { class: "sup-head-btns" },
+          sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("delete")) : null,
+          h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))),
+      tabBar, err, cardPane, settingsPane, histPane, curPane));
+    showTab(tabDefs.some(([id]) => id === startTab) ? startTab : "card");
     dlg.showModal();
   }
   function viewSuppliers() {
     const count = (id) => unique().filter((e) => e.supplier_ids?.includes(id)).length;
     return [h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => supplierDialog(null) }, `+ ${t("supAdd")}`)),
       st.suppliers.length ? h("div", { class: "ing-lines tree" }, st.suppliers.map((sp) => h("div", { class: "ing-line" }, h("b", {}, sp.name),
-        h("span", { class: "ing-badges" }, sp.order_method ? h("span", { class: "ing-badge sup" }, `${{ call: "📞", email: "✉️", api: "🔌" }[sp.order_method]} ${t({ call: "supMethodCall", email: "supMethodEmail", api: "supMethodApi" }[sp.order_method])}`) : null, sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
+        h("span", { class: "ing-badges" }, ...supplierMethods(sp).map((m) => h("span", { class: "ing-badge sup" }, orderMethodLabel(m))), sp.customer_number ? h("span", { class: "ing-badge" }, `${t("supClientShort")} ${sp.customer_number}`) : null, sp.phone ? h("span", { class: "ing-badge" }, `📞 ${sp.phone}`) : null, sp.email ? h("span", { class: "ing-badge" }, `✉️ ${sp.email}`) : null, h("span", { class: "ing-badge" }, `${count(sp.id)} ${t("adminIngredients").toLowerCase()}`)),
         sp.notes ? h("small", { class: "meta", style: "flex-basis:100%" }, sp.notes) : null, h("button", { class: "btn small", type: "button", onClick: () => supplierDialog(sp) }, `✎ ${t("editWord")}`)))) : h("p", { class: "meta" }, t("supEmpty"))];
   }
   function viewByPost() {

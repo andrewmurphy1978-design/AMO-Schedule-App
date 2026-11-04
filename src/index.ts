@@ -1,3 +1,4 @@
+import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
 import { cleanInv, parseInv, cleanParts, partsTotal, type InvSpec, type Part } from "./inventory.ts";
 import { Hono, type Context } from "hono";
 import { ensureMigrated } from "./migrate.ts";
@@ -180,7 +181,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory" | "supplier";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
@@ -196,6 +197,7 @@ const OWNER_SQL: Record<Owned, string> = {
   incident: "SELECT 1 FROM incidents t JOIN staff s ON s.id = t.staff_id WHERE t.id = ?1 AND s.client_id = ?2",
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
+  supplier: "SELECT 1 FROM suppliers WHERE id = ?1 AND client_id = ?2",
   inventory: "SELECT 1 FROM inventory_counts n JOIN restaurants r ON r.id = n.restaurant_id WHERE n.id = ?1 AND r.client_id = ?2",
   voice_contact: "SELECT 1 FROM voice_contacts WHERE id = ?1 AND client_id = ?2",
   voice_call: "SELECT 1 FROM voice_calls WHERE id = ?1 AND client_id = ?2",
@@ -208,7 +210,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/suppliers\/(\d+)(\/|$)/, "supplier"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -2914,14 +2916,27 @@ async function restockRestaurants(db: D1Database, me: Me): Promise<number[]> {
      JOIN restaurants r ON r.id = x.restaurant_id WHERE r.client_id = ?2 ORDER BY x.restaurant_id`,
   ).bind(me.id, me.client_id).all<{ id: number }>()).results.map((r) => r.id);
 }
-type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; fridge_open: boolean; homemade: boolean; components: string[]; component_qty: Record<string, { qty: number; unit: string }>; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: InvSpec | null; supplier_ids: number[]; needed?: boolean }[] };
+/** { supplier id -> { p: preferred product number, alt: replacement numbers } } as typed by the administrator, cleaned to JSON (or null). */
+function cleanCodes(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<string, ProductCode> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^\d+$/.test(k) || !v || typeof v !== "object") continue;
+    const r = v as { p?: unknown; alt?: unknown };
+    const p = typeof r.p === "string" && r.p.trim() ? r.p.trim().slice(0, 40) : null;
+    const alt = (Array.isArray(r.alt) ? r.alt : typeof r.alt === "string" ? r.alt.split(/[,;\n]/) : []).map((x) => String(x).trim().slice(0, 40)).filter(Boolean).slice(0, 6);
+    if (p || alt.length) out[k] = { p, alt: [...new Set(alt)] };
+  }
+  return Object.keys(out).length ? JSON.stringify(out) : null;
+}
+type IngGroup = { id: number; name_fr: string; name_en: string; post_id: number | null; position: number; items: { id: number; name: string; location: string; category: string | null; thaw: boolean; fridge_open: boolean; homemade: boolean; components: string[]; component_qty: Record<string, { qty: number; unit: string }>; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: InvSpec | null; codes: Record<string, ProductCode>; supplier_ids: number[]; needed?: boolean }[] };
 async function ingredientGroups(db: D1Database, restaurantId: number, needs = false): Promise<IngGroup[]> {
   const groups = (await db.prepare("SELECT id, name_fr, name_en, post_id, position FROM ingredient_groups WHERE restaurant_id = ? ORDER BY position, id").bind(restaurantId).all<Omit<IngGroup, "items">>()).results;
   if (!groups.length) return [];
-  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, inv FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; fridge_open: number; homemade: number; components: string | null; component_qty: string | null; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: string | null }>()).results;
+  const items = (await db.prepare(`SELECT id, group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, inv, codes FROM ingredients WHERE group_id IN (${groups.map(() => "?").join(",")}) ORDER BY position, id`).bind(...groups.map((g) => g.id)).all<{ id: number; group_id: number; name: string; location: string; category: string | null; thaw: number; fridge_open: number; homemade: number; components: string | null; component_qty: string | null; prep_note: string | null; portion_g: number | null; portion_qty: number | null; portion_unit: string | null; inv: string | null; codes: string | null }>()).results;
   const links = (await db.prepare("SELECT l.ingredient_id, l.supplier_id FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number; supplier_id: number }>()).results;
   const need = needs ? new Set((await db.prepare("SELECT ingredient_id FROM restock_needs WHERE restaurant_id = ?").bind(restaurantId).all<{ ingredient_id: number }>()).results.map((r) => r.ingredient_id)) : null;
-  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, fridge_open: i.fridge_open === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), component_qty: (() => { try { const v = JSON.parse(i.component_qty ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } })(), prep_note: i.prep_note, portion_g: i.portion_g, portion_qty: i.portion_qty, portion_unit: i.portion_unit, inv: parseInv(i.inv), supplier_ids: links.filter((l) => l.ingredient_id === i.id).map((l) => l.supplier_id), ...(need ? { needed: need.has(i.id) } : {}) })) }));
+  return groups.map((g) => ({ ...g, items: items.filter((i) => i.group_id === g.id).map((i) => ({ id: i.id, name: i.name, location: i.location, category: i.category, thaw: i.thaw === 1, fridge_open: i.fridge_open === 1, homemade: i.homemade === 1, components: (() => { try { const v = JSON.parse(i.components ?? "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } })(), component_qty: (() => { try { const v = JSON.parse(i.component_qty ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } })(), prep_note: i.prep_note, portion_g: i.portion_g, portion_qty: i.portion_qty, portion_unit: i.portion_unit, inv: parseInv(i.inv), codes: (() => { try { const v = JSON.parse(i.codes ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; } })(), supplier_ids: links.filter((l) => l.ingredient_id === i.id).map((l) => l.supplier_id), ...(need ? { needed: need.has(i.id) } : {}) })) }));
 }
 app.get("/api/restock", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
@@ -2949,7 +2964,7 @@ app.get("/api/admin/ingredients", requireAdmin, async (c) => {
   const posts = (await db.prepare("SELECT id, code, name_fr, name_en FROM posts WHERE department_id = 'kitchen' AND all_posts = 0 ORDER BY sort").all()).results;
   return c.json({ groups: await ingredientGroups(db, rid), posts, locations: LOCATIONS });
 });
-type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; fridge_open?: boolean; homemade?: boolean; components?: string[]; component_qty?: Record<string, { qty?: number; unit?: string }>; prep_note?: string | null; portion_g?: number | null; portion_qty?: number | null; portion_unit?: string | null; supplier_ids?: number[]; inv?: unknown };
+type IngIn = { id?: number; name?: string; location?: string; category?: string | null; thaw?: boolean; fridge_open?: boolean; homemade?: boolean; components?: string[]; component_qty?: Record<string, { qty?: number; unit?: string }>; prep_note?: string | null; portion_g?: number | null; portion_qty?: number | null; portion_unit?: string | null; supplier_ids?: number[]; inv?: unknown; codes?: unknown };
 app.put("/api/admin/ingredients", requireAdmin, async (c) => {
   const db = c.env.DB;
   const b = await c.req.json<{ restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }>().catch(() => ({} as { restaurant_id?: number; groups?: { id?: number; name_fr?: string; name_en?: string; post_id?: number | null; items?: IngIn[] }[] }));
@@ -2959,7 +2974,7 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
       thaw: i.thaw && i.location === "freezer" ? 1 : 0, fopen: i.fridge_open && i.location === "backstore" ? 1 : 0, home: i.homemade ? 1 : 0, comps: i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : [], note: i.homemade ? (i.prep_note ?? "").trim().slice(0, 200) || null : null,
       cqty: ((comps: string[]) => { const o: Record<string, { qty: number; unit: string }> = {}; if (i.homemade && i.component_qty && typeof i.component_qty === "object") for (const n of comps) { const q = i.component_qty[n]; if (q && typeof q.qty === "number" && q.qty > 0 && q.qty <= 100000) o[n] = { qty: Math.round(q.qty * 1000) / 1000, unit: String(q.unit ?? "").trim().slice(0, 20) }; } return o; })(i.homemade && Array.isArray(i.components) ? [...new Set(i.components.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20) : []),
       portion: i.homemade && typeof i.portion_g === "number" && i.portion_g > 0 && i.portion_g <= 100000 ? Math.round(i.portion_g * 10) / 10 : null,
-      pqty: i.homemade && typeof i.portion_qty === "number" && i.portion_qty > 0 && i.portion_qty <= 10000 && (i.portion_unit ?? "").trim() ? Math.round(i.portion_qty * 100) / 100 : null, punit: i.homemade && (i.portion_unit ?? "").trim() && typeof i.portion_qty === "number" && i.portion_qty > 0 ? (i.portion_unit ?? "").trim().slice(0, 30) : null, inv: (() => { const v = cleanInv(i.inv); return v ? JSON.stringify(v) : null; })() })).filter((i) => i.name) })).filter((g) => g.fr);
+      pqty: i.homemade && typeof i.portion_qty === "number" && i.portion_qty > 0 && i.portion_qty <= 10000 && (i.portion_unit ?? "").trim() ? Math.round(i.portion_qty * 100) / 100 : null, punit: i.homemade && (i.portion_unit ?? "").trim() && typeof i.portion_qty === "number" && i.portion_qty > 0 ? (i.portion_unit ?? "").trim().slice(0, 30) : null, inv: (() => { const v = cleanInv(i.inv); return v ? JSON.stringify(v) : null; })(), codes: cleanCodes(i.codes) })).filter((i) => i.name) })).filter((g) => g.fr);
   if (groups.some((g) => g.fr.length > 60 || g.en.length > 60 || g.items.length > 200 || g.items.some((i) => i.name.length > 80 || i.comps.some((x) => x.length > 80)))) return c.json({ error: "invalid_ingredients" }, 400);
   const rid = b.restaurant_id;
   const curGroups = (await db.prepare("SELECT id FROM ingredient_groups WHERE restaurant_id = ?").bind(rid).all<{ id: number }>()).results.map((r) => r.id);
@@ -2976,8 +2991,8 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
     let gid = g.id && keepG.has(g.id) ? g.id : 0;
     if (!gid) gid = (await db.prepare("INSERT INTO ingredient_groups (restaurant_id, name_fr, name_en, post_id, position) VALUES (?, ?, ?, ?, ?)").bind(rid, g.fr, g.en || g.fr, g.post, gi + 1).run()).meta.last_row_id as number;
     await db.batch(g.items.map((i, pos) => i.id && keepI.has(i.id)
-      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, fridge_open = ?, homemade = ?, components = ?, component_qty = ?, prep_note = ?, portion_g = ?, portion_qty = ?, portion_unit = ?, position = ?, inv = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv, i.id)
-      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, position, inv) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv)));
+      ? db.prepare("UPDATE ingredients SET group_id = ?, name = ?, location = ?, category = ?, thaw = ?, fridge_open = ?, homemade = ?, components = ?, component_qty = ?, prep_note = ?, portion_g = ?, portion_qty = ?, portion_unit = ?, position = ?, inv = ?, codes = ? WHERE id = ?").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv, i.codes, i.id)
+      : db.prepare("INSERT INTO ingredients (group_id, name, location, category, thaw, fridge_open, homemade, components, component_qty, prep_note, portion_g, portion_qty, portion_unit, position, inv, codes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(gid, i.name, i.loc, i.cat, i.thaw, i.fopen, i.home, i.comps.length ? JSON.stringify(i.comps) : null, Object.keys(i.cqty).length ? JSON.stringify(i.cqty) : null, i.note, i.portion, i.pqty, i.punit, pos + 1, i.inv, i.codes)));
   }
   // suppliers: by ingredient name (the same ingredient in several posts has the same suppliers)
   const mySuppliers = new Set((await db.prepare("SELECT id FROM suppliers WHERE client_id = ?").bind(c.get("me").client_id).all<{ id: number }>()).results.map((r) => r.id));
@@ -2991,25 +3006,26 @@ app.put("/api/admin/ingredients", requireAdmin, async (c) => {
 });
 
 // Suppliers of the company (administrators edit them; an ingredient can come from several).
-app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes, order_method, customer_number, api_url, api_user, api_key IS NOT NULL AND api_key != '' AS api_key_set FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all<Record<string, unknown>>()).results.map((r) => ({ ...r, api_key_set: r.api_key_set === 1 }))));
+const supplierView = (r: Record<string, unknown>) => ({ ...r, api_key_set: r.api_key_set === 1, order_methods: (() => { try { return cleanMethods(JSON.parse(String(r.order_methods ?? "[]"))); } catch { return []; } })(), order_settings: parseOrderSettings(r.order_settings as string | null) });
+app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes, order_method, order_methods, portal_url, website_url, order_settings, customer_number, api_url, api_user, api_key IS NOT NULL AND api_key != '' AS api_key_set FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all<Record<string, unknown>>()).results.map(supplierView)));
 app.put("/api/admin/suppliers", requireAdmin, async (c) => {
   const cid = c.get("me").client_id, db = c.env.DB;
-  type SupIn = { id?: number; name?: string; phone?: string; email?: string; notes?: string; order_method?: string | null; customer_number?: string; api_url?: string; api_user?: string; api_key?: string; clear_api_key?: boolean };
+  type SupIn = { id?: number; name?: string; phone?: string; email?: string; notes?: string; order_method?: string | null; order_methods?: unknown; portal_url?: string; website_url?: string; order_settings?: unknown; customer_number?: string; api_url?: string; api_user?: string; api_key?: string; clear_api_key?: boolean };
   const b = await c.req.json<{ suppliers?: SupIn[] }>().catch(() => ({} as { suppliers?: SupIn[] }));
   if (!Array.isArray(b.suppliers) || b.suppliers.length > 60) return c.json({ error: "invalid_suppliers" }, 400);
   const list = b.suppliers.map((x) => ({ id: x.id, name: (x.name ?? "").trim(), phone: (x.phone ?? "").trim() || null, email: (x.email ?? "").trim() || null, notes: (x.notes ?? "").trim() || null,
-    method: x.order_method === "call" || x.order_method === "email" || x.order_method === "api" ? x.order_method : null, customer: (x.customer_number ?? "").trim() || null,
+    methods: cleanMethods(x.order_methods ?? (x.order_method ? [x.order_method] : [])), portal: (x.portal_url ?? "").trim() || null, site: (x.website_url ?? "").trim() || null, settings: cleanSettings(x.order_settings), customer: (x.customer_number ?? "").trim() || null,
     apiUrl: (x.api_url ?? "").trim() || null, apiUser: (x.api_user ?? "").trim() || null, apiKey: typeof x.api_key === "string" && x.api_key.trim() ? x.api_key.trim() : null, clearKey: !!x.clear_api_key })).filter((x) => x.name);
   if (list.some((x) => x.name.length > 80 || (x.phone?.length ?? 0) > 40 || (x.email?.length ?? 0) > 120 || (x.notes?.length ?? 0) > 300 || (x.customer?.length ?? 0) > 60 || (x.apiUser?.length ?? 0) > 120 || (x.apiKey?.length ?? 0) > 400
-    || (x.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x.email)) || (x.apiUrl && validateUrl(x.apiUrl) !== null))) return c.json({ error: "invalid_suppliers" }, 400);
+    || (x.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x.email)) || (x.apiUrl && validateUrl(x.apiUrl) !== null) || (x.portal && validateUrl(x.portal) !== null) || (x.site && validateUrl(x.site) !== null))) return c.json({ error: "invalid_suppliers" }, 400);
   const cur = (await db.prepare("SELECT id FROM suppliers WHERE client_id = ?").bind(cid).all<{ id: number }>()).results.map((r) => r.id);
   const keep = new Set(list.filter((x) => x.id && cur.includes(x.id)).map((x) => x.id!));
   await db.batch([
     ...cur.filter((i) => !keep.has(i)).map((i) => db.prepare("DELETE FROM suppliers WHERE id = ?").bind(i)),
     // the API key is only replaced (or cleared) when asked: it is never sent to the browser, so an edit without it keeps the saved one
     ...list.map((x, pos) => x.id && keep.has(x.id)
-      ? db.prepare("UPDATE suppliers SET name = ?, phone = ?, email = ?, notes = ?, order_method = ?, customer_number = ?, api_url = ?, api_user = ?, api_key = CASE WHEN ? = 1 THEN NULL WHEN ?10 IS NOT NULL THEN ?10 ELSE api_key END, position = ? WHERE id = ? AND client_id = ?").bind(x.name, x.phone, x.email, x.notes, x.method, x.customer, x.apiUrl, x.apiUser, x.clearKey ? 1 : 0, x.apiKey, pos + 1, x.id, cid)
-      : db.prepare("INSERT INTO suppliers (client_id, name, phone, email, notes, order_method, customer_number, api_url, api_user, api_key, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, x.name, x.phone, x.email, x.notes, x.method, x.customer, x.apiUrl, x.apiUser, x.apiKey, pos + 1)),
+      ? db.prepare("UPDATE suppliers SET name = ?, phone = ?, email = ?, notes = ?, order_method = ?, customer_number = ?, api_url = ?, api_user = ?, api_key = CASE WHEN ? = 1 THEN NULL WHEN ?10 IS NOT NULL THEN ?10 ELSE api_key END, position = ?, order_methods = ?, portal_url = ?, website_url = ?, order_settings = ? WHERE id = ? AND client_id = ?").bind(x.name, x.phone, x.email, x.notes, x.methods[0] ?? null, x.customer, x.apiUrl, x.apiUser, x.clearKey ? 1 : 0, x.apiKey, pos + 1, x.methods.length ? JSON.stringify(x.methods) : null, x.portal, x.site, x.settings ? JSON.stringify(x.settings) : null, x.id, cid)
+      : db.prepare("INSERT INTO suppliers (client_id, name, phone, email, notes, order_method, customer_number, api_url, api_user, api_key, position, order_methods, portal_url, website_url, order_settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, x.name, x.phone, x.email, x.notes, x.methods[0] ?? null, x.customer, x.apiUrl, x.apiUser, x.apiKey, pos + 1, x.methods.length ? JSON.stringify(x.methods) : null, x.portal, x.site, x.settings ? JSON.stringify(x.settings) : null)),
   ]);
   return c.json({ ok: true });
 });
@@ -3091,16 +3107,64 @@ app.get("/api/inventory/:id", async (c) => {
   return c.json({ ...n, lines });
 });
 
+// ---------- Supplier orders: product numbers, recording an order, history ----------
+type ProductCode = { p: string | null; alt: string[] };
+/** The supplier product numbers of a restaurant's ingredients: ingredient name (lower case) -> { supplier id -> numbers }. */
+async function productCodes(db: D1Database, rid: number): Promise<Map<string, Record<string, ProductCode>>> {
+  const rows = (await db.prepare("SELECT lower(i.name) AS k, max(i.codes) AS codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name)").bind(rid).all<{ k: string; codes: string | null }>()).results;
+  return new Map(rows.map((r) => { try { const v = JSON.parse(r.codes ?? "{}"); return [r.k, v && typeof v === "object" ? v : {}] as const; } catch { return [r.k, {}] as const; } }));
+}
+const codeText = (c: ProductCode | undefined, en: boolean) => (c?.p || c?.alt.length ? ` [${c.p ? `#${c.p}` : ""}${c.alt.length ? `${c.p ? " · " : ""}${en ? "substitutes" : "remplacement"} ${c.alt.map((a) => `#${a}`).join(", ")}` : ""}]` : "");
+/** The open requests of a restaurant that are linked to a supplier (by ingredient name). */
+async function openForSupplier(db: D1Database, rid: number, sid: number): Promise<{ id: number; name: string; note: string | null }[]> {
+  return (await db.prepare("SELECT o.id, o.name, o.note FROM order_requests o WHERE o.restaurant_id = ?1 AND o.ordered_at IS NULL AND EXISTS (SELECT 1 FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE l.supplier_id = ?2 AND g.restaurant_id = ?1 AND lower(i.name) = lower(o.name)) ORDER BY o.name").bind(rid, sid).all<{ id: number; name: string; note: string | null }>()).results;
+}
+/** Records an order (history) and marks its requests as ordered. */
+async function recordOrder(env: Env, me: Me, o: { rid: number; sid: number; method: string; items: { id: number; name: string; note: string | null }[]; note?: string | null }): Promise<number> {
+  const db = env.DB, sup = await db.prepare("SELECT order_settings FROM suppliers WHERE id = ?").bind(o.sid).first<{ order_settings: string | null }>();
+  // an order goes out with the next order window (today before the cut-off, else the next order day)
+  const settings = parseOrderSettings(sup?.order_settings), nowLocal = localNow(env.TIMEZONE);
+  const delivery = nextWindow(settings, nowLocal)?.delivery_date ?? deliveryFor(settings, nowLocal.slice(0, 10));
+  const now = Date.now(), codes = await productCodes(db, o.rid);
+  const items = o.items.map((i) => ({ name: i.name, note: i.note, code: codes.get(i.name.toLowerCase())?.[String(o.sid)] ?? null }));
+  const r = await db.prepare("INSERT INTO supplier_orders (supplier_id, restaurant_id, method, placed_by, placed_at, delivery_date, note, items) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(o.sid, o.rid, o.method, me.id, now, delivery, o.note ?? null, JSON.stringify(items)).first<{ id: number }>();
+  await db.batch(o.items.map((i) => db.prepare("UPDATE order_requests SET ordered_at = ?, ordered_by = ?, supplier_id = ?, order_id = ? WHERE id = ? AND ordered_at IS NULL").bind(now, me.id, o.sid, r!.id, i.id)));
+  return r!.id;
+}
+app.post("/api/orders/place", async (c) => {
+  const me = c.get("me"), db = c.env.DB;
+  const b = await c.req.json<{ restaurant_id?: number; supplier_id?: number; method?: string; item_ids?: number[]; note?: string }>().catch(() => ({} as { restaurant_id?: number; supplier_id?: number; method?: string; item_ids?: number[]; note?: string }));
+  const rid = Number(b.restaurant_id), sid = Number(b.supplier_id);
+  if (!rid || !sid || !(METHODS as readonly string[]).includes(b.method ?? "")) return c.json({ error: "bad_request" }, 400);
+  if (!(await canManage(db, me, rid, "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  if (!(await db.prepare("SELECT 1 FROM suppliers WHERE id = ? AND client_id = ?").bind(sid, me.client_id).first())) return c.json({ error: "not_found" }, 404);
+  let items = await openForSupplier(db, rid, sid);
+  if (Array.isArray(b.item_ids)) { const ids = new Set(b.item_ids.map(Number)); items = items.filter((i) => ids.has(i.id)); }
+  if (!items.length) return c.json({ error: "nothing_to_order" }, 422);
+  return c.json({ id: await recordOrder(c.env, me, { rid, sid, method: b.method!, items, note: (b.note ?? "").trim().slice(0, 300) || null }) }, 201);
+});
+app.get("/api/suppliers/:id/orders", async (c) => {
+  const me = c.get("me"), db = c.env.DB, sid = intParam(c.req.param("id")), rid = intParam(c.req.query("restaurant"));
+  if (!sid || !rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
+  const orders = (await db.prepare("SELECT o.id, o.method, o.placed_at, o.delivery_date, o.note, o.items, s.name AS placed_by FROM supplier_orders o LEFT JOIN staff s ON s.id = o.placed_by WHERE o.supplier_id = ? AND o.restaurant_id = ? ORDER BY o.placed_at DESC LIMIT 60").bind(sid, rid).all<{ items: string }>()).results
+    .map((o) => ({ ...o, items: (() => { try { return JSON.parse(o.items); } catch { return []; } })() }));
+  // items marked as ordered one by one before orders were recorded
+  const loose = (await db.prepare("SELECT name, note, ordered_at FROM order_requests WHERE supplier_id = ? AND restaurant_id = ? AND ordered_at IS NOT NULL AND order_id IS NULL ORDER BY ordered_at DESC LIMIT 60").bind(sid, rid).all()).results;
+  return c.json({ orders, loose });
+});
 app.get("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));
   if (!rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
   const open = (await db.prepare("SELECT o.id, o.name, o.note, o.reported_at, s.name AS reported_by FROM order_requests o LEFT JOIN staff s ON s.id = o.reported_by WHERE o.restaurant_id = ? AND o.ordered_at IS NULL ORDER BY o.reported_at").bind(rid).all<{ id: number; name: string; note: string | null; reported_at: number; reported_by: string | null }>()).results;
   const done = (await db.prepare("SELECT o.id, o.name, o.ordered_at, sp.name AS supplier FROM order_requests o LEFT JOIN suppliers sp ON sp.id = o.supplier_id WHERE o.restaurant_id = ? AND o.ordered_at IS NOT NULL AND o.ordered_at > ? ORDER BY o.ordered_at DESC LIMIT 30").bind(rid, Date.now() - 7 * 86_400_000).all()).results;
-  const suppliers = (await db.prepare("SELECT id, name, phone, email, order_method, customer_number FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null; order_method: string | null; customer_number: string | null }>()).results;
+  const nowLocal = localNow(c.env.TIMEZONE);
+  const suppliers = (await db.prepare("SELECT id, name, phone, email, order_method, order_methods, portal_url, website_url, order_settings, customer_number FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(me.client_id).all<{ id: number; name: string; phone: string | null; email: string | null; order_method: string | null; order_methods: string | null; portal_url: string | null; website_url: string | null; order_settings: string | null; customer_number: string | null }>()).results
+    .map((r) => { const settings = parseOrderSettings(r.order_settings); let methods = cleanMethods((() => { try { return JSON.parse(r.order_methods ?? "[]"); } catch { return []; } })()); if (!methods.length && r.order_method) methods = cleanMethods([r.order_method]); const { order_settings: _o, order_methods: _m, ...rest } = r; return { ...rest, order_methods: methods, order_settings: settings, window: nextWindow(settings, nowLocal) }; });
+  const codes = await productCodes(db, rid);
   const links = (await db.prepare("SELECT lower(i.name) AS k, l.supplier_id FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ?").bind(rid).all<{ k: string; supplier_id: number }>()).results;
   // what can be ordered: the ingredients that are not made in the kitchen
   const names = (await db.prepare("SELECT i.name, min(i.category) AS category FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND i.homemade = 0 GROUP BY lower(i.name) ORDER BY i.name").bind(rid).all<{ name: string; category: string | null }>()).results;
-  return c.json({ open: open.map((o) => ({ ...o, supplier_ids: [...new Set(links.filter((l) => l.k === o.name.toLowerCase()).map((l) => l.supplier_id))] })), done, suppliers, ingredients: names, can_order: await canManage(db, me, rid, "kitchen") });
+  return c.json({ open: open.map((o) => ({ ...o, codes: codes.get(o.name.toLowerCase()) ?? {}, supplier_ids: [...new Set(links.filter((l) => l.k === o.name.toLowerCase()).map((l) => l.supplier_id))] })), done, suppliers, ingredients: names, can_order: await canManage(db, me, rid, "kitchen") });
 });
 app.post("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB;
@@ -3130,7 +3194,7 @@ app.post("/api/orders/email", async (c) => {
   const sup = await db.prepare("SELECT id, name, email, customer_number FROM suppliers WHERE id = ? AND client_id = ?").bind(sid, me.client_id).first<{ id: number; name: string; email: string | null; customer_number: string | null }>();
   if (!sup) return c.json({ error: "not_found" }, 404);
   if (!sup.email) return c.json({ error: "no_supplier_email" }, 422);
-  const items = (await db.prepare("SELECT o.id, o.name, o.note FROM order_requests o WHERE o.restaurant_id = ?1 AND o.ordered_at IS NULL AND EXISTS (SELECT 1 FROM ingredient_suppliers l JOIN ingredients i ON i.id = l.ingredient_id JOIN ingredient_groups g ON g.id = i.group_id WHERE l.supplier_id = ?2 AND g.restaurant_id = ?1 AND lower(i.name) = lower(o.name)) ORDER BY o.name").bind(rid, sid).all<{ id: number; name: string; note: string | null }>()).results;
+  const items = await openForSupplier(db, rid, sid);
   if (!items.length) return c.json({ error: "nothing_to_order" }, 422);
   let conn = await loadConnections(c.env, db, me.client_id);
   if (!conn.smtp && me.client_id !== 1) conn = { ...conn, smtp: (await loadConnections(c.env, db, 1)).smtp };
@@ -3138,16 +3202,16 @@ app.post("/api/orders/email", async (c) => {
   const brand = await loadBrand(db, me.client_id);
   const smtp = { ...conn, smtp: { ...conn.smtp, from: senderAddress(conn.smtp.from, brand.sender_name || brand.name) } };
   const resto = (await db.prepare("SELECT name FROM restaurants WHERE id = ?").bind(rid).first<{ name: string }>())?.name ?? brand.name;
-  const me2 = await db.prepare("SELECT name, email, phone FROM staff WHERE id = ?").bind(me.id).first<{ name: string; email: string | null; phone: string | null }>();
-  const en = (await db.prepare("SELECT lang FROM staff WHERE id = ?").bind(me.id).first<{ lang: string | null }>())?.lang === "en";
-  const lines = items.map((o) => `- ${o.name}${o.note ? ` (${o.note})` : ""}`).join("\n");
+  const me2 = await db.prepare("SELECT name, email, phone, lang FROM staff WHERE id = ?").bind(me.id).first<{ name: string; email: string | null; phone: string | null; lang: string | null }>();
+  const en = me2?.lang === "en", codes = await productCodes(db, rid);
+  const lines = items.map((o) => `- ${o.name}${codeText(codes.get(o.name.toLowerCase())?.[String(sid)], en)}${o.note ? ` (${o.note})` : ""}`).join("\n");
+  const sign = `${me2?.name ?? ""}${me2?.phone ? `\n${me2.phone}` : ""}${me2?.email ? `\n${me2.email}` : ""}`;
   const text = en
-    ? `Hello,\n\nPlease find our order for ${resto}${sup.customer_number ? ` (customer no. ${sup.customer_number})` : ""}:\n\n${lines}\n\nThank you!\n${me2?.name ?? ""}${me2?.phone ? `\n${me2.phone}` : ""}${me2?.email ? `\n${me2.email}` : ""}`
-    : `Bonjour,\n\nVoici notre commande pour ${resto}${sup.customer_number ? ` (n° de client ${sup.customer_number})` : ""} :\n\n${lines}\n\nMerci!\n${me2?.name ?? ""}${me2?.phone ? `\n${me2.phone}` : ""}${me2?.email ? `\n${me2.email}` : ""}`;
+    ? `Hello,\n\nPlease find our order for ${resto}${sup.customer_number ? ` (customer no. ${sup.customer_number})` : ""}:\n\n${lines}\n\nThank you!\n${sign}`
+    : `Bonjour,\n\nVoici notre commande pour ${resto}${sup.customer_number ? ` (n° de client ${sup.customer_number})` : ""} :\n\n${lines}\n\nMerci!\n${sign}`;
   const r = await deliver(db, smtp, "email", sup.email, { subject: en ? `Order – ${resto}` : `Commande – ${resto}`, text }, "supplier_order", me.id);
   if (!r.ok) return c.json({ error: "send_failed", detail: r.error ?? null }, 502);
-  const now = Date.now();
-  await db.batch(items.map((o) => db.prepare("UPDATE order_requests SET ordered_at = ?, ordered_by = ?, supplier_id = ? WHERE id = ? AND ordered_at IS NULL").bind(now, me.id, sid, o.id)));
+  await recordOrder(c.env, me, { rid, sid, method: "email", items });
   return c.json({ ok: true, count: items.length });
 });
 app.put("/api/orders/:id/ordered", async (c) => {
