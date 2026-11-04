@@ -1,3 +1,4 @@
+import { extractInvoice, compareInvoice, INVOICE_MIMES, MAX_INVOICE_BYTES, type PriceChange, type Comparison, type InvoiceLine } from "./invoices.ts";
 import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
 import { cleanInv, parseInv, cleanParts, partsTotal, type InvSpec, type Part } from "./inventory.ts";
 import { Hono, type Context } from "hono";
@@ -181,7 +182,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory" | "supplier";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory" | "supplier" | "supplier_order" | "invoice";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
@@ -198,6 +199,8 @@ const OWNER_SQL: Record<Owned, string> = {
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
   supplier: "SELECT 1 FROM suppliers WHERE id = ?1 AND client_id = ?2",
+  supplier_order: "SELECT 1 FROM supplier_orders o JOIN suppliers s ON s.id = o.supplier_id WHERE o.id = ?1 AND s.client_id = ?2",
+  invoice: "SELECT 1 FROM supplier_invoices v JOIN suppliers s ON s.id = v.supplier_id WHERE v.id = ?1 AND s.client_id = ?2",
   inventory: "SELECT 1 FROM inventory_counts n JOIN restaurants r ON r.id = n.restaurant_id WHERE n.id = ?1 AND r.client_id = ?2",
   voice_contact: "SELECT 1 FROM voice_contacts WHERE id = ?1 AND client_id = ?2",
   voice_call: "SELECT 1 FROM voice_calls WHERE id = ?1 AND client_id = ?2",
@@ -210,7 +213,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/suppliers\/(\d+)(\/|$)/, "supplier"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/suppliers\/(\d+)(\/|$)/, "supplier"], [/^\/api\/supplier-orders\/(\d+)(\/|$)/, "supplier_order"], [/^\/api\/invoices\/(\d+)(\/|$)/, "invoice"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -3147,14 +3150,93 @@ app.post("/api/orders/place", async (c) => {
   if (!items.length) return c.json({ error: "nothing_to_order" }, 422);
   return c.json({ id: await recordOrder(c.env, me, { rid, sid, method: b.method!, items, note: (b.note ?? "").trim().slice(0, 300) || null }) }, 201);
 });
+
+// ---------- Receiving an order: the supplier's invoice, read by Claude, compared with the order; prices updated ----------
+const invoiceKind = (b: Uint8Array): string | null => (b.length > 8 && b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 ? "application/pdf" : b[0] === 0xff && b[1] === 0xd8 ? "image/jpeg" : b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 ? "image/png"
+  : b.length > 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 ? "image/webp" : null);
+/** Sets (or, reverting, restores) the price of each ingredient at one supplier, in every post where the ingredient is listed. */
+async function applyPrices(db: D1Database, rid: number, sid: number, changes: PriceChange[], revert = false): Promise<void> {
+  const st: D1PreparedStatement[] = [];
+  for (const ch of changes) {
+    const rows = (await db.prepare("SELECT i.id, i.codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? AND lower(i.name) = lower(?)").bind(rid, ch.ingredient).all<{ id: number; codes: string | null }>()).results;
+    for (const r of rows) {
+      let codes: Record<string, ProductCode> = {};
+      try { const v = JSON.parse(r.codes ?? "{}"); if (v && typeof v === "object" && !Array.isArray(v)) codes = v; } catch { /* start again */ }
+      const cur = codes[String(sid)] ?? { p: null, alt: [] };
+      const price = revert ? ch.old : ch.new;
+      codes[String(sid)] = { ...cur, price, unit: price ? (revert ? cur.unit ?? null : ch.unit ?? cur.unit ?? null) : null };
+      st.push(db.prepare("UPDATE ingredients SET codes = ? WHERE id = ?").bind(cleanCodes(codes), r.id));
+    }
+  }
+  if (st.length) await db.batch(st);
+}
+const invoiceView = (v: Record<string, unknown>) => ({ ...v, content_b64: undefined, lines: (() => { try { return JSON.parse(String(v.lines ?? "[]")); } catch { return []; } })(), comparison: (() => { try { return v.comparison ? JSON.parse(String(v.comparison)) as Comparison : null; } catch { return null; } })() });
+app.post("/api/suppliers/:id/invoices", async (c) => {
+  const me = c.get("me"), db = c.env.DB, sid = intParam(c.req.param("id")), rid = intParam(c.req.query("restaurant")), oid = intParam(c.req.query("order"));
+  if (!sid || !rid || !(await canManage(db, me, rid, "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.length > MAX_INVOICE_BYTES) return c.json({ error: "file_too_large", max_bytes: MAX_INVOICE_BYTES }, 413);
+  const mime = invoiceKind(bytes);
+  if (!mime || !INVOICE_MIMES.includes(mime)) return c.json({ error: "unsupported_file" }, 400);
+  const order = oid ? await db.prepare("SELECT id, items FROM supplier_orders WHERE id = ? AND supplier_id = ? AND restaurant_id = ?").bind(oid, sid, rid).first<{ id: number; items: string }>() : null;
+  if (oid && !order) return c.json({ error: "not_found" }, 404);
+  let ordered: { name: string; note: string | null }[] | null = null;
+  if (order) { try { ordered = (JSON.parse(order.items) as { name: string; note: string | null }[]).map((i) => ({ name: i.name, note: i.note ?? null })); } catch { ordered = []; } }
+  const catalog = (await db.prepare("SELECT min(i.name) AS name, max(i.codes) AS codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id JOIN ingredient_suppliers l ON l.ingredient_id = i.id WHERE l.supplier_id = ? AND g.restaurant_id = ? GROUP BY lower(i.name)").bind(sid, rid).all<{ name: string; codes: string | null }>()).results
+    .map((r) => { let cc: ProductCode | undefined; try { cc = (JSON.parse(r.codes ?? "{}") as Record<string, ProductCode>)[String(sid)]; } catch { /* none */ } return { name: r.name, p: cc?.p ?? null, alt: cc?.alt ?? [], price: cc?.price ?? null, unit: cc?.unit ?? null }; });
+  const key = await anthropicKey(c.env, me.client_id);
+  let usage: Record<string, number> | null = null, usedModel = "";
+  const b64 = bytesToBase64(bytes), filename = decodeURIComponent(c.req.header("X-Filename") ?? "invoice").replace(/[^\w .()-]/g, "_").slice(0, 120);
+  const inv = key ? await extractInvoice(key, b64, mime, fetch, c.env.ANTHROPIC_API_BASE ?? "https://api.anthropic.com", (u, m) => { usage = u; usedModel = m; }).catch(() => null) : null;
+  if (usage) await logClaude(db, me.client_id, "invoice", usedModel, usage, filename, me.id);
+  const cmp = inv ? compareInvoice(inv.lines, catalog, ordered) : null;
+  if (cmp?.price_changes.length) await applyPrices(db, rid, sid, cmp.price_changes);
+  const now = Date.now();
+  const r = await db.prepare("INSERT INTO supplier_invoices (supplier_id, restaurant_id, order_id, filename, mime, content_b64, size, invoice_number, invoice_date, total, uploaded_by, uploaded_at, read_by_ai, lines, comparison) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+    .bind(sid, rid, order?.id ?? null, filename, mime, b64, bytes.length, inv?.invoice_number ?? null, inv?.invoice_date ?? null, inv?.total ?? null, me.id, now, inv ? 1 : 0, inv ? JSON.stringify(inv.lines) : null, cmp ? JSON.stringify(cmp) : null).first<{ id: number }>();
+  if (order) await db.prepare("UPDATE supplier_orders SET received_at = COALESCE(received_at, ?), received_by = COALESCE(received_by, ?) WHERE id = ?").bind(now, me.id, order.id).run();
+  return c.json({ id: r!.id, read_by_ai: !!inv, ai_configured: !!key }, 201);
+});
+async function invoiceFor(c: Context<any>): Promise<Record<string, unknown> | Response> {
+  const me = c.get("me"), db: D1Database = c.env.DB, id = intParam(c.req.param("id"));
+  const v = id ? await db.prepare("SELECT v.*, st.name AS uploaded_by_name FROM supplier_invoices v LEFT JOIN staff st ON st.id = v.uploaded_by WHERE v.id = ?").bind(id).first<Record<string, unknown>>() : null;
+  if (!v) return c.json({ error: "not_found" }, 404);
+  if (!(await restockRestaurants(db, me)).includes(Number(v.restaurant_id))) return c.json({ error: "forbidden" }, 403);
+  return v;
+}
+app.get("/api/invoices/:id", async (c) => { const v = await invoiceFor(c); return v instanceof Response ? v : c.json(invoiceView(v)); });
+app.get("/api/invoices/:id/file", async (c) => {
+  const v = await invoiceFor(c); if (v instanceof Response) return v;
+  const bin = atob(String(v.content_b64)), bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, { headers: { "content-type": String(v.mime), "content-disposition": `inline; filename="${String(v.filename).replace(/"/g, "")}"`, "cache-control": "private, max-age=3600" } });
+});
+app.post("/api/invoices/:id/revert-prices", async (c) => {
+  const v = await invoiceFor(c); if (v instanceof Response) return v;
+  const me = c.get("me");
+  if (!(await canManage(c.env.DB, me, Number(v.restaurant_id), "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  if (v.prices_reverted === 1) return c.json({ error: "already_reverted" }, 409);
+  const cmp = (() => { try { return JSON.parse(String(v.comparison)) as Comparison; } catch { return null; } })();
+  if (cmp?.price_changes.length) await applyPrices(c.env.DB, Number(v.restaurant_id), Number(v.supplier_id), cmp.price_changes, true);
+  await c.env.DB.prepare("UPDATE supplier_invoices SET prices_reverted = 1 WHERE id = ?").bind(v.id).run();
+  return c.json({ ok: true });
+});
+app.post("/api/supplier-orders/:id/received", async (c) => {
+  const me = c.get("me"), db = c.env.DB, id = intParam(c.req.param("id"));
+  const o = id ? await db.prepare("SELECT restaurant_id FROM supplier_orders WHERE id = ?").bind(id).first<{ restaurant_id: number }>() : null;
+  if (!o) return c.json({ error: "not_found" }, 404);
+  if (!(await canManage(db, me, o.restaurant_id, "kitchen"))) return c.json({ error: "forbidden" }, 403);
+  await db.prepare("UPDATE supplier_orders SET received_at = COALESCE(received_at, ?), received_by = COALESCE(received_by, ?) WHERE id = ?").bind(Date.now(), me.id, id).run();
+  return c.json({ ok: true });
+});
 app.get("/api/suppliers/:id/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB, sid = intParam(c.req.param("id")), rid = intParam(c.req.query("restaurant"));
   if (!sid || !rid || !(await restockRestaurants(db, me)).includes(rid)) return c.json({ error: "forbidden" }, 403);
-  const orders = (await db.prepare("SELECT o.id, o.method, o.placed_at, o.delivery_date, o.note, o.items, s.name AS placed_by FROM supplier_orders o LEFT JOIN staff s ON s.id = o.placed_by WHERE o.supplier_id = ? AND o.restaurant_id = ? ORDER BY o.placed_at DESC LIMIT 60").bind(sid, rid).all<{ items: string }>()).results
-    .map((o) => ({ ...o, items: (() => { try { return JSON.parse(o.items); } catch { return []; } })() }));
+  const invoices = (await db.prepare("SELECT id, order_id, filename, invoice_number, invoice_date, total, uploaded_at, read_by_ai FROM supplier_invoices WHERE supplier_id = ? AND restaurant_id = ? ORDER BY uploaded_at DESC LIMIT 100").bind(sid, rid).all<{ id: number; order_id: number | null }>()).results;
+  const orders = (await db.prepare("SELECT o.id, o.method, o.placed_at, o.delivery_date, o.note, o.items, o.received_at, s.name AS placed_by FROM supplier_orders o LEFT JOIN staff s ON s.id = o.placed_by WHERE o.supplier_id = ? AND o.restaurant_id = ? ORDER BY o.placed_at DESC LIMIT 60").bind(sid, rid).all<{ id: number; items: string }>()).results
+    .map((o) => ({ ...o, items: (() => { try { return JSON.parse(o.items); } catch { return []; } })(), invoices: invoices.filter((v) => v.order_id === o.id) }));
   // items marked as ordered one by one before orders were recorded
   const loose = (await db.prepare("SELECT name, note, ordered_at FROM order_requests WHERE supplier_id = ? AND restaurant_id = ? AND ordered_at IS NOT NULL AND order_id IS NULL ORDER BY ordered_at DESC LIMIT 60").bind(sid, rid).all()).results;
-  return c.json({ orders, loose });
+  return c.json({ orders, loose, invoices: invoices.filter((v) => !v.order_id) });
 });
 app.get("/api/orders", async (c) => {
   const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant"));

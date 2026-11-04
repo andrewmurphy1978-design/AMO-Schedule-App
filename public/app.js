@@ -2534,6 +2534,79 @@ function orderActions({ sp, items, rid, canOrder, reload }) {
   return out;
 }
 
+// ---- receiving an order: the supplier's invoice (photo or PDF) is read by Claude and compared with the order ----
+const INVOICE_MAX = 1_400_000;
+/** A photo as a JPEG small enough to send (the text must stay readable: up to 2000 px, quality lowered only when needed). */
+async function shrinkInvoice(file) {
+  const bmp = await createImageBitmap(file);
+  let scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * scale); cv.height = Math.round(bmp.height * scale);
+    cv.getContext("2d").drawImage(bmp, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", Math.max(0.55, 0.85 - attempt * 0.08)));
+    if (blob && blob.size <= INVOICE_MAX - 20_000) return blob;
+    scale *= 0.8;
+  }
+  throw new Error("too_large");
+}
+const money2 = (n) => (n === null || n === undefined ? "—" : `${Number(n).toFixed(2)} $`);
+/** What came out of one invoice: the totals, how each line compares with the order, what is missing, and the price changes. */
+function invoiceResult(inv, onChange) {
+  const cmp = inv.comparison, box = h("div", { class: "inv-result" });
+  box.append(h("div", { class: "inv-res-head" }, h("b", {}, `🧾 ${t("invcTitle")}${inv.invoice_number ? ` ${inv.invoice_number}` : ""}`),
+    h("span", { class: "meta" }, `${inv.invoice_date ? ` · ${fmtDay(inv.invoice_date)}` : ""}${inv.total != null ? ` · ${money2(inv.total)}` : ""}`),
+    h("a", { class: "btn small", href: `/api/invoices/${inv.id}/file`, target: "_blank", rel: "noopener noreferrer" }, `🔍 ${t("invcView")}`)));
+  if (!inv.read_by_ai || !cmp) { box.append(h("p", { class: "meta" }, `⚠ ${t("invcNotRead")}`)); return box; }
+  const n = (st) => cmp.rows.filter((r) => r.status === st).length;
+  box.append(h("p", { class: "inv-counts" }, `✅ ${n("ok")} · 🔁 ${n("substitute")} · ➕ ${n("extra")} · ❓ ${n("unknown")} · ❌ ${cmp.missing.length}`));
+  if (!cmp.had_order) box.append(h("p", { class: "meta" }, t("invcNoOrder")));
+  const icon = { ok: "✅", substitute: "🔁", extra: "➕", unknown: "❓" };
+  box.append(h("ul", { class: "inv-lines" },
+    ...cmp.missing.map((m) => h("li", { class: "bad" }, `❌ ${m.name}${m.note ? ` (${m.note})` : ""} — ${t("invcMissing")}`)),
+    ...cmp.rows.map((r) => h("li", { class: r.status }, `${icon[r.status]} ${r.line.description}`,
+      h("small", { class: "meta" }, ` ${r.line.code ? `#${r.line.code} · ` : ""}${r.line.qty != null ? `${r.line.qty}${r.line.unit ? ` ${r.line.unit}` : ""}` : ""}${r.line.unit_price != null ? ` × ${money2(r.line.unit_price)}` : ""}`),
+      r.status === "substitute" ? h("div", { class: "meta" }, `${t("invcReplaces")} ${r.ingredient}`) : r.status === "extra" ? h("div", { class: "meta" }, t("invcNotOrdered")) : r.status === "unknown" ? h("div", { class: "meta" }, t("invcUnknown")) : null))));
+  if (cmp.price_changes.length) {
+    const reverted = inv.prices_reverted === 1;
+    box.append(h("h4", {}, `💲 ${t("invcPrices")}`), h("ul", { class: "inv-lines" }, cmp.price_changes.map((c) => h("li", {}, `${c.ingredient} : ${c.old != null ? `${money2(c.old)} → ` : ""}${money2(c.new)}${c.unit ? ` / ${c.unit}` : ""}`))),
+      reverted ? h("p", { class: "meta" }, t("invcPricesReverted")) : h("button", { class: "btn small", type: "button", onClick: async (e) => {
+        if (!(await ask(t("invcRevertConfirm")))) return; e.currentTarget.disabled = true;
+        try { await api(`/invoices/${inv.id}/revert-prices`, { method: "POST" }); toast(t("invcPricesReverted")); onChange?.(); } catch (err) { e.currentTarget.disabled = false; toast(errorText(err)); }
+      } }, t("invcRevert")));
+  }
+  return box;
+}
+/** Drop a file (or take a photo) of the invoice; the answer is shown in place. `order` is the order received (or null). */
+function invoiceDropZone({ sp, rid, order, onDone }) {
+  const out = h("div", { class: "inv-out" });
+  const zone = h("div", { class: "drop-zone", tabindex: "0" });
+  async function send(file) {
+    if (!file) return;
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name), isImg = file.type.startsWith("image/");
+    if (!isPdf && !isImg) { toast(t("invcBadType")); return; }
+    out.replaceChildren(h("p", { class: "meta" }, `⏳ ${t("invcReading")}`));
+    try {
+      let blob = file;
+      if (isImg) blob = await shrinkInvoice(file);
+      else if (file.size > INVOICE_MAX) throw new Error("too_large");
+      const res = await fetch(`/api/suppliers/${sp.id}/invoices?restaurant=${rid}${order ? `&order=${order.id}` : ""}`, { method: "POST", headers: { "content-type": isPdf ? "application/pdf" : "image/jpeg", "X-Filename": encodeURIComponent(file.name || "invoice"), ...clientHeader() }, body: blob });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw Object.assign(new Error(j.error ?? "error"), { body: j });
+      const inv = await api(`/invoices/${j.id}`);
+      out.replaceChildren(invoiceResult(inv, () => onDone?.()));
+      onDone?.(true);
+    } catch (err) { out.replaceChildren(h("p", { class: "inv-err" }, `⚠ ${err.message === "too_large" || err.body?.error === "file_too_large" ? t("invcTooBig") : err.body?.error === "unsupported_file" ? t("invcBadType") : errorText(err)}`)); }
+  }
+  const pick = (accept, capture) => { const i = h("input", { type: "file", accept, hidden: true, ...(capture ? { capture: "environment" } : {}), onChange: (e) => { const f = e.target.files[0]; e.target.value = ""; send(f); } }); return i; };
+  const photo = pick("image/*", true), file = pick("image/*,application/pdf", false);
+  zone.append(h("p", {}, `🧾 ${t("invcDrop")}`), h("div", { class: "ord-actions" },
+    h("button", { class: "btn small", type: "button", onClick: () => photo.click() }, `📷 ${t("invcPhoto")}`), h("button", { class: "btn small", type: "button", onClick: () => file.click() }, `📁 ${t("invcChoose")}`)), photo, file);
+  for (const ev of ["dragenter", "dragover"]) zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("over"); });
+  zone.addEventListener("drop", (e) => send(e.dataTransfer?.files?.[0]));
+  return h("div", { class: "inv-drop" }, zone, out);
+}
+
 // "À commander": ingredients reported as missing, grouped by supplier; managers mark them as ordered.
 async function renderOrders(box, restaurantIds) {
   const restos = state.restaurants.filter((r) => restaurantIds.includes(r.id));
@@ -4433,14 +4506,15 @@ function usagePanel() {
     const by = (kind) => d.totals.find((x) => x.kind === kind);
     const card = (kind, label, qty) => { const x = by(kind); return h("div", { class: "card usage-card" }, h("h3", {}, label), x ? [h("div", { class: "usage-big" }, usd(x.cost_micro), x.pending ? h("small", { class: "meta" }, ` + ${x.pending} ${t("usagePending")}`) : null), h("p", { class: "meta" }, `${x.n} ${t("usageCount")} · ${qty(x)}`)] : h("p", { class: "meta" }, "—")); };
     const total = d.totals.reduce((n, x) => n + x.cost_micro, 0);
-    const what = (r) => ({ ai_schedule: t("usageAiSchedule"), payslip: t("usagePayslip"), sms: t("usageSms"), call: t("usageCall") }[r.kind] ?? r.kind);
-    const qty = (r) => (r.kind === "ai_schedule" || r.kind === "payslip" ? `${(r.input_tokens ?? 0).toLocaleString(locale())} / ${(r.output_tokens ?? 0).toLocaleString(locale())}` : r.kind === "sms" ? `${r.units ?? 1} ${t("usageSegments")}` : r.units != null ? `${Math.round((r.units / 60) * 10) / 10} min` : "—");
+    const what = (r) => ({ ai_schedule: t("usageAiSchedule"), payslip: t("usagePayslip"), invoice: t("usageInvoice"), sms: t("usageSms"), call: t("usageCall") }[r.kind] ?? r.kind);
+    const qty = (r) => (r.kind === "ai_schedule" || r.kind === "payslip" || r.kind === "invoice" ? `${(r.input_tokens ?? 0).toLocaleString(locale())} / ${(r.output_tokens ?? 0).toLocaleString(locale())}` : r.kind === "sms" ? `${r.units ?? 1} ${t("usageSegments")}` : r.units != null ? `${Math.round((r.units / 60) * 10) / 10} min` : "—");
     box.replaceChildren(h("h2", {}, `💰 ${t("usageTitle")}`), h("p", { class: "meta" }, t("usageHelp")),
       h("div", { class: "field", style: "max-width:220px" }, h("span", {}, t("usageMonth")), h("select", { "aria-label": t("usageMonth"), onChange: (e) => { st.month = e.target.value; load(); } }, d.months.map((m) => h("option", { value: m, selected: m === d.month }, m)))),
       h("div", { class: "card usage-total" }, h("span", {}, t("usageTotal")), h("b", {}, usd(total))),
       h("div", { class: "usage-cards" },
         card("ai_schedule", t("usageAiSchedule"), (x) => `${x.input_tokens.toLocaleString(locale())} / ${x.output_tokens.toLocaleString(locale())} ${t("usageTokens")}`),
         card("payslip", t("usagePayslip"), (x) => `${x.input_tokens.toLocaleString(locale())} / ${x.output_tokens.toLocaleString(locale())} ${t("usageTokens")}`),
+        card("invoice", t("usageInvoice"), (x) => `${x.input_tokens.toLocaleString(locale())} / ${x.output_tokens.toLocaleString(locale())} ${t("usageTokens")}`),
         card("sms", t("usageSms"), (x) => `${x.units} ${t("usageSegments")}`),
         card("call", t("usageCall"), (x) => `${Math.round((x.units / 60) * 10) / 10} ${t("usageMinutes")}`)),
       d.recent.length ? [h("h3", {}, t("usageRecent")), h("div", { class: "usage-table-wrap" }, h("table", { class: "usage-table" },
@@ -4690,10 +4764,27 @@ function ingredientsPanel() {
       try {
         const d = await api(`/suppliers/${sp.id}/orders?restaurant=${rid}`);
         const stamp = (ts) => new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
-        histPane.replaceChildren(h("p", { class: "meta" }, `🏪 ${restoName}`),
-          ...(d.orders.length ? d.orders.map((o) => h("div", { class: "card sup-order" }, h("b", {}, stamp(o.placed_at)), h("span", { class: "meta" }, ` · ${orderMethodLabel(o.method)}${o.placed_by ? ` · ${o.placed_by}` : ""}`),
+        const refresh = () => { loaded.hist = false; loaded.cur = false; showTab("history"); };
+        const invLink = (v) => { const slot = h("div", { class: "inv-slot" }); return h("div", {}, h("button", { type: "button", class: "btn small", onClick: async () => { if (slot.childElementCount) { slot.replaceChildren(); return; } try { slot.replaceChildren(invoiceResult(await api(`/invoices/${v.id}`), refresh)); } catch (e) { toast(errorText(e)); } } }, `🧾 ${v.invoice_number ? `${t("invcTitle")} ${v.invoice_number}` : t("invcTitle")}${v.total != null ? ` · ${money2(v.total)}` : ""}`), slot); };
+        const orderCard = (o) => {
+          const zoneSlot = h("div", { class: "inv-slot" });
+          return h("div", { class: "card sup-order" }, h("b", {}, stamp(o.placed_at)), h("span", { class: "meta" }, ` · ${orderMethodLabel(o.method)}${o.placed_by ? ` · ${o.placed_by}` : ""}`),
+            h("span", { class: `badge ${o.received_at ? "ok" : ""}` }, o.received_at ? ` ✅ ${t("invcReceived")} ${stamp(o.received_at)}` : ` 📦 ${t("invcToReceive")}`),
             o.delivery_date ? h("div", { class: "meta" }, `🚚 ${t("ordDelivery")} ${fmtDay(o.delivery_date)}`) : null, o.note ? h("div", { class: "meta" }, o.note) : null,
-            h("ul", {}, o.items.map((i) => h("li", {}, i.name, i.code && codeLine(i.code) ? h("small", { class: "meta" }, ` — ${codeLine(i.code)}`) : null, i.note ? h("small", { class: "meta" }, ` (${i.note})`) : null))))) : [h("p", { class: "meta" }, t("ordNoHistory"))]),
+            h("ul", {}, o.items.map((i) => h("li", {}, i.name, i.code && codeLine(i.code) ? h("small", { class: "meta" }, ` — ${codeLine(i.code)}`) : null, i.note ? h("small", { class: "meta" }, ` (${i.note})`) : null))),
+            ...o.invoices.map(invLink),
+            h("div", { class: "ord-actions" },
+              h("button", { type: "button", class: "btn small", onClick: () => { zoneSlot.replaceChildren(zoneSlot.childElementCount ? [] : invoiceDropZone({ sp, rid, order: o, onDone: (soft) => { if (!soft) refresh(); } })); } }, `🧾 ${t("invcUpload")}`),
+              !o.received_at ? h("button", { type: "button", class: "btn small", onClick: async () => { try { await api(`/supplier-orders/${o.id}/received`, { method: "POST" }); refresh(); } catch (e) { toast(errorText(e)); } } }, `📥 ${t("invcMarkReceived")}`) : null), zoneSlot);
+        };
+        const unreceived = d.orders.filter((o) => !o.received_at);
+        histPane.replaceChildren(h("p", { class: "meta" }, `🏪 ${restoName}`),
+          h("section", { class: "card" }, h("h4", {}, `📥 ${t("invcReceiveTitle")}`), h("p", { class: "meta" }, t("invcHelp")),
+            (() => { const sel = h("select", { "aria-label": t("invcWhichOrder") }, h("option", { value: "" }, t("invcNoOrderOpt")), unreceived.map((o) => h("option", { value: o.id, selected: o === unreceived[0] }, `${stamp(o.placed_at)} · ${orderMethodLabel(o.method)}`)));
+              const holder = h("div", {}); const draw = () => holder.replaceChildren(invoiceDropZone({ sp, rid, order: d.orders.find((o) => String(o.id) === sel.value) ?? null, onDone: (soft) => { if (!soft) refresh(); } })); sel.addEventListener("change", draw); draw();
+              return h("div", {}, unreceived.length ? h("label", { class: "field" }, h("span", {}, t("invcWhichOrder")), sel) : null, holder); })()),
+          ...(d.orders.length ? d.orders.map(orderCard) : [h("p", { class: "meta" }, t("ordNoHistory"))]),
+          d.invoices.length ? h("details", { class: "order-done" }, h("summary", {}, t("invcAlone")), d.invoices.map(invLink)) : null,
           d.loose.length ? h("details", { class: "order-done" }, h("summary", {}, t("ordLoose")), d.loose.map((o) => h("div", { class: "order-row done" }, h("span", {}, `✓ ${o.name}`), h("small", { class: "meta" }, ` ${stamp(o.ordered_at)}`)))) : null);
       } catch (e) { histPane.replaceChildren(h("p", { class: "meta" }, errorText(e))); }
     }

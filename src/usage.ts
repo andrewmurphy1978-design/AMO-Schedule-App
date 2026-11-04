@@ -16,7 +16,7 @@ export function claudeCostMicro(model: string, u: ClaudeUsage): number | null {
   return Math.round(input + (u.output_tokens ?? 0) * p[1]); // $/M tokens x tokens = micro-dollars
 }
 
-export interface UsageRow { client_id: number; kind: "ai_schedule" | "payslip" | "sms" | "call"; provider: "anthropic" | "twilio"; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; units?: number | null; cost_micro?: number | null; currency?: string; ref?: string | null; detail?: string | null; staff_id?: number | null }
+export interface UsageRow { client_id: number; kind: "ai_schedule" | "payslip" | "invoice" | "sms" | "call"; provider: "anthropic" | "twilio"; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; units?: number | null; cost_micro?: number | null; currency?: string; ref?: string | null; detail?: string | null; staff_id?: number | null }
 
 /** Records one use. Never throws: a failure to log must not break the feature. */
 export async function logUsage(db: D1Database, r: UsageRow): Promise<void> {
@@ -26,7 +26,7 @@ export async function logUsage(db: D1Database, r: UsageRow): Promise<void> {
   } catch { /* the feature matters more than its log */ }
 }
 
-export const logClaude = (db: D1Database, clientId: number, kind: "ai_schedule" | "payslip", model: string, u: ClaudeUsage, detail: string, staffId?: number) =>
+export const logClaude = (db: D1Database, clientId: number, kind: "ai_schedule" | "payslip" | "invoice", model: string, u: ClaudeUsage, detail: string, staffId?: number) =>
   logUsage(db, { client_id: clientId, kind, provider: "anthropic", model, input_tokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), output_tokens: u.output_tokens ?? 0, cost_micro: claudeCostMicro(model, u), detail, staff_id: staffId });
 
 /** Twilio's price of a text or call, once known: positive micro-dollars ("-0.00750" USD becomes 7500). */
