@@ -1073,8 +1073,8 @@ function renderTimeline({ data, days, targets, sets, payroll, openEditor, weekVi
     for (const g of shortages(buckets, d.wins)) gapLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${t("missingN")} ${g.missing} ${t("personsShort")}`);
     for (const g of surpluses(buckets, d.wins)) extraLines.push(`${dayLabel}${fromMin(g.from)}–${fromMin(g.to)} · ${g.missing} ${t("personsShort")} ${t("tooMany")}`);
 
-    // Single day: present/required for each department with its icon in front (🍕 3/3 · 🚗 1/1).
-    const perDept = shown.length === 1 && sel.departments.length > 0 ? sel.departments.map((dep) => {
+    // Single day on a computer: present/required for each department with its icon in front (🍕 3/3 · 🚗 1/1). On a phone only the total is shown (2/3).
+    const perDept = shown.length === 1 && desktop && sel.departments.length > 0 ? sel.departments.map((dep) => {
       const slices = d.items.map((x) => x.s).filter((x) => x.status !== "sick_open").flatMap((x) =>
         shiftSlices(x).filter((sl) => sl.roles.some((r) => r.department_id === dep && !r.no_count)).map((sl) => ({ start_at: sl.a, end_at: sl.b })));
       return { dep, wins: d.hrs.closed ? [] : targetWindows(d.deptTargets[dep] ?? {}, d.openMin, d.closeMin, boundsOf(sel.restaurant)), buckets: coverage(slices, d.day, startMin, endMin) };
