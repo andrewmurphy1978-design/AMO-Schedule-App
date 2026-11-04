@@ -472,8 +472,40 @@ function mergeSchedules(datas, restaurantId, depts) {
   const days_off = Object.assign({}, ...datas.map((d) => d.days_off ?? {}));
   const skills = Object.assign({}, ...datas.map((d) => d.skills ?? {}));
   const delivery_presence = datas.flatMap((d) => d.delivery_presence ?? []);
-  return { ...datas[0], editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off, days_off, skills, any_skills: datas.some((d) => d.any_skills), delivery_presence, limits: { ...datas[0].limits, by_staff } };
+  const chg = datas.map((d) => d.changes).filter(Boolean);
+  const changes = chg.length ? { published_at: Math.max(...chg.map((c) => c.published_at)), by_shift: Object.assign({}, ...chg.map((c) => c.by_shift)), removed: chg.flatMap((c) => c.removed) } : null;
+  return { ...datas[0], changes, editable: datas.some((d) => d.editable), shifts, hours, elsewhere, time_off, days_off, skills, any_skills: datas.some((d) => d.any_skills), delivery_presence, limits: { ...datas[0].limits, by_staff } };
 }
+// The history of a schedule: every publication (the schedule as it was published) and what changed since the last one.
+async function scheduleHistoryDialog(deps, sel) {
+  let dlg = document.getElementById("history-modal");
+  if (!dlg) { dlg = h("dialog", { id: "history-modal", class: "wide" }); document.body.append(dlg); }
+  const body = h("div", { class: "hist-body" }, h("p", { class: "meta" }, t("loading")));
+  dlg.replaceChildren(h("div", { class: "modal-body" }, h("h2", {}, `🕘 ${t("chgHistoryTitle")}`), body, h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => dlg.close() }, t("close")))));
+  dlg.showModal();
+  const stamp = (ms) => new Date(ms).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
+  const hm = (iso) => iso.slice(11, 16);
+  try {
+    const parts = [];
+    for (const dep of deps) {
+      const d = await api(`/schedule/history?restaurant=${sel.restaurant}&department=${dep}&week=${sel.week}`);
+      const nm = (id) => d.names[id] ?? `#${id}`, dayName = (iso) => fmt(iso.slice(0, 10), { weekday: "short", day: "numeric", month: "short" });
+      const c = d.changes;
+      const lines = c ? [
+        ...c.replaced.map((r) => `🔁 ${nm(r.to.staff_id)} ${t("chgReplaces")} ${nm(r.from.staff_id)} — ${dayName(r.to.start_at)} ${hm(r.to.start_at)}–${hm(r.to.end_at)}`),
+        ...c.changed.map((x) => `✏️ ${nm(x.after.staff_id)} — ${dayName(x.after.start_at)} : ${hm(x.before.start_at)}–${hm(x.before.end_at)} → ${hm(x.after.start_at)}–${hm(x.after.end_at)}`),
+        ...c.added.map((a) => `➕ ${nm(a.staff_id)} — ${dayName(a.start_at)} ${hm(a.start_at)}–${hm(a.end_at)}`),
+        ...c.removed.map((r) => `❌ ${nm(r.staff_id)} — ${dayName(r.start_at)} ${hm(r.start_at)}–${hm(r.end_at)}`)] : [];
+      parts.push(h("section", { class: "card" }, h("h3", {}, t(`dept.${dep}`)),
+        h("h4", {}, t("chgChangesSince")), lines.length ? h("ul", { class: "hist-lines" }, lines.map((l) => h("li", {}, l))) : h("p", { class: "meta" }, t("chgNone")),
+        h("h4", {}, t("chgPublications")),
+        ...d.publications.map((pub, i) => h("details", { class: "hist-pub", open: false }, h("summary", {}, `${i === 0 ? "★ " : ""}${t("chgPublishedOn")} ${stamp(pub.published_at)}${pub.published_by ? ` ${t("chgBy")} ${pub.published_by}` : ""} · ${pub.shifts.length} ${t("chgShifts")}`),
+          h("ul", { class: "hist-lines" }, [...pub.shifts].sort((a, b) => a.start_at.localeCompare(b.start_at)).map((x) => h("li", {}, `${dayName(x.start_at)} ${hm(x.start_at)}–${hm(x.end_at)} · ${nm(x.staff_id)}`)))))));
+    }
+    body.replaceChildren(...parts);
+  } catch (e) { body.replaceChildren(h("p", { class: "meta" }, errorText(e))); }
+}
+
 function mergeRosters(rosters) {
   const by = new Map();
   for (const r of rosters.flat()) {
@@ -626,6 +658,7 @@ async function renderSchedule() {
   const people = new Map();
   for (const r of roster) people.set(r.staff_id, r.name);
   for (const s of data.shifts) people.set(s.staff_id, s.staff_name);
+  for (const r of data.changes?.removed ?? []) if (!people.has(r.staff_id)) people.set(r.staff_id, r.staff_name);
   const meta = new Map();
   for (const r of roster) meta.set(r.staff_id, { color: r.color, photo_v: r.photo_v });
   for (const sh of data.shifts) meta.set(sh.staff_id, { color: sh.staff_color, photo_v: sh.photo_v });
@@ -684,12 +717,18 @@ async function renderSchedule() {
           data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d).map((s) => {
             const sick = s.status === "sick_open";
             const body = [h("b", {}, range(s).replace(" – ", "–")), s.segments?.length ? "" : ` ${shiftRoleIcons(s)} `, ...roleLines(s), s.posts?.length ? h("span", { class: "post-tag", title: t("kitchenPosts") }, `📍 ${s.posts.map((p) => (getLang() === "en" ? p.name_en : p.name_fr) + (p.start_at ? ` ${hhmm(p.start_at)}–${hhmm(p.end_at)}` : "")).join(", ")}`) : null, sick ? h("span", { class: "sick-badge" }, `🚫 ${t("sickOpen")}`) : null,
-              s.replaced_name ? h("span", { class: "replaced" }, `${t("replacing")} ${s.replaced_name}`) : null];
+              null];
             const c = staffColor(s.staff_id, s.staff_color);
             const style = `border-left-color:${c};background:color-mix(in srgb, ${c} 16%, var(--card))`;
-            const cls = `shift-chip ${sick ? "sick" : ""} ${data.conflicts.shifts.has(s.id) ? "conflict" : ""}`;
+            // changed since the schedule was published: a replacement, other hours, or a shift added later (each in its own colour)
+            const ch = data.changes?.by_shift?.[s.id] ?? (s.replaced_name ? { kind: "replacement", from_name: s.replaced_name } : null);
+            if (ch?.kind === "replacement") body.push(h("span", { class: "chg-badge" }, `🔁 ${t("chgReplaces")} ${ch.from_name}`));
+            else if (ch?.kind === "changed") body.push(h("span", { class: "chg-badge" }, `✏️ ${t("chgBefore")} ${hhmm(ch.before.start_at)}–${hhmm(ch.before.end_at)}`));
+            else if (ch?.kind === "added") body.push(h("span", { class: "chg-badge" }, `➕ ${t("chgAdded")}`));
+            const cls = `shift-chip ${sick ? "sick" : ""} ${ch ? `chg-${ch.kind}` : ""} ${data.conflicts.shifts.has(s.id) ? "conflict" : ""}`;
             return data.editable ? h("button", { class: cls, type: "button", style, onClick: () => openEditor(s) }, body) : h("div", { class: cls, style }, body);
           }),
+          (data.changes?.removed ?? []).filter((r) => r.staff_id === id && dayOf(r.start_at) === d).map((r) => h("div", { class: "shift-chip chg-removed", title: t("chgRemoved") }, h("b", {}, `${hhmm(r.start_at)}–${hhmm(r.end_at)}`), h("span", { class: "chg-badge" }, `❌ ${t("chgRemoved")}`))),
           // Working somewhere else the same day: shown in grey so you don't double-book by mistake.
           (data.elsewhere ?? []).map((e, i) => [e, i]).filter(([e]) => e.staff_id === id && dayOf(e.start_at) === d).map(([e, i]) => h("div", { class: `elsewhere ${data.conflicts.elsewhere.has(i) ? "conflict" : ""}`, title: `${data.conflicts.elsewhere.has(i) ? `⚠ ${t("conflictWord")} · ` : ""}${t("elsewhere")}: ${hhmm(e.start_at)}–${hhmm(e.end_at)} ${place(e)}` },
             // on screen: times and place; on paper: just the short restaurant name and the role icon ("St-Sauveur 🚗")
@@ -732,11 +771,15 @@ async function renderSchedule() {
     ? (draftDepts.length ? h("button", { class: "btn primary", type: "button", onClick: tryPublish }, t("publishBtn"))
         : h("button", { class: "btn", type: "button", onClick: async () => { if (await confirmDialog({ title: t("unpublishBtn"), message: t("unpublishConfirm"), yes: t("unpublishBtn"), no: t("cancel") })) setPublished(editableDepts, false); } }, t("unpublishBtn")))
     : null;
+  const when = (ms) => new Date(ms).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const changesBar = data.changes ? h("div", { class: "chg-bar" }, h("span", {}, `${t("chgSince")} ${when(data.changes.published_at)} :`),
+    h("span", { class: "chg-key chg-replacement" }, `🔁 ${t("chgReplacement")}`), h("span", { class: "chg-key chg-changed" }, `✏️ ${t("chgChanged")}`), h("span", { class: "chg-key chg-added" }, `➕ ${t("chgAdded")}`), h("span", { class: "chg-key chg-removed" }, `❌ ${t("chgRemoved")}`)) : null;
+  const historyBtn = editableDepts.length && datas.some((d) => d.published) ? h("button", { class: "btn", type: "button", onClick: () => scheduleHistoryDialog(editableDepts.filter((d) => datas[depts.indexOf(d)].published), sel) }, `🕘 ${t("chgHistory")}`) : null;
   const publishBar = h("div", { class: `publish-bar ${editableDepts.length ? (draftDepts.length ? "draft" : "live") : allDraft ? "draft" : "live"}` },
     h("span", { class: "pb-text" }, barText), h("div", { class: "pb-tools" },
       draftDepts.length && editableDepts.length ? h("label", { class: "check notify-check" }, h("input", { type: "checkbox", checked: state.notifyOnPublish, onChange: (e) => { state.notifyOnPublish = e.target.checked; try { localStorage.setItem("notifyOnPublish", e.target.checked ? "1" : "0"); } catch { /* ignore */ } } }), h("span", {}, t("notifyEmployees"))) : null,
-      barButton, orderField, printField));
-  $app.replaceChildren(...[printHead, controls, publishBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
+      historyBtn, barButton, orderField, printField));
+  $app.replaceChildren(...[printHead, controls, publishBar, changesBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
   syncStickyOffsets();
 }
 

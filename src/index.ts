@@ -1,3 +1,4 @@
+import { diffShifts, changesForAi, hasChanges, type SnapShift, type NowShift, type Diff, type MidWeekChange } from "./schedulehistory.ts";
 import { extractInvoice, compareInvoice, INVOICE_MIMES, MAX_INVOICE_BYTES, type PriceChange, type Comparison, type InvoiceLine } from "./invoices.ts";
 import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
 import { cleanInv, parseInv, cleanParts, partsTotal, type InvSpec, type Part } from "./inventory.ts";
@@ -2005,12 +2006,19 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
 
   // the present (previous) week, existing plans for the target week, shifts elsewhere
   const prevB = weekBounds(prevStart)!;
-  const prev = (await db.prepare(
-    `SELECT sh.id, sh.staff_id, sh.role_id, sh.start_at, sh.end_at FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
-     WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND ro.department_id IN (${dmarks}) AND sh.start_at >= ? AND sh.start_at < ?`,
-  ).bind(restaurantId, ...departments, prevB.start, prevB.end).all<{ id: number; staff_id: number; role_id: number; start_at: string; end_at: string }>()).results;
+  // The last schedule sent to the AI is the one that was PUBLISHED (as it was before any change during the week); what was changed afterwards comes separately.
+  const prev: { id: number; staff_id: number; role_id: number; start_at: string; end_at: string }[] = [];
   const extra = new Map<number, number[]>();
-  if (prev.length) for (const x of (await db.prepare(`SELECT shift_id, role_id FROM shift_roles WHERE shift_id IN (${prev.map(() => "?").join(",")})`).bind(...prev.map((x) => x.id)).all<{ shift_id: number; role_id: number }>()).results) extra.set(x.shift_id, [...(extra.get(x.shift_id) ?? []), x.role_id]);
+  const midWeek: MidWeekChange[] = [];
+  let fakeId = 0;
+  for (const dep of departments) {
+    const snap = await publishedSnapshot(db, restaurantId, dep, prevStart);
+    const now = await currentShifts(db, restaurantId, dep, prevStart);
+    const base = snap ? snap.shifts : now;
+    for (const x of base) { const id = --fakeId; prev.push({ id, staff_id: x.staff_id, role_id: x.role_id, start_at: x.start_at, end_at: x.end_at }); if (x.extra_role_ids?.length) extra.set(id, x.extra_role_ids); }
+    if (snap) midWeek.push(...changesForAi(diffShifts(snap.shifts, now)));
+  }
+  void prevB;
   const next = (await db.prepare(
     `SELECT sh.staff_id, sh.role_id, sh.start_at, sh.end_at, sh.restaurant_id, ro.department_id FROM shifts sh JOIN roles ro ON ro.id = sh.role_id
      WHERE sh.status = 'ok' AND sh.staff_id IN (${im}) AND sh.start_at >= ? AND sh.start_at < ?`,
@@ -2027,6 +2035,7 @@ async function buildAiContext(c: Context<any>, restaurantId: number, departments
     week: { start: week, days }, departments, overtime_hours: settings.overtime_hours, period_boundaries: boundaries, targets,
     pre_open_minutes: Object.fromEntries(roles.map((x) => [x.name_en, x.pre_open_minutes])),
     employees,
+    mid_week_changes: midWeek,
     current_week_shifts: prev.map((x) => ({ staff_id: x.staff_id, role_ids: [x.role_id, ...(extra.get(x.id) ?? [])], date: x.start_at.slice(0, 10), start: x.start_at.slice(11, 16), end: x.end_at.slice(11, 16) })),
     already_planned_elsewhere: next.filter((x) => !here(x)).map((x) => ({ staff_id: x.staff_id, start_at: x.start_at, end_at: x.end_at })),
     existing_next_week: next.filter(here).map((x) => ({ staff_id: x.staff_id, role_id: x.role_id, start_at: x.start_at, end_at: x.end_at })),
@@ -2626,10 +2635,59 @@ app.get("/api/schedule", async (c) => {
   const personal: Record<number, number> = {};
   if (visible.length) for (const r of (await c.env.DB.prepare(`SELECT staff_id, max_weekly_hours FROM staff_limits WHERE staff_id IN (${visible.map(() => "?").join(",")})`).bind(...visible).all<{ staff_id: number; max_weekly_hours: number }>()).results) personal[r.staff_id] = r.max_weekly_hours;
   const published = !!(await c.env.DB.prepare("SELECT 1 FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(restaurantId, department, c.req.query("week")).first());
-  return c.json({ week: c.req.query("week"), editable, published, shifts: shifts.results, hours, elsewhere, time_off, days_off, skills, any_skills: anySkills, delivery_presence, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
+  // what changed since it was published (replacements, other hours, added / removed shifts), shown in colour on the schedule
+  let changes: unknown = null;
+  if (published) {
+    const snap = await publishedSnapshot(c.env.DB, restaurantId, department, c.req.query("week")!);
+    if (snap) {
+      const now = await currentShifts(c.env.DB, restaurantId, department, c.req.query("week")!);
+      const d = diffShifts(snap.shifts, now);
+      if (hasChanges(d)) {
+        const ids = new Set<number>([...d.removed.map((x) => x.staff_id), ...d.replaced.map((x) => x.from.staff_id), ...d.changed.map((x) => x.before.staff_id)]);
+        const nm = ids.size ? new Map((await c.env.DB.prepare(`SELECT id, name FROM staff WHERE id IN (${[...ids].map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>()).results.map((r) => [r.id, r.name])) : new Map<number, string>();
+        const by_shift: Record<number, unknown> = {};
+        for (const r of d.replaced) by_shift[r.to.id] = { kind: "replacement", from_staff_id: r.from.staff_id, from_name: nm.get(r.from.staff_id) ?? "", before: { start_at: r.from.start_at, end_at: r.from.end_at } };
+        for (const x of d.changed) by_shift[x.after.id] = { kind: "changed", before: { start_at: x.before.start_at, end_at: x.before.end_at } };
+        for (const a of d.added) by_shift[a.id] = { kind: "added" };
+        changes = { published_at: snap.published_at, by_shift, removed: d.removed.map((x) => ({ staff_id: x.staff_id, staff_name: nm.get(x.staff_id) ?? "", role_id: x.role_id, start_at: x.start_at, end_at: x.end_at })) };
+      }
+    }
+  }
+  return c.json({ week: c.req.query("week"), editable, published, changes, shifts: shifts.results, hours, elsewhere, time_off, days_off, skills, any_skills: anySkills, delivery_presence, limits: { overtime_hours: settings.overtime_hours, by_staff: personal } });
 });
 
 // Publish (or take back) one schedule: restaurant + department + week. Administrators, and managers of that department.
+// ---------- Published schedules are kept (snapshots); changes made later in the week are found by comparing ----------
+/** The shifts of one schedule (restaurant + department + week) as they are now. */
+async function currentShifts(db: D1Database, rid: number, dep: string, week: string): Promise<NowShift[]> {
+  const wb = weekBounds(week); if (!wb) return [];
+  const rows = (await db.prepare(`SELECT sh.id, sh.staff_id, sh.role_id, sh.start_at, sh.end_at, sh.notes FROM shifts sh JOIN roles ro ON ro.id = sh.role_id WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`).bind(rid, dep, wb.start, wb.end).all<{ id: number; staff_id: number; role_id: number; start_at: string; end_at: string; notes: string | null }>()).results;
+  const extra = new Map<number, number[]>();
+  if (rows.length) for (const x of (await db.prepare(`SELECT shift_id, role_id FROM shift_roles WHERE shift_id IN (${rows.map(() => "?").join(",")})`).bind(...rows.map((r) => r.id)).all<{ shift_id: number; role_id: number }>()).results) extra.set(x.shift_id, [...(extra.get(x.shift_id) ?? []), x.role_id]);
+  return rows.map((r) => ({ ...r, extra_role_ids: extra.get(r.id) ?? [] }));
+}
+/** Keeps the schedule as it is being published. */
+async function snapshotSchedule(db: D1Database, rid: number, dep: string, week: string, by: number): Promise<void> {
+  const shifts = (await currentShifts(db, rid, dep, week)).map(({ id: _id, ...rest }) => rest);
+  await db.prepare("INSERT INTO schedule_snapshots (restaurant_id, department_id, week_start, published_at, published_by, shifts) VALUES (?, ?, ?, ?, ?, ?)").bind(rid, dep, week, Date.now(), by, JSON.stringify(shifts)).run();
+}
+/** The schedule as it was last published, or null when there is none. */
+async function publishedSnapshot(db: D1Database, rid: number, dep: string, week: string): Promise<{ id: number; published_at: number; published_by: number | null; shifts: SnapShift[] } | null> {
+  const r = await db.prepare("SELECT id, published_at, published_by, shifts FROM schedule_snapshots WHERE restaurant_id = ? AND department_id = ? AND week_start = ? ORDER BY published_at DESC, id DESC LIMIT 1").bind(rid, dep, week).first<{ id: number; published_at: number; published_by: number | null; shifts: string }>();
+  if (!r) return null;
+  try { return { ...r, shifts: JSON.parse(r.shifts) as SnapShift[] }; } catch { return null; }
+}
+app.get("/api/schedule/history", async (c) => {
+  const me = c.get("me"), db = c.env.DB, rid = intParam(c.req.query("restaurant")), dep = c.req.query("department") ?? "", week = c.req.query("week") ?? "";
+  if (!rid || !dep || !weekBounds(week) || !(await canManage(db, me, rid, dep))) return c.json({ error: "forbidden" }, 403);
+  const snaps = (await db.prepare("SELECT s.id, s.published_at, s.shifts, st.name AS published_by FROM schedule_snapshots s LEFT JOIN staff st ON st.id = s.published_by WHERE s.restaurant_id = ? AND s.department_id = ? AND s.week_start = ? ORDER BY s.published_at DESC, s.id DESC LIMIT 20").bind(rid, dep, week).all<{ id: number; published_at: number; shifts: string; published_by: string | null }>()).results
+    .map((r) => ({ id: r.id, published_at: r.published_at, published_by: r.published_by, shifts: (() => { try { return JSON.parse(r.shifts) as SnapShift[]; } catch { return []; } })() }));
+  const now = await currentShifts(db, rid, dep, week);
+  const diff = snaps.length ? diffShifts(snaps[0].shifts, now) : null;
+  const ids = new Set<number>([...snaps.flatMap((s) => s.shifts.map((x) => x.staff_id)), ...now.map((x) => x.staff_id)]);
+  const names = ids.size ? Object.fromEntries((await db.prepare(`SELECT id, name FROM staff WHERE id IN (${[...ids].map(() => "?").join(",")}) AND client_id = ?`).bind(...ids, me.client_id).all<{ id: number; name: string }>()).results.map((r) => [r.id, r.name])) : {};
+  return c.json({ publications: snaps, current: now.map(({ id: _i, ...x }) => x), changes: diff, names });
+});
 app.post("/api/schedule/publish", async (c) => {
   const me = c.get("me");
   const b = await c.req.json<{ restaurant_id?: number; department_id?: string; week?: string; published?: boolean; notify?: boolean }>().catch(() => ({} as any));
@@ -2646,6 +2704,7 @@ app.post("/api/schedule/publish", async (c) => {
     if (clash?.n) return c.json({ error: "conflicts", count: clash.n }, 409);
   }
   const wasPublished = !!(await c.env.DB.prepare("SELECT 1 FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).first());
+  if (b.published && !wasPublished) await snapshotSchedule(c.env.DB, b.restaurant_id, b.department_id, b.week!, me.id); // the schedule as published is kept in the history
   if (b.published) await c.env.DB.prepare("INSERT OR REPLACE INTO schedule_publications (restaurant_id, department_id, week_start, published_at, published_by) VALUES (?, ?, ?, ?, ?)").bind(b.restaurant_id, b.department_id, b.week, Date.now(), me.id).run();
   else await c.env.DB.prepare("DELETE FROM schedule_publications WHERE restaurant_id = ? AND department_id = ? AND week_start = ?").bind(b.restaurant_id, b.department_id, b.week).run();
   emit(c, b.published ? "schedule.published" : "schedule.unpublished", async () => ({ restaurant_id: b.restaurant_id, department_id: b.department_id, week: b.week }));

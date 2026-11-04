@@ -1418,3 +1418,18 @@ a.btn.small { color: inherit; }
 .ing-dialog { min-width: 0; overflow-x: hidden; }
 .ing-dialog .sup-pane, .ing-code-fields, .ing-code-row, .ing-two > *, .ing-dialog .field { min-width: 0; }
 .ing-two input, .ing-two select { width: 100%; min-width: 0; box-sizing: border-box; }
+
+/* changes made after a schedule was published: each kind in its own colour */
+.shift-chip.chg-replacement { background: #d6f1ee !important; outline: 2px solid #0f9d94; outline-offset: -2px; }
+.shift-chip.chg-changed { background: #fff0c7 !important; outline: 2px solid #d99a00; outline-offset: -2px; }
+.shift-chip.chg-added { background: #dcf3e1 !important; outline: 2px solid #2e9e5b; outline-offset: -2px; }
+.shift-chip.chg-removed { background: #fde3df !important; outline: 2px dashed #c4372a; outline-offset: -2px; opacity: .85; }
+.shift-chip.chg-removed b { text-decoration: line-through; }
+.shift-chip .chg-badge { display: block; font-size: .72rem; font-weight: 700; }
+.chg-replacement .chg-badge { color: #0b6f68; } .chg-changed .chg-badge { color: #8a5f00; } .chg-added .chg-badge { color: #1b6e3c; } .chg-removed .chg-badge { color: #a3281d; }
+.chg-bar { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; margin: .4rem 0; font-size: .85rem; }
+.chg-key { padding: .1rem .5rem; border-radius: 999px; font-weight: 700; }
+.chg-key.chg-replacement { background: #d6f1ee; color: #0b6f68; } .chg-key.chg-changed { background: #fff0c7; color: #8a5f00; } .chg-key.chg-added { background: #dcf3e1; color: #1b6e3c; } .chg-key.chg-removed { background: #fde3df; color: #a3281d; }
+.hist-lines { margin: .3rem 0; padding-left: 1.1rem; display: grid; gap: .2rem; }
+.hist-pub summary { cursor: pointer; font-weight: 600; margin: .25rem 0; }
+@media print { .chg-bar { display: none; } .shift-chip[class*="chg-"] { outline-width: 1px; } }

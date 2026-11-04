@@ -22,7 +22,8 @@ export interface AiContext {
   targets: Record<string, Record<string, Record<string, number>>>; // date -> department -> period -> headcount
   pre_open_minutes: Record<string, number>;                          // role name -> minutes before opening
   employees: AiEmployee[];
-  current_week_shifts: { staff_id: number; role_ids: number[]; date: string; start: string; end: string }[];
+  current_week_shifts: { staff_id: number; role_ids: number[]; date: string; start: string; end: string }[]; // the last schedule AS PUBLISHED
+  mid_week_changes?: { kind: "changed" | "replacement" | "added" | "removed"; date: string; staff_id: number; was?: { start: string; end: string; role_id: number }; now?: { start: string; end: string; role_id: number }; replaces_staff_id?: number }[]; // made during that week, after publication
   already_planned_elsewhere: { staff_id: number; start_at: string; end_at: string }[]; // next week, other restaurants/departments
   existing_next_week: { staff_id: number; role_id: number; start_at: string; end_at: string }[];
 }
@@ -38,7 +39,7 @@ Rules, in order of importance:
 3. Never exceed "max_weekly_hours" of an employee, and keep everyone at or under "overtime_hours" per week. No two shifts of the same person may overlap, nor overlap "already_planned_elsewhere".
 4. Meet the staffing "targets" (headcount per period for each date and department) as closely as possible, counting each shift once for its role's department. Targets are given per 30-minute interval, keyed by its start time, within opening hours.
 5. Aim for each employee's "promised_hours" for the week (if any) without going over their maximum. Employees marked "is_new" have no history: give them a fair, reasonable first week.
-6. Use "current_week_shifts" as the starting point: keep the same people at the same hours on the same weekdays unless a rule above forces a change.
+6. Use "current_week_shifts" (the last schedule exactly as it was published) as the starting point: keep the same people at the same hours on the same weekdays unless a rule above forces a change. "mid_week_changes" lists what was changed during that week AFTER it was published (a replacement, other hours, an added or removed shift): it is information on what really happened (absences, people who keep covering), not the base schedule; do not copy those changes unless the situation clearly repeats.
 7. Roles listed in "pre_open_minutes" start that many minutes before the restaurant opens. Shifts that run to closing use until_close=true and the closing time as "end".
 8. "open_by_dow" / "close_by_dow" already include this week's special hours. Never schedule anyone on a date listed in "restaurant.closed_dates" (the restaurant is closed).
 8. Kitchen: with 4 or more cooks present each principal post (subs, starters, pasta, pizza) needs its own competent person ("kitchen_posts"); with breakfast hours the breakfast posts (bf_eggs, bf_back) must be covered then.
