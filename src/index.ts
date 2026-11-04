@@ -2925,7 +2925,11 @@ function cleanCodes(raw: unknown): string | null {
     const r = v as { p?: unknown; alt?: unknown };
     const p = typeof r.p === "string" && r.p.trim() ? r.p.trim().slice(0, 40) : null;
     const alt = (Array.isArray(r.alt) ? r.alt : typeof r.alt === "string" ? r.alt.split(/[,;\n]/) : []).map((x) => String(x).trim().slice(0, 40)).filter(Boolean).slice(0, 6);
-    if (p || alt.length) out[k] = { p, alt: [...new Set(alt)] };
+    const rr = r as { price?: unknown; unit?: unknown };
+    const pr = typeof rr.price === "string" ? Number(rr.price.replace(",", ".")) : rr.price;
+    const price = typeof pr === "number" && Number.isFinite(pr) && pr > 0 && pr <= 1_000_000 ? Math.round(pr * 100) / 100 : null;
+    const unit = typeof rr.unit === "string" && rr.unit.trim() ? rr.unit.trim().slice(0, 20) : null;
+    if (p || alt.length || price) out[k] = { p, alt: [...new Set(alt)], price, unit: price ? unit : null };
   }
   return Object.keys(out).length ? JSON.stringify(out) : null;
 }
@@ -3108,7 +3112,7 @@ app.get("/api/inventory/:id", async (c) => {
 });
 
 // ---------- Supplier orders: product numbers, recording an order, history ----------
-type ProductCode = { p: string | null; alt: string[] };
+type ProductCode = { p: string | null; alt: string[]; price?: number | null; unit?: string | null };
 /** The supplier product numbers of a restaurant's ingredients: ingredient name (lower case) -> { supplier id -> numbers }. */
 async function productCodes(db: D1Database, rid: number): Promise<Map<string, Record<string, ProductCode>>> {
   const rows = (await db.prepare("SELECT lower(i.name) AS k, max(i.codes) AS codes FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id WHERE g.restaurant_id = ? GROUP BY lower(i.name)").bind(rid).all<{ k: string; codes: string | null }>()).results;

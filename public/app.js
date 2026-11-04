@@ -2486,11 +2486,21 @@ async function renderInventory(box, restaurantIds) {
 }
 
 // ---- ordering from a supplier: the ways it takes orders, and the buttons for them ----
+/** The inputs of one supplier's product data for an ingredient: product no., replacement nos., price and what the price is for. `c` is edited in place. */
+function productCodeFields(c, onChange = () => {}) {
+  const inp = (key, props) => h("input", { value: c[key] ?? "", autocomplete: "off", ...props, onInput: (e) => { c[key] = e.target.value; onChange(); } });
+  return h("div", { class: "ing-code-fields" },
+    h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingCodePreferred")), inp("p", { maxLength: 40 })), h("label", { class: "field" }, h("span", {}, t("ingCodeAlternates")), inp("alt", { maxLength: 200, placeholder: t("ingCodeAltPh") }))),
+    h("div", { class: "ing-two" }, h("label", { class: "field" }, h("span", {}, t("ingPrice")), inp("price", { type: "number", min: "0", step: "0.01", inputmode: "decimal", placeholder: "0.00" })), h("label", { class: "field" }, h("span", {}, t("ingPriceUnit")), inp("unit", { maxLength: 20, list: "ing-units", placeholder: t("ingPriceUnitPh") }))));
+}
+/** The saved form of the fields above. */
+const codeValue = (c) => ({ p: (c.p ?? "").trim(), alt: (c.alt ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean), price: Number(String(c.price ?? "").replace(",", ".")) || null, unit: (c.unit ?? "").trim() });
+const codeFilled = (v) => !!(v.p || v.alt.length || v.price);
 const ORDER_METHOD_ICON = { call: "📞", email: "✉️", portal: "🔐", website: "🌐", api: "🔌" };
 const orderMethodLabel = (m) => `${ORDER_METHOD_ICON[m] ?? ""} ${t(`ordMeth_${m}`)}`;
 const supplierMethods = (sp) => (sp?.order_methods?.length ? sp.order_methods : sp?.order_method ? [sp.order_method] : []);
 const fmtDay = (ymd) => new Date(`${ymd}T12:00:00`).toLocaleDateString(locale(), { weekday: "long", day: "numeric", month: "short" });
-const codeLine = (c) => (c && (c.p || c.alt?.length) ? [c.p ? `#${c.p}` : null, c.alt?.length ? `${t("ordSubstitutes")} ${c.alt.map((a) => `#${a}`).join(", ")}` : null].filter(Boolean).join(" · ") : "");
+const codeLine = (c) => (c && (c.p || c.alt?.length || c.price) ? [c.p ? `#${c.p}` : null, c.alt?.length ? `${t("ordSubstitutes")} ${c.alt.map((a) => `#${a}`).join(", ")}` : null, c.price ? `${Number(c.price).toFixed(2)} $${c.unit ? ` / ${c.unit}` : ""}` : null].filter(Boolean).join(" · ") : "");
 /** "Next order: Thursday before 2:00 pm · delivery Friday" for a supplier, from the window the server worked out. */
 function windowNode(sp) {
   const w = sp.window;
@@ -4544,15 +4554,13 @@ function ingredientsPanel() {
     const gboxes = st.groups.map((g, gi) => h("input", { type: "checkbox", checked: cur.groups.includes(gi) }));
     const supSel = new Set(cur.supplier_ids ?? []);
     // the supplier's product numbers: the preferred one and the ones that can replace it, for each supplier ticked above
-    const codesBy = {}; for (const [sid, c] of Object.entries(cur.codes ?? {})) codesBy[sid] = { p: c.p ?? "", alt: (c.alt ?? []).join(", ") };
+    const codesBy = {}; for (const [sid, c] of Object.entries(cur.codes ?? {})) codesBy[sid] = { p: c.p ?? "", alt: (c.alt ?? []).join(", "), price: c.price ?? "", unit: c.unit ?? "" };
     const codesBox = h("div", { class: "ing-codes" });
     const drawCodes = () => {
       const sel = st.suppliers.filter((x) => supSel.has(x.id));
       codesBox.replaceChildren(...(sel.length ? [h("span", {}, `🔢 ${t("ingCodesTitle")}`), h("p", { class: "meta" }, t("ingCodesHelp")), ...sel.map((x) => {
-        const c = (codesBy[x.id] ??= { p: "", alt: "" });
-        return h("div", { class: "ing-code-row" }, h("b", {}, x.name), h("div", { class: "ing-two" },
-          h("label", { class: "field" }, h("span", {}, t("ingCodePreferred")), h("input", { value: c.p, maxLength: 40, autocomplete: "off", onInput: (e) => { c.p = e.target.value; } })),
-          h("label", { class: "field" }, h("span", {}, t("ingCodeAlternates")), h("input", { value: c.alt, maxLength: 200, autocomplete: "off", placeholder: t("ingCodeAltPh"), onInput: (e) => { c.alt = e.target.value; } }))));
+        const c = (codesBy[x.id] ??= { p: "", alt: "", price: "", unit: "" });
+        return h("div", { class: "ing-code-row" }, h("b", {}, x.name), productCodeFields(c));
       })] : []));
     };
 
@@ -4569,7 +4577,7 @@ function ingredientsPanel() {
           if (!entry) { fail(t("ingPickPost")); return; }
           if (!(await ask(`${t("ingNoPostDelete")} « ${entry.name} » ?`))) return;
         }
-        const codes = Object.fromEntries([...supSel].map((sid) => [sid, { p: (codesBy[sid]?.p ?? "").trim(), alt: (codesBy[sid]?.alt ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean) }]).filter(([, c]) => c.p || c.alt.length));
+        const codes = Object.fromEntries([...supSel].map((sid) => [sid, codeValue(codesBy[sid] ?? {})]).filter(([, c]) => codeFilled(c)));
         const fields = { codes, inv: Object.fromEntries(Object.entries(ivf).map(([k, el]) => [k, el.value.trim()])), name: nn, category: cat.value || null, location: loc.value, thaw: loc.value === "freezer" && thaw.checked, fridge_open: loc.value === "backstore" && fopen.checked, homemade: home.checked, components: home.checked ? [...comps] : [], component_qty: home.checked ? Object.fromEntries([...comps].filter((n) => Number(qtys[n]?.qty) > 0).map((n) => [n, { qty: Number(qtys[n].qty), unit: (qtys[n].unit ?? "").trim() }])) : {}, prep_note: home.checked ? note.value.trim() : null, supplier_ids: [...supSel], portion_g: home.checked && Number(grams.value) > 0 ? Number(grams.value) : null,
           portion_qty: home.checked && Number(qty.value) > 0 && unit.value.trim() ? Number(qty.value) : null, portion_unit: home.checked && Number(qty.value) > 0 && unit.value.trim() ? unit.value.trim() : null };
         st.groups.forEach((g, gi) => {
@@ -4699,8 +4707,34 @@ function ingredientsPanel() {
             h("div", { class: "ord-actions" }, ...orderActions({ sp: me, items, rid, canOrder: d.can_order, reload: () => { loaded.cur = false; loaded.hist = false; showTab("current"); } }))] : [h("p", { class: "meta" }, t("ordNothing"))]));
       } catch (e) { curPane.replaceChildren(h("p", { class: "meta" }, errorText(e))); }
     }
-    const panes = { card: cardPane, settings: settingsPane, history: histPane, current: curPane };
-    const tabDefs = [["card", t("supTabCard")], ["settings", t("supTabSettings")], ...(sp ? [["history", t("supTabHistory")], ["current", t("supTabCurrent")]] : [])];
+    // the ingredients this supplier delivers, with its product numbers (changes are saved with the dialog's Save button)
+    const key = (n) => n.trim().toLowerCase();
+    const linked = new Map(unique().filter((e) => sp && e.supplier_ids?.includes(sp.id)).map((e) => [key(e.name), { name: e.name, location: e.location, p: e.codes?.[sp.id]?.p ?? "", alt: (e.codes?.[sp.id]?.alt ?? []).join(", "), price: e.codes?.[sp.id]?.price ?? "", unit: e.codes?.[sp.id]?.unit ?? "" }]));
+    let ingDirty = false;
+    const ingPane = h("div", { class: "sup-pane" });
+    const drawIng = () => {
+      const rows = [...linked.values()].sort((a, b) => a.name.localeCompare(b.name, getLang()));
+      const addable = unique().filter((e) => !linked.has(key(e.name))).sort((a, b) => a.name.localeCompare(b.name, getLang()));
+      const pick = h("select", { "aria-label": t("supIngAdd") }, h("option", { value: "" }, `+ ${t("supIngAdd")}`), addable.map((e) => h("option", { value: key(e.name) }, e.name)));
+      pick.addEventListener("change", () => { const e = addable.find((x) => key(x.name) === pick.value); if (!e) return; linked.set(key(e.name), { name: e.name, location: e.location, p: "", alt: "", price: "", unit: "" }); ingDirty = true; drawIng(); });
+      ingPane.replaceChildren(h("p", { class: "meta" }, t("supIngHelp")), addable.length ? pick : null,
+        ...(rows.length ? rows.map((r) => h("div", { class: "ing-code-row" }, h("div", { class: "sup-ing-head" }, h("b", {}, `${LOCATION_INFO[r.location]?.[0] ?? ""} ${r.name}`),
+          h("button", { type: "button", class: "icon-btn", "aria-label": t("supIngRemove"), title: t("supIngRemove"), onClick: () => { linked.delete(key(r.name)); ingDirty = true; drawIng(); } }, "✕")),
+          productCodeFields(r, () => { ingDirty = true; }))) : [h("p", { class: "meta" }, t("supIngNone"))]));
+      const tab = tabBar.querySelector('[data-tab="ingredients"]'); if (tab) tab.textContent = `${t("supTabIngredients")} (${linked.size})`;
+    };
+    const applyIngredients = () => {
+      for (const g of st.groups) for (const i of g.items) {
+        const L = linked.get(key(i.name)), ids = new Set(i.supplier_ids ?? []);
+        if (L) ids.add(sp.id); else ids.delete(sp.id);
+        i.supplier_ids = [...ids];
+        const codes = { ...(i.codes ?? {}) };
+        const v = L ? codeValue(L) : null; if (v && codeFilled(v)) codes[sp.id] = v; else delete codes[sp.id];
+        i.codes = codes;
+      }
+    };
+    const panes = { card: cardPane, settings: settingsPane, ingredients: ingPane, history: histPane, current: curPane };
+    const tabDefs = [["card", t("supTabCard")], ["settings", t("supTabSettings")], ...(sp ? [["ingredients", t("supTabIngredients")], ["history", t("supTabHistory")], ["current", t("supTabCurrent")]] : [])];
     const tabBar = h("div", { class: "dlg-tabs sup-tabs", role: "tablist" });
     function showTab(id) {
       for (const [k, el] of Object.entries(panes)) el.hidden = k !== id;
@@ -4709,10 +4743,12 @@ function ingredientsPanel() {
       if (id === "current" && !loaded.cur) { loaded.cur = true; loadCurrent(); }
     }
     tabBar.append(...tabDefs.map(([id, label]) => h("button", { type: "button", role: "tab", "data-tab": id, onClick: () => showTab(id) }, label)));
+    if (sp) drawIng();
     const save = async (list) => { try { await api("/admin/suppliers", { method: "PUT", body: { suppliers: list } }); toast(t("saved")); dlg.close(); await load(); } catch (e) { err.textContent = `⚠ ${e.body?.error === "invalid_suppliers" ? t("supInvalid") : errorText(e)}`; err.hidden = false; } };
     dlg.replaceChildren(h("form", { class: "modal-body sup-dialog", onSubmit: async (e) => {
         e.preventDefault(); err.hidden = true;
         if (!name.value.trim()) { showTab("card"); err.textContent = `⚠ ${t("supNameRequired")}`; err.hidden = false; name.focus(); return; }
+        if (sp && ingDirty) { applyIngredients(); const problem = await persist(true); if (problem) { err.textContent = `⚠ ${problem}`; err.hidden = false; return; } ingDirty = false; }
         const methods = ["call", "email", "portal", "website", "api"].filter((m) => methodsOn.has(m));
         const one = { id: sp?.id, name: name.value, phone: phone.value, email: email.value, notes: notes.value, order_methods: methods, portal_url: methodsOn.has("portal") ? portalUrl.value : "", website_url: methodsOn.has("website") ? siteUrl.value : "", customer_number: customer.value,
           order_settings: { order_days: [...orderDays], cutoff: cutoff.value, delivery_mode: modeRadios.find((r) => r.querySelector("input").checked).querySelector("input").value, delivery_offset: Number(offset.value) || 0, delivery_days: [...deliveryDays], note: orderNote.value },
@@ -4724,7 +4760,7 @@ function ingredientsPanel() {
         h("div", { class: "sup-head-btns" },
           sp ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("supDeleteConfirm")))) return; await save(st.suppliers.filter((x) => x.id !== sp.id)); } }, t("delete")) : null,
           h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))),
-      tabBar, err, cardPane, settingsPane, histPane, curPane));
+      tabBar, err, cardPane, settingsPane, ingPane, histPane, curPane));
     showTab(tabDefs.some(([id]) => id === startTab) ? startTab : "card");
     dlg.showModal();
   }
