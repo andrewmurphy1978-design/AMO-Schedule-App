@@ -4096,14 +4096,24 @@ function productsPanel() {
     let dlg = document.getElementById("product-import-modal");
     if (!dlg) { dlg = h("dialog", { id: "product-import-modal", class: "wide" }); document.body.append(dlg); }
     const ta = h("textarea", { rows: 12, spellcheck: false, placeholder: '{ "products": [ { "name_fr": "Pizza pepperoni", "category": "Pizzas", "formats": [ { "name": "10 po", "price": 12.99, "ingredients": [ { "ingredient": "Fromage", "qty": 120, "unit": "g" } ] } ] } ] }' });
-    const upd = h("input", { type: "checkbox", checked: true }), out = h("p", { class: "meta" });
+    const upd = h("input", { type: "checkbox", checked: true }), out = h("p", { class: "meta" }), go = h("button", { class: "btn primary", type: "submit" }, t("prodImportGo"));
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
         e.preventDefault(); out.textContent = "";
         let data; try { data = JSON.parse(ta.value); } catch { out.textContent = `⚠ ${t("prodImportBad")}`; return; }
-        try { const r = await api("/admin/products/import", { method: "POST", body: { products: Array.isArray(data) ? data : data.products, update: upd.checked } }); out.textContent = `✅ ${r.created} ${t("prodImportCreated")}, ${r.updated} ${t("prodImportUpdated")}${r.skipped ? `, ${r.skipped} ${t("prodImportSkipped")}` : ""}`; load(); }
-        catch (x) { out.textContent = `⚠ ${x.body?.errors?.length ? x.body.errors.map((z) => `#${z.index + 1}: ${z.error}`).join(", ") : errorText(x)}`; }
+        const all = Array.isArray(data) ? data : data.products;
+        if (!Array.isArray(all) || !all.length) { out.textContent = `⚠ ${t("prodImportBad")}`; return; }
+        go.disabled = true; let created = 0, updated = 0, skipped = 0;
+        try {
+          for (let k = 0; k < all.length; k += 20) { // a few at a time, with the progress shown
+            out.textContent = `⏳ ${t("prodImporting")} ${Math.min(k + 20, all.length)} / ${all.length}…`;
+            const r = await api("/admin/products/import", { method: "POST", body: { products: all.slice(k, k + 20), update: upd.checked } });
+            created += r.created; updated += r.updated; skipped += r.skipped;
+          }
+          out.textContent = `✅ ${created} ${t("prodImportCreated")}, ${updated} ${t("prodImportUpdated")}${skipped ? `, ${skipped} ${t("prodImportSkipped")}` : ""}`; load();
+        } catch (x) { out.textContent = `⚠ ${x.body?.errors?.length ? x.body.errors.map((z) => `#${z.index + 1}: ${z.error}`).join(", ") : errorText(x)}${created + updated ? ` (${created + updated} ${t("prodImportDone")})` : ""}`; }
+        finally { go.disabled = false; }
       } }, h("h2", {}, `⬆ ${t("prodImport")}`), h("p", { class: "meta" }, t("prodImportHelp")), h("label", { class: "field" }, h("span", {}, t("prodImportFile")), h("input", { type: "file", accept: ".json,application/json", onChange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } })), ta, h("label", { class: "check" }, upd, h("span", {}, t("prodImportUpdate"))), out,
-      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")), h("button", { class: "btn primary", type: "submit" }, t("prodImportGo")))));
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")), go)));
     dlg.showModal();
   }
   load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));

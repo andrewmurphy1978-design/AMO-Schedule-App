@@ -3149,6 +3149,33 @@ app.delete("/api/admin/products/:id", requireAdmin, async (c) => {
   ]);
   return c.json({ ok: true });
 });
+/** Imports many products with few database round trips: all the statements go in batches (the ids are found by name inside the batch). */
+async function importProducts(db: D1Database, cid: number, list: Product[], update: boolean): Promise<{ created: number; updated: number; skipped: number }> {
+  const existing = new Set((await db.prepare("SELECT lower(name_fr) AS k FROM products WHERE client_id = ?").bind(cid).all<{ k: string }>()).results.map((r) => r.k));
+  let pos = (await db.prepare("SELECT COALESCE(MAX(position), 0) AS n FROM products WHERE client_id = ?").bind(cid).first<{ n: number }>())?.n ?? 0;
+  let created = 0, updated = 0, skipped = 0;
+  const st: D1PreparedStatement[] = [];
+  const pid = "(SELECT id FROM products WHERE client_id = ? AND lower(name_fr) = lower(?))";
+  for (const p of list) {
+    const has = existing.has(p.name_fr.toLowerCase());
+    if (has && !update) { skipped++; continue; }
+    if (has) {
+      updated++;
+      st.push(db.prepare("UPDATE products SET name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ? WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, cid, p.name_fr));
+      st.push(db.prepare(`DELETE FROM product_ingredients WHERE format_id IN (SELECT id FROM product_formats WHERE product_id = ${pid})`).bind(cid, p.name_fr));
+      st.push(db.prepare(`DELETE FROM product_formats WHERE product_id = ${pid}`).bind(cid, p.name_fr));
+    } else {
+      created++; existing.add(p.name_fr.toLowerCase());
+      st.push(db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, ++pos, Date.now()));
+    }
+    for (const [fi, f] of p.formats.entries()) {
+      st.push(db.prepare(`INSERT INTO product_formats (product_id, name, price, position) VALUES (${pid}, ?, ?, ?)`).bind(cid, p.name_fr, f.name, f.price, fi));
+      for (const [ii, i] of f.ingredients.entries()) st.push(db.prepare(`INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position) VALUES ((SELECT f.id FROM product_formats f JOIN products p ON p.id = f.product_id WHERE p.client_id = ? AND lower(p.name_fr) = lower(?) AND f.position = ?), ?, ?, ?, ?, ?)`).bind(cid, p.name_fr, fi, i.ingredient, i.qty, i.unit, i.note, ii));
+    }
+  }
+  for (let k = 0; k < st.length; k += 150) await db.batch(st.slice(k, k + 150));
+  return { created, updated, skipped };
+}
 // Several products at once (e.g. read from a menu): a product with the same name is replaced, the others are added.
 app.post("/api/admin/products/import", requireAdmin, async (c) => {
   const b = await c.req.json<{ products?: unknown[]; update?: boolean }>().catch(() => ({} as { products?: unknown[]; update?: boolean }));
@@ -3156,14 +3183,8 @@ app.post("/api/admin/products/import", requireAdmin, async (c) => {
   const cid = c.get("me").client_id, cleaned: Product[] = [], errors: { index: number; error: string }[] = [];
   b.products.forEach((raw, index) => { const r = cleanProduct(raw); if ("error" in r) errors.push({ index, error: r.error }); else cleaned.push(r.product); });
   if (errors.length) return c.json({ error: "invalid_products", errors }, 400); // nothing is saved when one product is wrong
-  let created = 0, updated = 0, skipped = 0;
-  for (const p of cleaned) {
-    const ex = await c.env.DB.prepare("SELECT id FROM products WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(cid, p.name_fr).first<{ id: number }>();
-    if (ex && b.update === false) { skipped++; continue; }
-    await saveProduct(c.env.DB, cid, ex?.id ?? null, p);
-    if (ex) updated++; else created++;
-  }
-  return c.json({ created, updated, skipped });
+  return c.json(await importProducts(c.env.DB, cid, cleaned, b.update !== false));
+
 });
 
 const supplierView = (r: Record<string, unknown>) => ({ ...r, api_key_set: r.api_key_set === 1, order_methods: (() => { try { return cleanMethods(JSON.parse(String(r.order_methods ?? "[]"))); } catch { return []; } })(), order_settings: parseOrderSettings(r.order_settings as string | null) });
