@@ -1,4 +1,4 @@
-import { cleanProduct, availability, type Product } from "./products.ts";
+import { cleanProduct, availability, CHANNELS, type Product } from "./products.ts";
 import { diffShifts, changesForAi, hasChanges, type SnapShift, type NowShift, type Diff, type MidWeekChange } from "./schedulehistory.ts";
 import { extractInvoice, compareInvoice, INVOICE_MIMES, MAX_INVOICE_BYTES, type PriceChange, type Comparison, type InvoiceLine } from "./invoices.ts";
 import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
@@ -3096,25 +3096,28 @@ app.put("/api/admin/labor-rate", requireAdmin, async (c) => {
 });
 // ---------- Products: what the customers buy; formats, each with its price and ingredients ----------
 async function productsOf(db: D1Database, cid: number, id?: number) {
-  const rows = (await db.prepare(`SELECT id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position FROM products WHERE client_id = ?${id ? " AND id = ?" : ""} ORDER BY category COLLATE NOCASE, position, name_fr COLLATE NOCASE`).bind(...(id ? [cid, id] : [cid])).all<{ id: number; name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: number; is_promo: number; available_from: string | null; available_to: string | null; position: number }>()).results;
+  const rows = (await db.prepare(`SELECT id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, channels, position FROM products WHERE client_id = ?${id ? " AND id = ?" : ""} ORDER BY category COLLATE NOCASE, position, name_fr COLLATE NOCASE`).bind(...(id ? [cid, id] : [cid])).all<{ id: number; name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: number; is_promo: number; available_from: string | null; available_to: string | null; channels: string | null; position: number }>()).results;
   if (!rows.length) return [];
   // joined on the client (not "IN (every id)": the database accepts at most 100 bound values per query)
   const scope = id ? "p.client_id = ? AND p.id = ?" : "p.client_id = ?", args = id ? [cid, id] : [cid];
   const formats = (await db.prepare(`SELECT f.id, f.product_id, f.name, f.price FROM product_formats f JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY f.position, f.id`).bind(...args).all<{ id: number; product_id: number; name: string; price: number | null }>()).results;
   const lines = (await db.prepare(`SELECT l.format_id, l.ingredient, l.qty, l.unit, l.note, l.choice_group AS choice FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY l.position, l.id`).bind(...args).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null; choice: number | null }>()).results;
-  return rows.map((p) => ({ ...p, active: p.active === 1, is_promo: p.is_promo === 1, formats: formats.filter((f) => f.product_id === p.id).map((f) => ({ id: f.id, name: f.name, price: f.price, ingredients: lines.filter((l) => l.format_id === f.id).map(({ format_id: _f, ...l }) => l) })) }));
+  const chans = (j: string | null) => { try { const v = JSON.parse(j ?? "null"); return Array.isArray(v) ? CHANNELS.filter((c) => v.includes(c)) : [...CHANNELS]; } catch { return [...CHANNELS]; } };
+  return rows.map((p) => ({ ...p, channels: chans(p.channels), active: p.active === 1, is_promo: p.is_promo === 1, formats: formats.filter((f) => f.product_id === p.id).map((f) => ({ id: f.id, name: f.name, price: f.price, ingredients: lines.filter((l) => l.format_id === f.id).map(({ format_id: _f, ...l }) => l) })) }));
 }
+/** The channels as stored: NULL when the product is sold everywhere. */
+const chanJson = (p: Product) => (p.channels.length === CHANNELS.length ? null : JSON.stringify(p.channels));
 /** Creates (id null) or replaces a product with its formats and ingredient lines. */
 async function saveProduct(db: D1Database, cid: number, id: number | null, p: Product): Promise<number> {
   if (id) {
     await db.batch([
-      db.prepare("UPDATE products SET name_fr = ?, name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ? WHERE id = ? AND client_id = ?").bind(p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, id, cid),
+      db.prepare("UPDATE products SET name_fr = ?, name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ?, channels = ? WHERE id = ? AND client_id = ?").bind(p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, chanJson(p), id, cid),
       db.prepare("DELETE FROM product_ingredients WHERE format_id IN (SELECT id FROM product_formats WHERE product_id = ?)").bind(id),
       db.prepare("DELETE FROM product_formats WHERE product_id = ?").bind(id),
     ]);
   } else {
     const pos = ((await db.prepare("SELECT COALESCE(MAX(position), 0) AS n FROM products WHERE client_id = ?").bind(cid).first<{ n: number }>())?.n ?? 0) + 1;
-    id = (await db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, pos, Date.now()).first<{ id: number }>())!.id;
+    id = (await db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at, channels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, pos, Date.now(), chanJson(p)).first<{ id: number }>())!.id;
   }
   for (const [fi, f] of p.formats.entries()) {
     const fid = (await db.prepare("INSERT INTO product_formats (product_id, name, price, position) VALUES (?, ?, ?, ?) RETURNING id").bind(id, f.name, f.price, fi).first<{ id: number }>())!.id;
@@ -3185,12 +3188,12 @@ async function importProducts(db: D1Database, cid: number, list: Product[], upda
     if (has && !update) { skipped++; continue; }
     if (has) {
       updated++;
-      st.push(db.prepare("UPDATE products SET name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ? WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, cid, p.name_fr));
+      st.push(db.prepare("UPDATE products SET name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ?, channels = ? WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, chanJson(p), cid, p.name_fr));
       st.push(db.prepare(`DELETE FROM product_ingredients WHERE format_id IN (SELECT id FROM product_formats WHERE product_id = ${pid})`).bind(cid, p.name_fr));
       st.push(db.prepare(`DELETE FROM product_formats WHERE product_id = ${pid}`).bind(cid, p.name_fr));
     } else {
       created++; existing.add(p.name_fr.toLowerCase());
-      st.push(db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, ++pos, Date.now()));
+      st.push(db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at, channels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, ++pos, Date.now(), chanJson(p)));
     }
     for (const [fi, f] of p.formats.entries()) {
       st.push(db.prepare(`INSERT INTO product_formats (product_id, name, price, position) VALUES (${pid}, ?, ?, ?)`).bind(cid, p.name_fr, f.name, f.price, fi));

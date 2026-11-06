@@ -98,6 +98,7 @@ import m0095 from "../migrations/0095_schedule_snapshots.sql";
 import m0096 from "../migrations/0096_first_login.sql";
 import m0097 from "../migrations/0097_products.sql";
 import m0098 from "../migrations/0098_product_choices.sql";
+import m0099 from "../migrations/0099_product_channels.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -198,6 +199,7 @@ const MIGRATIONS: [string, string][] = [
   ["0096_first_login", m0096],
   ["0097_products", m0097],
   ["0098_product_choices", m0098],
+  ["0099_product_channels", m0099],
 ];
 
 const statements = (sql: string) =>

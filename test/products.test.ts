@@ -44,3 +44,10 @@ test("alternatives (OR): a choice needs two options and its lines stay together"
   assert.deepEqual(l.map((x) => [x.ingredient, x.choice]), [["Jambon effiloché", 1], ["Saucisses", 1], ["Bacon", 1], ["Sel", null], ["Poivre", null]]);   // 4 -> 1, together; a lone choice is a plain ingredient
   assert.equal(l[0].qty, 56);
 });
+
+test("where a product is sold: dining room, delivery, counter", () => {
+  const all = cleanProduct({ name_fr: "X" }); assert.ok("product" in all); if ("product" in all) assert.deepEqual(all.product.channels, ["dine_in", "delivery", "counter"]);
+  const some = cleanProduct({ name_fr: "X", channels: ["counter", "dine_in", "nope"] }); assert.ok("product" in some); if ("product" in some) assert.deepEqual(some.product.channels, ["dine_in", "counter"]);
+  assert.deepEqual(cleanProduct({ name_fr: "X", channels: [] }), { error: "channel_required" });
+  assert.deepEqual(cleanProduct({ name_fr: "X", channels: ["x"] }), { error: "channel_required" });
+});
