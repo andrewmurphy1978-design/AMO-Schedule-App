@@ -579,7 +579,14 @@ async function renderSchedule() {
         if (prev !== "table") { state.scheduleTab = "table"; await render(); }
         window.addEventListener("afterprint", () => { if (state.scheduleTab !== prev) { state.scheduleTab = prev; render(); } }, { once: true });
         setTimeout(() => window.print(), 150);
-      } }, `🖨 ${t("printSchedule")}`));
+      } }, `🖨 ${t("printSchedule")}`),
+      h("button", { class: "btn", type: "button", title: t("printSheetHint"), onClick: async () => {
+        const prev = state.scheduleTab;
+        if (prev !== "table") { state.scheduleTab = "table"; await render(); }
+        document.body.classList.add("print-paper");
+        window.addEventListener("afterprint", () => { document.body.classList.remove("print-paper"); if (state.scheduleTab !== prev) { state.scheduleTab = prev; render(); } }, { once: true });
+        setTimeout(() => window.print(), 150);
+      } }, `🧾 ${t("printSheet")}`));
   const controls = h("div", { class: "controls" },
     h("div", { class: "field" }, h("span", {}, t("restaurant")), restaurantSelect({ list: options, value: sel.restaurant, onChange: (id) => { sel.restaurant = id; render(); } })),
     h("div", { class: "field" }, h("span", {}, t("department")),
@@ -701,6 +708,24 @@ async function renderSchedule() {
       hh.all - hh.here > 0.01 ? h("small", {}, `${hrs(hh.all)} ${t("hoursShort")} ${t("allPlaces")}`) : null,
       over ? h("small", { class: "warn" }, `⚠ ${t("overtimeWarn")}`) : null);
   };
+  // The printed sheet (the paper layout used in the restaurants): one row per employee, two stacked boxes per day (start / end, in decimals, F = until closing),
+  // a Total column, then empty rows to fill in by hand. Shown only when printing with the "sheet" button.
+  const dec = (iso) => { const [hh, mm] = iso.slice(11, 16).split(":").map(Number); const v = Math.round((hh + mm / 60) * 100) / 100; return String(Number.isInteger(v * 10) ? v.toFixed(1) : v).replace(".", ","); };
+  const sheetCell = (id, d) => {
+    const mine = data.shifts.filter((s) => s.staff_id === id && dayOf(s.start_at) === d && s.status !== "sick_open").sort((x, y) => x.start_at.localeCompare(y.start_at));
+    const away = elsewhereAt(id, d);
+    const lines = mine.slice(0, 2).map((s) => [dec(s.start_at), s.until_close ? "F" : dec(s.end_at)]);
+    if (!lines.length && away.length) lines.push([shortResto(away[0].restaurant).toLowerCase().slice(0, 6), ""]);
+    while (lines.length < 2) lines.push(["", ""]);
+    return h("td", { class: "ps-day" }, h("div", { class: "ps-box" }, lines.flatMap(([a, b]) => [h("span", {}, a), h("span", {}, b)])));
+  };
+  const paperSheet = h("div", { class: "paper-sheet" },
+    h("div", { class: "ps-title" }, h("b", {}, `${t("sheetTitle")} ${sel.departments.map((d) => t(`dept.${d}`)).join(" · ")}`), h("div", {}, `Mikes ${options.find((r) => r.id === sel.restaurant)?.name ?? ""}`)),
+    h("div", { class: "ps-week" }, h("span", {}, t("sheetWeek")), h("span", { class: "ps-range" }, `${fmt(days[0], { day: "2-digit", month: "short" })}  ${fmt(days[6], { day: "2-digit", month: "short" })}`)),
+    h("table", {}, h("thead", {}, h("tr", {}, h("th", {}), days.map((d) => h("th", {}, fmt(d, { weekday: "long" }))), h("th", {}, t("total")))),
+      h("tbody", {}, [...rows.map(([id, name]) => h("tr", {}, h("td", { class: "ps-name" }, h("b", {}, parts.get(id)?.first ?? name)), days.map((d) => sheetCell(id, d)),
+        h("td", { class: "ps-total" }, h("span", {}, data.hours?.[id] ? hrs(data.hours[id].here) : ""), h("span", {}, data.hours?.[id] && data.hours[id].all - data.hours[id].here > 0.01 ? hrs(data.hours[id].all) : "")))),
+        ...Array.from({ length: Math.max(3, 18 - rows.length) }, () => h("tr", { class: "ps-blank" }, h("td", { class: "ps-name" }), days.map(() => h("td", { class: "ps-day" }, h("div", { class: "ps-box" }, ["", "", "", ""].map(() => h("span", {}))))), h("td", { class: "ps-total" }, h("span", {}), h("span", {})))) ])));
   const grid = h("div", { class: "grid-wrap" }, h("table", { class: "grid" },
     h("thead", {}, h("tr", {}, h("th", {}, ""), days.map((d) =>
       h("th", { class: d === today ? "today" : "" },
@@ -780,7 +805,7 @@ async function renderSchedule() {
     h("span", { class: "pb-text" }, barText), h("div", { class: "pb-tools" },
       draftDepts.length && editableDepts.length ? h("label", { class: "check notify-check" }, h("input", { type: "checkbox", checked: state.notifyOnPublish, onChange: (e) => { state.notifyOnPublish = e.target.checked; try { localStorage.setItem("notifyOnPublish", e.target.checked ? "1" : "0"); } catch { /* ignore */ } } }), h("span", {}, t("notifyEmployees"))) : null,
       historyBtn, barButton, orderField, printField));
-  $app.replaceChildren(...[printHead, controls, publishBar, changesBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
+  $app.replaceChildren(...[printHead, controls, publishBar, changesBar, subtabs, data.editable ? coveragePanel(render) : null, weekTimeOffPanel(data), ...(onTable ? [daytabs, daily, grid, paperSheet] : state.scheduleTab === "summary" ? [renderSummary({ days, payroll, sel, data, boxes: renderTimeline({ data, days, targets, sets, payroll, openEditor, weekView: true }).boxes })] : [timeline]), fab].filter(Boolean));
   syncStickyOffsets();
 }
 
