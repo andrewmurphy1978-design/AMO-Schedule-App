@@ -51,3 +51,8 @@ test("where a product is sold: dining room, delivery, counter", () => {
   assert.deepEqual(cleanProduct({ name_fr: "X", channels: [] }), { error: "channel_required" });
   assert.deepEqual(cleanProduct({ name_fr: "X", channels: ["x"] }), { error: "channel_required" });
 });
+
+test("verified: false unless said", () => {
+  const a = cleanProduct({ name_fr: "X" }), b = cleanProduct({ name_fr: "X", verified: true });
+  assert.ok("product" in a && "product" in b); if ("product" in a && "product" in b) { assert.equal(a.product.verified, false); assert.equal(b.product.verified, true); }
+});

@@ -3,7 +3,7 @@
 
 export interface ProductIngredient { ingredient: string; qty: number | null; unit: string | null; note: string | null; choice: number | null } // same choice = alternatives (this OR that)
 export interface ProductFormat { name: string; price: number | null; ingredients: ProductIngredient[] }
-export interface Product { name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: boolean; is_promo: boolean; available_from: string | null; available_to: string | null; channels: Channel[]; formats: ProductFormat[] }
+export interface Product { name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: boolean; is_promo: boolean; available_from: string | null; available_to: string | null; channels: Channel[]; verified: boolean; formats: ProductFormat[] }
 
 export const CHANNELS = ["dine_in", "delivery", "counter"] as const; // dining room, delivery, counter order
 export type Channel = (typeof CHANNELS)[number];
@@ -52,7 +52,7 @@ export function cleanProduct(raw: unknown): { product: Product } | { error: stri
   // where it is sold: one or more of the dining room, delivery and the counter (nothing given = everywhere)
   let channels: Channel[] = [...CHANNELS];
   if (Array.isArray(r.channels)) { channels = CHANNELS.filter((c) => (r.channels as unknown[]).includes(c)); if (!channels.length) return { error: "channel_required" }; }
-  return { product: { name_fr, name_en: text(r.name_en, 80), category: text(r.category, 40), description: text(r.description, 300), code: text(r.code, 30), active: r.active !== false && r.active !== 0, is_promo, available_from, available_to, channels, formats } };
+  return { product: { name_fr, name_en: text(r.name_en, 80), category: text(r.category, 40), description: text(r.description, 300), code: text(r.code, 30), active: r.active !== false && r.active !== 0, is_promo, available_from, available_to, channels, verified: r.verified === true || r.verified === 1, formats } };
 }
 
 /** Where an ingredient is used: ingredient name (lower case) -> the products and formats that use it. */

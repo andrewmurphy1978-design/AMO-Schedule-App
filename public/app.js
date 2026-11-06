@@ -4066,7 +4066,7 @@ function voiceContactsPanel() {
 // Administration -> Products: what the customers buy. Formats (sizes) with a price, and the ingredients (with quantities) of each format.
 function productsPanel() {
   const box = h("section", { class: "panel products" });
-  const st = { list: [], names: [], q: "", filter: "all", channel: "all" };
+  const st = { list: [], names: [], q: "", filter: "all", channel: "all", check: "all" };
   const CHANNELS = [["dine_in", "🍽️", "prodChDineIn"], ["delivery", "🚗", "prodChDelivery"], ["counter", "🧾", "prodChCounter"]];
   const UNITS = ["g", "kg", "ml", "L", "oz", "lb", "unité", "tranche", "portion", "tasse", "c. à soupe", "c. à thé"];
   const money = (n) => (n === null || n === undefined ? "" : `${Number(n).toFixed(2).replace(".", getLang() === "fr" ? "," : ".")} $`);
@@ -4091,7 +4091,7 @@ function productsPanel() {
   }
   function draw() {
     const q = st.q.trim().toLowerCase();
-    const list = st.list.filter((p) => (st.channel === "all" || (p.channels ?? []).includes(st.channel)) && (st.filter === "all" || (st.filter === "promo" ? p.is_promo : st.filter === "inactive" ? !p.active : p.active))
+    const list = st.list.filter((p) => (st.check === "all" || (st.check === "yes" ? p.verified : !p.verified)) && (st.channel === "all" || (p.channels ?? []).includes(st.channel)) && (st.filter === "all" || (st.filter === "promo" ? p.is_promo : st.filter === "inactive" ? !p.active : p.active))
       && (!q || p.name_fr.toLowerCase().includes(q) || (p.name_en ?? "").toLowerCase().includes(q) || (p.category ?? "").toLowerCase().includes(q) || p.formats.some((f) => f.ingredients.some((i) => i.ingredient.toLowerCase().includes(q)))));
     const cats = [...new Set(list.map((p) => p.category ?? ""))].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, getLang())));
     // navigation by category: "*" = all of them
@@ -4105,6 +4105,7 @@ function productsPanel() {
       h("div", { class: "ing-add" }, h("button", { class: "btn primary", type: "button", onClick: () => productDialog(null) }, `+ ${t("prodAdd")}`), h("button", { class: "btn", type: "button", onClick: importDialog }, `⬆ ${t("prodImport")}`),
         h("input", { type: "search", value: st.q, placeholder: t("prodSearch"), "aria-label": t("prodSearch"), onInput: (e) => { st.q = e.target.value; clearTimeout(st.t); st.t = setTimeout(() => { draw(); box.querySelector("input[type=search]")?.focus(); }, 250); } })),
       h("div", { class: "chip-row", role: "group" }, filters.map(([id, label]) => h("button", { type: "button", class: `chip-btn${st.filter === id ? " on" : ""}`, "aria-pressed": String(st.filter === id), onClick: () => { st.filter = id; draw(); } }, label))),
+      h("div", { class: "chip-row", role: "group", "aria-label": t("prodVerifiedTitle") }, [["all", `${t("prodAllChecks")} · ${st.list.length}`], ["yes", `✅ ${t("prodVerified")} · ${st.list.filter((x) => x.verified).length}`], ["no", `⏳ ${t("prodToVerify")} · ${st.list.filter((x) => !x.verified).length}`]].map(([id, label]) => h("button", { type: "button", class: `chip-btn${st.check === id ? " on" : ""}`, "aria-pressed": String(st.check === id), onClick: () => { st.check = id; draw(); } }, label))),
       h("div", { class: "chip-row", role: "group", "aria-label": t("prodSoldIn") }, [["all", t("prodAllModes")], ...CHANNELS.map(([id, ic, key]) => [id, `${ic} ${t(key)}`])].map(([id, label]) => h("button", { type: "button", class: `chip-btn${st.channel === id ? " on" : ""}`, "aria-pressed": String(st.channel === id), onClick: () => { st.channel = id; draw(); } }, label))),
       h("div", { class: "prod-layout" }, catNav, h("div", { class: "prod-content" }, ...(shown.length ? shownCats.flatMap((cat) => [st.cat === "*" ? h("h3", { class: "restock-title" }, `${cat || t("prodNoCategory")} · ${shown.filter((p) => inCat(p, cat)).length}`) : null,
         ...shown.filter((p) => inCat(p, cat)).map((p) => h("div", { class: `card prod-card${p.active ? "" : " inactive"}` },
@@ -4112,6 +4113,8 @@ function productsPanel() {
             p.is_promo ? h("span", { class: `prod-promo ${p.availability}` }, `🏷️ ${t("prodPromo")}`) : null,
             p.availability !== "always" ? h("span", { class: `prod-period ${p.availability}` }, `${period(p)}${p.availability === "upcoming" ? ` · ${t("prodUpcoming")}` : p.availability === "expired" ? ` · ${t("prodExpired")}` : ""}`) : null,
             !p.active ? h("span", { class: "ing-badge" }, t("prodInactive")) : null,
+            h("button", { type: "button", class: `prod-check${p.verified ? " ok" : ""}`, title: p.verified ? `${t("prodVerified")}${p.verified_by ? ` · ${p.verified_by}` : ""}${p.verified_at ? ` · ${new Date(p.verified_at).toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" })}` : ""} — ${t("prodUncheckHint")}` : t("prodCheckHint"), "aria-pressed": String(p.verified),
+              onClick: async () => { try { await api(`/admin/products/${p.id}/verified`, { method: "PUT", body: { verified: !p.verified } }); await load(); } catch (e) { toast(errorText(e)); } } }, p.verified ? `✅ ${t("prodVerified")}` : `⏳ ${t("prodToVerify")}`),
             (p.channels ?? []).length < 3 ? h("span", { class: "prod-channels", title: CHANNELS.filter(([id]) => p.channels.includes(id)).map(([, , key]) => t(key)).join(" · ") }, CHANNELS.filter(([id]) => p.channels.includes(id)).map(([, ic]) => ic).join(" ")) : null,
             h("button", { class: "btn small", type: "button", onClick: () => productDialog(p) }, `✎ ${t("editWord")}`)),
           p.description ? h("p", { class: "meta" }, p.description) : null,
@@ -4128,6 +4131,7 @@ function productsPanel() {
     const cat = h("input", { value: cur.category ?? "", maxLength: 40, list: "prod-cats", "aria-label": t("prodCategory") });
     const code = h("input", { value: cur.code ?? "", maxLength: 30, "aria-label": t("prodCode") }), desc = h("textarea", { rows: 2, maxLength: 300, "aria-label": t("prodDescription") }, cur.description ?? "");
     const active = h("input", { type: "checkbox", checked: cur.active });
+    const verified = h("input", { type: "checkbox", checked: !!cur.verified });
     const chans = new Set(cur.channels ?? ["dine_in", "delivery", "counter"]);
     const chanBox = h("div", { class: "card prod-channels-box" }, h("b", {}, t("prodSoldIn")), h("div", { class: "prod-ch-row", role: "group" }, CHANNELS.map(([id, ic, key]) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: chans.has(id), onChange: (e) => { if (e.target.checked) chans.add(id); else chans.delete(id); } }), h("span", {}, `${ic} ${t(key)}`)))), h("p", { class: "meta" }, t("prodSoldInHelp")));
     const promo = h("input", { type: "checkbox", checked: cur.is_promo });
@@ -4190,13 +4194,14 @@ function productsPanel() {
       h("div", { class: "ing-two" }, f(t("prodCategory"), cat), f(t("prodCode"), code)),
       f(t("prodDescription"), desc),
       h("label", { class: "check" }, active, h("span", {}, t("prodActiveLabel"))),
+      h("div", { class: "card prod-verify-box" }, h("label", { class: "check" }, verified, h("span", {}, `✅ ${t("prodVerifiedLabel")}`)), h("p", { class: "meta" }, cur.verified && cur.verified_at ? `${t("prodVerifiedBy")} ${cur.verified_by ?? "—"} · ${new Date(cur.verified_at).toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" })}` : t("prodVerifiedHelp"))),
       chanBox,
       h("div", { class: "card prod-promo-box" }, h("label", { class: "check" }, promo, h("span", {}, `🏷️ ${t("prodIsPromo")}`)), h("p", { class: "meta" }, t("prodPeriodHelp")), h("div", { class: "ing-two" }, f(t("prodFrom"), from), f(t("prodTo"), to))));
     const formatsPane = h("div", { class: "sup-pane" }, h("p", { class: "meta" }, t("prodFormatsHelp")), h("div", { class: "prod-split" }, fmtNav, fmtPane));
     const tabsBar = h("div", { class: "dlg-tabs sup-tabs", role: "tablist" });
     const showTab = (id) => { detailsPane.hidden = id !== "details"; formatsPane.hidden = id !== "formats"; tabsBar.querySelectorAll("button").forEach((x) => x.setAttribute("aria-selected", String(x.dataset.tab === id))); };
     tabsBar.append(h("button", { type: "button", role: "tab", "data-tab": "details", onClick: () => showTab("details") }, `📝 ${t("prodTabDetails")}`), h("button", { type: "button", role: "tab", "data-tab": "formats", onClick: () => showTab("formats") }, `📐 ${t("prodTabFormats")}`));
-    const body = () => ({ name_fr: name.value, name_en: nameEn.value, category: cat.value, description: desc.value, code: code.value, active: active.checked, is_promo: promo.checked, available_from: from.value || null, available_to: to.value || null, channels: [...chans], formats: cur.formats });
+    const body = () => ({ name_fr: name.value, name_en: nameEn.value, category: cat.value, description: desc.value, code: code.value, active: active.checked, is_promo: promo.checked, available_from: from.value || null, available_to: to.value || null, channels: [...chans], verified: verified.checked, formats: cur.formats });
     const close = () => dlg.close();
     dlg.replaceChildren(h("form", { class: "modal-body prod-dialog", onSubmit: async (e) => {
         e.preventDefault(); err.hidden = true;
