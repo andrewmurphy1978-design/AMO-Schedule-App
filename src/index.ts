@@ -2666,7 +2666,10 @@ async function currentShifts(db: D1Database, rid: number, dep: string, week: str
   const wb = weekBounds(week); if (!wb) return [];
   const rows = (await db.prepare(`SELECT sh.id, sh.staff_id, sh.role_id, sh.start_at, sh.end_at, sh.notes FROM shifts sh JOIN roles ro ON ro.id = sh.role_id WHERE sh.restaurant_id = ? AND sh.status = 'ok' AND ro.department_id = ? AND sh.start_at >= ? AND sh.start_at < ? ORDER BY sh.start_at`).bind(rid, dep, wb.start, wb.end).all<{ id: number; staff_id: number; role_id: number; start_at: string; end_at: string; notes: string | null }>()).results;
   const extra = new Map<number, number[]>();
-  if (rows.length) for (const x of (await db.prepare(`SELECT shift_id, role_id FROM shift_roles WHERE shift_id IN (${rows.map(() => "?").join(",")})`).bind(...rows.map((r) => r.id)).all<{ shift_id: number; role_id: number }>()).results) extra.set(x.shift_id, [...(extra.get(x.shift_id) ?? []), x.role_id]);
+  for (let k = 0; k < rows.length; k += 80) { // at most 100 bound values per query
+    const part = rows.slice(k, k + 80);
+    for (const x of (await db.prepare(`SELECT shift_id, role_id FROM shift_roles WHERE shift_id IN (${part.map(() => "?").join(",")})`).bind(...part.map((r) => r.id)).all<{ shift_id: number; role_id: number }>()).results) extra.set(x.shift_id, [...(extra.get(x.shift_id) ?? []), x.role_id]);
+  }
   return rows.map((r) => ({ ...r, extra_role_ids: extra.get(r.id) ?? [] }));
 }
 /** Keeps the schedule as it is being published. */
@@ -3095,9 +3098,10 @@ app.put("/api/admin/labor-rate", requireAdmin, async (c) => {
 async function productsOf(db: D1Database, cid: number, id?: number) {
   const rows = (await db.prepare(`SELECT id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position FROM products WHERE client_id = ?${id ? " AND id = ?" : ""} ORDER BY category COLLATE NOCASE, position, name_fr COLLATE NOCASE`).bind(...(id ? [cid, id] : [cid])).all<{ id: number; name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: number; is_promo: number; available_from: string | null; available_to: string | null; position: number }>()).results;
   if (!rows.length) return [];
-  const marks = rows.map(() => "?").join(",");
-  const formats = (await db.prepare(`SELECT id, product_id, name, price FROM product_formats WHERE product_id IN (${marks}) ORDER BY position, id`).bind(...rows.map((r) => r.id)).all<{ id: number; product_id: number; name: string; price: number | null }>()).results;
-  const lines = formats.length ? (await db.prepare(`SELECT format_id, ingredient, qty, unit, note FROM product_ingredients WHERE format_id IN (${formats.map(() => "?").join(",")}) ORDER BY position, id`).bind(...formats.map((f) => f.id)).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null }>()).results : [];
+  // joined on the client (not "IN (every id)": the database accepts at most 100 bound values per query)
+  const scope = id ? "p.client_id = ? AND p.id = ?" : "p.client_id = ?", args = id ? [cid, id] : [cid];
+  const formats = (await db.prepare(`SELECT f.id, f.product_id, f.name, f.price FROM product_formats f JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY f.position, f.id`).bind(...args).all<{ id: number; product_id: number; name: string; price: number | null }>()).results;
+  const lines = (await db.prepare(`SELECT l.format_id, l.ingredient, l.qty, l.unit, l.note FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY l.position, l.id`).bind(...args).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null }>()).results;
   return rows.map((p) => ({ ...p, active: p.active === 1, is_promo: p.is_promo === 1, formats: formats.filter((f) => f.product_id === p.id).map((f) => ({ id: f.id, name: f.name, price: f.price, ingredients: lines.filter((l) => l.format_id === f.id).map(({ format_id: _f, ...l }) => l) })) }));
 }
 /** Creates (id null) or replaces a product with its formats and ingredient lines. */
