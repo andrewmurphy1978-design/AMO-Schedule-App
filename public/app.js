@@ -4102,7 +4102,7 @@ function productsPanel() {
         let data; try { data = JSON.parse(ta.value); } catch { out.textContent = `⚠ ${t("prodImportBad")}`; return; }
         try { const r = await api("/admin/products/import", { method: "POST", body: { products: Array.isArray(data) ? data : data.products, update: upd.checked } }); out.textContent = `✅ ${r.created} ${t("prodImportCreated")}, ${r.updated} ${t("prodImportUpdated")}${r.skipped ? `, ${r.skipped} ${t("prodImportSkipped")}` : ""}`; load(); }
         catch (x) { out.textContent = `⚠ ${x.body?.errors?.length ? x.body.errors.map((z) => `#${z.index + 1}: ${z.error}`).join(", ") : errorText(x)}`; }
-      } }, h("h2", {}, `⬆ ${t("prodImport")}`), h("p", { class: "meta" }, t("prodImportHelp")), ta, h("label", { class: "check" }, upd, h("span", {}, t("prodImportUpdate"))), out,
+      } }, h("h2", {}, `⬆ ${t("prodImport")}`), h("p", { class: "meta" }, t("prodImportHelp")), h("label", { class: "field" }, h("span", {}, t("prodImportFile")), h("input", { type: "file", accept: ".json,application/json", onChange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } })), ta, h("label", { class: "check" }, upd, h("span", {}, t("prodImportUpdate"))), out,
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")), h("button", { class: "btn primary", type: "submit" }, t("prodImportGo")))));
     dlg.showModal();
   }
