@@ -3151,7 +3151,7 @@ app.delete("/api/admin/products/:id", requireAdmin, async (c) => {
 });
 /** Imports many products with few database round trips: all the statements go in batches (the ids are found by name inside the batch). */
 async function importProducts(db: D1Database, cid: number, list: Product[], update: boolean): Promise<{ created: number; updated: number; skipped: number }> {
-  const existing = new Set((await db.prepare("SELECT lower(name_fr) AS k FROM products WHERE client_id = ?").bind(cid).all<{ k: string }>()).results.map((r) => r.k));
+  const existing = new Set((await db.prepare("SELECT name_fr FROM products WHERE client_id = ?").bind(cid).all<{ name_fr: string }>()).results.map((r) => r.name_fr.toLowerCase())); // lower-cased here (not in SQL: SQLite does not lower-case Œ or É)
   let pos = (await db.prepare("SELECT COALESCE(MAX(position), 0) AS n FROM products WHERE client_id = ?").bind(cid).first<{ n: number }>())?.n ?? 0;
   let created = 0, updated = 0, skipped = 0;
   const st: D1PreparedStatement[] = [];
