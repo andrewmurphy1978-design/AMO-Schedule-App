@@ -9,7 +9,7 @@ test("a product with formats is cleaned", () => {
   const r = cleanProduct(pizza); assert.ok("product" in r); if (!("product" in r)) return;
   assert.equal(r.product.name_fr, "Pizza pepperoni"); assert.equal(r.product.formats.length, 2);
   assert.equal(r.product.formats[0].price, 12.99); assert.equal(r.product.formats[0].ingredients.length, 2);   // the empty line is dropped
-  assert.deepEqual(r.product.formats[0].ingredients[0], { ingredient: "Fromage", qty: 120, unit: "g", note: null });
+  assert.deepEqual(r.product.formats[0].ingredients[0], { ingredient: "Fromage", qty: 120, unit: "g", note: null, choice: null });
   assert.equal(r.product.active, true); assert.equal(r.product.is_promo, false);
 });
 test("without a format there is one unnamed format", () => {
@@ -34,4 +34,13 @@ test("where an ingredient is used", () => {
   const r = cleanProduct(pizza); if (!("product" in r)) return assert.fail();
   const u = usedIn([r.product]);
   assert.equal(u.get("fromage")?.length, 2); assert.equal(u.get("pepperoni")?.[0].format, "10 po");
+});
+
+test("alternatives (OR): a choice needs two options and its lines stay together", () => {
+  const r = cleanProduct({ name_fr: "Viande à la carte", formats: [{ name: "", ingredients: [
+    { ingredient: "Jambon effiloché", qty: 56, unit: "g", choice: 4 }, { ingredient: "Sel" }, { ingredient: "Saucisses", qty: 2, unit: "unité", choice: 4 }, { ingredient: "Bacon", qty: 2, unit: "tranche", choice: 4 }, { ingredient: "Poivre", choice: 9 }] }] });
+  assert.ok("product" in r); if (!("product" in r)) return;
+  const l = r.product.formats[0].ingredients;
+  assert.deepEqual(l.map((x) => [x.ingredient, x.choice]), [["Jambon effiloché", 1], ["Saucisses", 1], ["Bacon", 1], ["Sel", null], ["Poivre", null]]);   // 4 -> 1, together; a lone choice is a plain ingredient
+  assert.equal(l[0].qty, 56);
 });

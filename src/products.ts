@@ -1,7 +1,7 @@
 // Products: what the customers buy (ready to eat). A product comes in one or more formats (10", 12", 14"...), each with its price and the ingredients it takes,
 // with the quantity of each. Ingredients are named like in the ingredients list (the same name = the same ingredient).
 
-export interface ProductIngredient { ingredient: string; qty: number | null; unit: string | null; note: string | null }
+export interface ProductIngredient { ingredient: string; qty: number | null; unit: string | null; note: string | null; choice: number | null } // same choice = alternatives (this OR that)
 export interface ProductFormat { name: string; price: number | null; ingredients: ProductIngredient[] }
 export interface Product { name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: boolean; is_promo: boolean; available_from: string | null; available_to: string | null; formats: ProductFormat[] }
 
@@ -36,8 +36,10 @@ export function cleanProduct(raw: unknown): { product: Product } | { error: stri
       const ingredient = text(l?.ingredient ?? l?.name, 80);
       if (!ingredient) continue;               // an empty line is dropped
       if (ingredients.some((x) => x.ingredient.toLowerCase() === ingredient.toLowerCase())) return { error: "duplicate_ingredient" };
-      ingredients.push({ ingredient, qty: num(l.qty, 1_000_000, 3), unit: text(l.unit, 20), note: text(l.note, 80) });
+      const g = Number(l.choice ?? l.choice_group);
+      ingredients.push({ ingredient, qty: num(l.qty, 1_000_000, 3), unit: text(l.unit, 20), note: text(l.note, 80), choice: Number.isInteger(g) && g > 0 && g < 1000 ? g : null });
     }
+    normalizeChoices(ingredients);
     formats.push({ name, price: num(f.price, 100_000, 2), ingredients });
   }
   // a promotion (or any product) can be sold only during a period
@@ -65,4 +67,21 @@ export function availability(p: { available_from: string | null; available_to: s
   if (p.available_from && today < p.available_from) return "upcoming";
   if (p.available_to && today > p.available_to) return "expired";
   return "current";
+}
+
+/** A choice needs at least two options (a lone one is a plain ingredient); groups are numbered 1, 2... and their lines kept together, at the place of the first one. */
+export function normalizeChoices(lines: ProductIngredient[]): void {
+  const count = new Map<number, number>();
+  for (const l of lines) if (l.choice !== null) count.set(l.choice, (count.get(l.choice) ?? 0) + 1);
+  for (const l of lines) if (l.choice !== null && (count.get(l.choice) ?? 0) < 2) l.choice = null;
+  const order: number[] = [];
+  for (const l of lines) if (l.choice !== null && !order.includes(l.choice)) order.push(l.choice);
+  const out: ProductIngredient[] = [], done = new Set<number>();
+  for (const l of lines) {
+    if (l.choice === null) { out.push(l); continue; }
+    if (done.has(l.choice)) continue;
+    done.add(l.choice);
+    for (const x of lines) if (x.choice === l.choice) out.push({ ...x, choice: order.indexOf(l.choice) + 1 });
+  }
+  lines.splice(0, lines.length, ...out);
 }

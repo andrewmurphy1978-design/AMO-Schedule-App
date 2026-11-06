@@ -1560,3 +1560,16 @@ main:has(> .acc-screen) { padding-top: 0; }
 .inv-unit .pk-btn { min-height: 40px; }
 .prod-line .pk { min-width: 0; }
 .prod-line .pk-btn { padding: .4rem .5rem; }
+
+/* ingredients with a choice (OR) */
+.prod-line { grid-template-columns: minmax(0, 2fr) 5rem 5rem minmax(0, 1.2fr) 6.2rem; }
+.prod-line-acts { display: flex; gap: .3rem; justify-content: flex-end; }
+.or-btn { min-width: 2.6rem; font-weight: 800; }
+.prod-or { border: 2px solid #e0a100; border-radius: var(--radius, 10px); background: #fffaf0; padding: .4rem .5rem .6rem; margin-top: .4rem; }
+.prod-or-title { font-size: .78rem; font-weight: 700; color: #8a5f00; text-transform: uppercase; letter-spacing: .03em; }
+.prod-or-sep { text-align: center; font-weight: 800; color: #8a5f00; margin: .25rem 0 0; }
+.prod-or > .btn { margin-top: .5rem; }
+.prod-ings li.choice { color: inherit; }
+.or-tag { display: inline-block; margin: 0 .45rem; padding: 0 .4rem; border-radius: 6px; background: #fde8c8; color: #8a4b00; font-size: .75rem; font-weight: 800; }
+.prod-ings .unknown { color: #a3281d; } .prod-ings .unknown::after { content: " ⚠"; }
+@media (max-width: 599px) { .prod-line { grid-template-columns: 1fr 1fr 6.2rem; } .prod-line > :nth-child(1) { grid-column: 1 / -1; } .prod-line > :nth-child(4) { grid-column: 1 / 3; } }

@@ -4070,6 +4070,20 @@ function productsPanel() {
   const UNITS = ["g", "kg", "ml", "L", "oz", "lb", "unité", "tranche", "portion", "tasse", "c. à soupe", "c. à thé"];
   const money = (n) => (n === null || n === undefined ? "" : `${Number(n).toFixed(2).replace(".", getLang() === "fr" ? "," : ".")} $`);
   const period = (p) => (p.available_from || p.available_to ? `${p.available_from ? fmt(p.available_from, { day: "numeric", month: "short", year: "numeric" }) : "…"} → ${p.available_to ? fmt(p.available_to, { day: "numeric", month: "short", year: "numeric" }) : "…"}` : "");
+  // the ingredients of a format for the list: a fixed one is a line, the options of a choice are one line joined by OU
+  const ingredientItems = (lines) => {
+    const known = (n) => st.names.some((x) => x.name.toLowerCase() === n.toLowerCase());
+    const one = (i) => [h("span", { class: known(i.ingredient) ? "" : "unknown" }, i.ingredient), h("small", { class: "meta" }, `${i.qty ? ` — ${i.qty}${i.unit ? ` ${i.unit}` : ""}` : ""}${i.note ? ` (${i.note})` : ""}`)];
+    const out = []; let k = 0;
+    while (k < lines.length) {
+      const g = lines[k].choice;
+      if (!g) { out.push(h("li", {}, ...one(lines[k]))); k++; continue; }
+      const parts = [];
+      while (k < lines.length && lines[k].choice === g) { if (parts.length) parts.push(h("span", { class: "or-tag" }, t("prodOr"))); parts.push(...one(lines[k])); k++; }
+      out.push(h("li", { class: "choice" }, ...parts));
+    }
+    return out;
+  };
   async function load() {
     [st.list, st.names] = await Promise.all([api("/admin/products"), api("/admin/ingredient-names")]);
     draw();
@@ -4099,7 +4113,7 @@ function productsPanel() {
             h("button", { class: "btn small", type: "button", onClick: () => productDialog(p) }, `✎ ${t("editWord")}`)),
           p.description ? h("p", { class: "meta" }, p.description) : null,
           h("div", { class: "prod-formats" }, p.formats.map((f) => h("details", { class: "prod-format" }, h("summary", {}, h("b", {}, f.name || t("prodStandard")), f.price ? ` · ${money(f.price)}` : "", h("small", { class: "meta" }, ` · ${f.ingredients.length} ${t("prodIngredientsWord")}`)),
-            f.ingredients.length ? h("ul", { class: "prod-ings" }, f.ingredients.map((i) => h("li", { class: st.names.some((n) => n.name.toLowerCase() === i.ingredient.toLowerCase()) ? "" : "unknown" }, i.ingredient, h("small", { class: "meta" }, `${i.qty ? ` — ${i.qty}${i.unit ? ` ${i.unit}` : ""}` : ""}${i.note ? ` (${i.note})` : ""}`)))) : h("p", { class: "meta" }, t("prodNoIngredients")))))))]) : [h("p", { class: "meta" }, t("prodNone"))]))));
+            f.ingredients.length ? h("ul", { class: "prod-ings" }, ingredientItems(f.ingredients)) : h("p", { class: "meta" }, t("prodNoIngredients")))))))]) : [h("p", { class: "meta" }, t("prodNone"))]))));
   }
   // ---- one product ----
   function productDialog(p) {
@@ -4124,14 +4138,32 @@ function productsPanel() {
     const drawPane = () => {
       const fm = cur.formats[sel], fi = sel;
       const lines = h("div", { class: "prod-lines" });
-      const drawLines = () => lines.replaceChildren(...fm.ingredients.map((l, li) => {
+      const nextChoice = () => Math.max(0, ...fm.ingredients.map((x) => x.choice ?? 0)) + 1;
+      const dropLine = (li) => { const g = fm.ingredients[li].choice; fm.ingredients.splice(li, 1); if (g) { const rest = fm.ingredients.filter((x) => x.choice === g); if (rest.length < 2) rest.forEach((x) => { x.choice = null; }); } drawLines(); drawNav(); };
+      const lineRow = (l, li) => {
         const ing = pickerBox({ options: st.names.map((n) => ({ value: n.name, label: n.name, hint: n.homemade ? `🏠 ${t("mixIsMix")}` : "" })), value: l.ingredient, placeholder: t("prodPickIngredient"), label: t("prodIngredient"), onChange: (v) => { l.ingredient = v; drawNavSoon(); } });
         return h("div", { class: "prod-line" }, ing,
           h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", value: l.qty ?? "", placeholder: t("prodQty"), "aria-label": t("prodQty"), onInput: (e) => { l.qty = e.target.value === "" ? null : Number(e.target.value); } }),
           unitPicker(l.unit ?? "", (v) => { l.unit = v; }),
           h("input", { value: l.note ?? "", maxLength: 80, placeholder: t("prodLineNote"), "aria-label": t("prodLineNote"), onInput: (e) => { l.note = e.target.value; } }),
-          h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { fm.ingredients.splice(li, 1); drawLines(); drawNav(); } }, "✕"));
-      }));
+          h("div", { class: "prod-line-acts" },
+            l.choice ? null : h("button", { type: "button", class: "btn small or-btn", title: t("prodOrHint"), "aria-label": t("prodOrHint"), onClick: () => { const g = nextChoice(); l.choice = g; fm.ingredients.splice(li + 1, 0, { ingredient: "", qty: null, unit: "", note: "", choice: g }); drawLines(); drawNav(); lines.querySelectorAll(".prod-line")[li + 1]?.querySelector(".pk-btn")?.focus(); } }, t("prodOr")),
+            h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => dropLine(li) }, "✕")));
+      };
+      // a fixed ingredient is a plain line; ingredients that share a choice are shown together, separated by OU
+      const drawLines = () => {
+        const out = []; let li = 0;
+        while (li < fm.ingredients.length) {
+          const l = fm.ingredients[li];
+          if (!l.choice) { out.push(lineRow(l, li)); li++; continue; }
+          const g = l.choice, start = li, box = h("div", { class: "prod-or" }, h("div", { class: "prod-or-title" }, `${t("prodOneOf")}`));
+          while (li < fm.ingredients.length && fm.ingredients[li].choice === g) { if (li > start) box.append(h("div", { class: "prod-or-sep" }, t("prodOr"))); box.append(lineRow(fm.ingredients[li], li)); li++; }
+          const last = li - 1;
+          box.append(h("button", { type: "button", class: "btn small", onClick: () => { fm.ingredients.splice(last + 1, 0, { ingredient: "", qty: null, unit: "", note: "", choice: g }); drawLines(); drawNav(); } }, `+ ${t("prodAddOption")}`));
+          out.push(box);
+        }
+        lines.replaceChildren(...out);
+      };
       drawLines();
       fmtPane.replaceChildren(
         h("div", { class: "prod-fmt-head" }, f(t("prodFormatName"), h("input", { value: fm.name, maxLength: 40, placeholder: t("prodFormatPh"), onInput: (e) => { fm.name = e.target.value; drawNavSoon(); } })),
@@ -4140,7 +4172,7 @@ function productsPanel() {
         h("div", { class: "prod-line prod-line-head meta" }, h("span", {}, t("prodIngredient")), h("span", {}, t("prodQty")), h("span", {}, t("prodUnit")), h("span", {}, t("prodLineNote")), h("span", {})),
         lines,
         h("div", { class: "actions prod-fmt-actions" },
-          h("button", { type: "button", class: "btn small", onClick: () => { fm.ingredients.push({ ingredient: "", qty: null, unit: "", note: "" }); drawLines(); drawNav(); lines.querySelector(".prod-line:last-child input")?.focus(); } }, `+ ${t("prodAddIngredient")}`),
+          h("button", { type: "button", class: "btn small", onClick: () => { fm.ingredients.push({ ingredient: "", qty: null, unit: "", note: "", choice: null }); drawLines(); drawNav(); [...lines.querySelectorAll(".prod-line")].pop()?.querySelector("input")?.focus(); } }, `+ ${t("prodAddIngredient")}`),
           h("button", { type: "button", class: "btn small", onClick: () => { cur.formats.splice(fi + 1, 0, { name: "", price: null, ingredients: JSON.parse(JSON.stringify(fm.ingredients)) }); sel = fi + 1; drawFormats(); } }, t("prodDuplicateFormat")),
           cur.formats.length > 1 ? h("button", { type: "button", class: "btn small danger", onClick: () => { cur.formats.splice(fi, 1); sel = Math.max(0, fi - 1); drawFormats(); } }, t("prodRemoveFormat")) : null));
     };

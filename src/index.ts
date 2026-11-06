@@ -3101,7 +3101,7 @@ async function productsOf(db: D1Database, cid: number, id?: number) {
   // joined on the client (not "IN (every id)": the database accepts at most 100 bound values per query)
   const scope = id ? "p.client_id = ? AND p.id = ?" : "p.client_id = ?", args = id ? [cid, id] : [cid];
   const formats = (await db.prepare(`SELECT f.id, f.product_id, f.name, f.price FROM product_formats f JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY f.position, f.id`).bind(...args).all<{ id: number; product_id: number; name: string; price: number | null }>()).results;
-  const lines = (await db.prepare(`SELECT l.format_id, l.ingredient, l.qty, l.unit, l.note FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY l.position, l.id`).bind(...args).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null }>()).results;
+  const lines = (await db.prepare(`SELECT l.format_id, l.ingredient, l.qty, l.unit, l.note, l.choice_group AS choice FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id JOIN products p ON p.id = f.product_id WHERE ${scope} ORDER BY l.position, l.id`).bind(...args).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null; choice: number | null }>()).results;
   return rows.map((p) => ({ ...p, active: p.active === 1, is_promo: p.is_promo === 1, formats: formats.filter((f) => f.product_id === p.id).map((f) => ({ id: f.id, name: f.name, price: f.price, ingredients: lines.filter((l) => l.format_id === f.id).map(({ format_id: _f, ...l }) => l) })) }));
 }
 /** Creates (id null) or replaces a product with its formats and ingredient lines. */
@@ -3118,7 +3118,7 @@ async function saveProduct(db: D1Database, cid: number, id: number | null, p: Pr
   }
   for (const [fi, f] of p.formats.entries()) {
     const fid = (await db.prepare("INSERT INTO product_formats (product_id, name, price, position) VALUES (?, ?, ?, ?) RETURNING id").bind(id, f.name, f.price, fi).first<{ id: number }>())!.id;
-    if (f.ingredients.length) await db.batch(f.ingredients.map((i, ii) => db.prepare("INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position) VALUES (?, ?, ?, ?, ?, ?)").bind(fid, i.ingredient, i.qty, i.unit, i.note, ii)));
+    if (f.ingredients.length) await db.batch(f.ingredients.map((i, ii) => db.prepare("INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position, choice_group) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(fid, i.ingredient, i.qty, i.unit, i.note, ii, i.choice)));
   }
   return id;
 }
@@ -3194,7 +3194,7 @@ async function importProducts(db: D1Database, cid: number, list: Product[], upda
     }
     for (const [fi, f] of p.formats.entries()) {
       st.push(db.prepare(`INSERT INTO product_formats (product_id, name, price, position) VALUES (${pid}, ?, ?, ?)`).bind(cid, p.name_fr, f.name, f.price, fi));
-      for (const [ii, i] of f.ingredients.entries()) st.push(db.prepare(`INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position) VALUES ((SELECT f.id FROM product_formats f JOIN products p ON p.id = f.product_id WHERE p.client_id = ? AND lower(p.name_fr) = lower(?) AND f.position = ?), ?, ?, ?, ?, ?)`).bind(cid, p.name_fr, fi, i.ingredient, i.qty, i.unit, i.note, ii));
+      for (const [ii, i] of f.ingredients.entries()) st.push(db.prepare(`INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position, choice_group) VALUES ((SELECT f.id FROM product_formats f JOIN products p ON p.id = f.product_id WHERE p.client_id = ? AND lower(p.name_fr) = lower(?) AND f.position = ?), ?, ?, ?, ?, ?, ?)`).bind(cid, p.name_fr, fi, i.ingredient, i.qty, i.unit, i.note, ii, i.choice));
     }
   }
   for (let k = 0; k < st.length; k += 150) await db.batch(st.slice(k, k + 150));
