@@ -1,3 +1,4 @@
+import { cleanProduct, availability, type Product } from "./products.ts";
 import { diffShifts, changesForAi, hasChanges, type SnapShift, type NowShift, type Diff, type MidWeekChange } from "./schedulehistory.ts";
 import { extractInvoice, compareInvoice, INVOICE_MIMES, MAX_INVOICE_BYTES, type PriceChange, type Comparison, type InvoiceLine } from "./invoices.ts";
 import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
@@ -183,7 +184,7 @@ const emit = (c: Context<any>, event: EventName, build: () => Promise<unknown>) 
 // ---------- Tenant guard ----------
 // Every id that arrives in the path, the query string or a JSON body must belong to the caller's client.
 // (Lists and aggregates are filtered by client in their own queries.)
-type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory" | "supplier" | "supplier_order" | "invoice";
+type Owned = "staff" | "restaurant" | "shift" | "target_set" | "time_off" | "availability" | "coverage" | "payslip" | "incident" | "community" | "community_post" | "community_media" | "voice_call" | "order_request" | "dm_thread" | "vehicle" | "vehicle_issue" | "voice_contact" | "inventory" | "supplier" | "supplier_order" | "invoice" | "product";
 const OWNER_SQL: Record<Owned, string> = {
   staff: "SELECT 1 FROM staff WHERE id = ?1 AND client_id = ?2",
   dm_thread: "SELECT 1 FROM dm_threads WHERE id = ?1 AND client_id = ?2",
@@ -200,6 +201,7 @@ const OWNER_SQL: Record<Owned, string> = {
   community: "SELECT 1 FROM communities c JOIN restaurants r ON r.id = c.restaurant_id WHERE c.id = ?1 AND r.client_id = ?2",
   community_media: "SELECT 1 FROM community_media m JOIN communities c ON c.id = m.community_id JOIN restaurants r ON r.id = c.restaurant_id WHERE m.id = ?1 AND r.client_id = ?2",
   supplier: "SELECT 1 FROM suppliers WHERE id = ?1 AND client_id = ?2",
+  product: "SELECT 1 FROM products WHERE id = ?1 AND client_id = ?2",
   supplier_order: "SELECT 1 FROM supplier_orders o JOIN suppliers s ON s.id = o.supplier_id WHERE o.id = ?1 AND s.client_id = ?2",
   invoice: "SELECT 1 FROM supplier_invoices v JOIN suppliers s ON s.id = v.supplier_id WHERE v.id = ?1 AND s.client_id = ?2",
   inventory: "SELECT 1 FROM inventory_counts n JOIN restaurants r ON r.id = n.restaurant_id WHERE n.id = ?1 AND r.client_id = ?2",
@@ -214,7 +216,7 @@ const PATH_OWNERS: [RegExp, Owned][] = [
   [/^\/api\/time-off\/(\d+)(\/(cancel|withdraw|decide))?$/, "time_off"], [/^\/api\/availability\/(\d+)$/, "availability"],
   [/^\/api\/coverage\/(\d+)\//, "coverage"], [/^\/api\/admin\/payslips\/(\d+)(\/|$)/, "payslip"], [/^\/api\/payslips\/(\d+)\/pdf$/, "payslip"],
   [/^\/api\/admin\/incidents\/(\d+)$/, "incident"],
-  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/suppliers\/(\d+)(\/|$)/, "supplier"], [/^\/api\/supplier-orders\/(\d+)(\/|$)/, "supplier_order"], [/^\/api\/invoices\/(\d+)(\/|$)/, "invoice"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
+  [/^\/api\/voice\/calls\/(\d+)(\/|$)/, "voice_call"], [/^\/api\/admin\/voice-contacts\/(\d+)$/, "voice_contact"], [/^\/api\/inventory\/(\d+)(\/|$)/, "inventory"], [/^\/api\/suppliers\/(\d+)(\/|$)/, "supplier"], [/^\/api\/supplier-orders\/(\d+)(\/|$)/, "supplier_order"], [/^\/api\/admin\/products\/(\d+)$/, "product"], [/^\/api\/invoices\/(\d+)(\/|$)/, "invoice"], [/^\/api\/messages\/threads\/(\d+)(\/|$)/, "dm_thread"], [/^\/api\/vehicles\/(\d+)(\/|$)/, "vehicle"], [/^\/api\/vehicle-issues\/(\d+)$/, "vehicle_issue"], [/^\/api\/orders\/(\d+)(\/|$)/, "order_request"], [/^\/api\/communities\/(\d+)(\/|$)/, "community"], [/^\/api\/admin\/communities\/(\d+)$/, "community"], [/^\/api\/community-posts\/(\d+)(\/|$)/, "community_post"], [/^\/api\/community-media\/(\d+)$/, "community_media"],
 ];
 const QUERY_OWNERS: [string, Owned][] = [["restaurant", "restaurant"], ["restaurant_id", "restaurant"], ["staff", "staff"], ["staff_id", "staff"]];
 const BODY_OWNERS: Record<string, Owned> = { restaurant_id: "restaurant", restaurant: "restaurant", staff_id: "staff", sick_staff_id: "staff", shift_id: "shift", set_id: "target_set" };
@@ -3089,6 +3091,81 @@ app.put("/api/admin/labor-rate", requireAdmin, async (c) => {
   await putSettingStmt(c.env.DB, cid, "labor_rate", String(Math.round(n * 100) / 100)).run();
   return c.json({ rate: Math.round(n * 100) / 100 });
 });
+// ---------- Products: what the customers buy; formats, each with its price and ingredients ----------
+async function productsOf(db: D1Database, cid: number, id?: number) {
+  const rows = (await db.prepare(`SELECT id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position FROM products WHERE client_id = ?${id ? " AND id = ?" : ""} ORDER BY category COLLATE NOCASE, position, name_fr COLLATE NOCASE`).bind(...(id ? [cid, id] : [cid])).all<{ id: number; name_fr: string; name_en: string | null; category: string | null; description: string | null; code: string | null; active: number; is_promo: number; available_from: string | null; available_to: string | null; position: number }>()).results;
+  if (!rows.length) return [];
+  const marks = rows.map(() => "?").join(",");
+  const formats = (await db.prepare(`SELECT id, product_id, name, price FROM product_formats WHERE product_id IN (${marks}) ORDER BY position, id`).bind(...rows.map((r) => r.id)).all<{ id: number; product_id: number; name: string; price: number | null }>()).results;
+  const lines = formats.length ? (await db.prepare(`SELECT format_id, ingredient, qty, unit, note FROM product_ingredients WHERE format_id IN (${formats.map(() => "?").join(",")}) ORDER BY position, id`).bind(...formats.map((f) => f.id)).all<{ format_id: number; ingredient: string; qty: number | null; unit: string | null; note: string | null }>()).results : [];
+  return rows.map((p) => ({ ...p, active: p.active === 1, is_promo: p.is_promo === 1, formats: formats.filter((f) => f.product_id === p.id).map((f) => ({ id: f.id, name: f.name, price: f.price, ingredients: lines.filter((l) => l.format_id === f.id).map(({ format_id: _f, ...l }) => l) })) }));
+}
+/** Creates (id null) or replaces a product with its formats and ingredient lines. */
+async function saveProduct(db: D1Database, cid: number, id: number | null, p: Product): Promise<number> {
+  if (id) {
+    await db.batch([
+      db.prepare("UPDATE products SET name_fr = ?, name_en = ?, category = ?, description = ?, code = ?, active = ?, is_promo = ?, available_from = ?, available_to = ? WHERE id = ? AND client_id = ?").bind(p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, id, cid),
+      db.prepare("DELETE FROM product_ingredients WHERE format_id IN (SELECT id FROM product_formats WHERE product_id = ?)").bind(id),
+      db.prepare("DELETE FROM product_formats WHERE product_id = ?").bind(id),
+    ]);
+  } else {
+    const pos = ((await db.prepare("SELECT COALESCE(MAX(position), 0) AS n FROM products WHERE client_id = ?").bind(cid).first<{ n: number }>())?.n ?? 0) + 1;
+    id = (await db.prepare("INSERT INTO products (client_id, name_fr, name_en, category, description, code, active, is_promo, available_from, available_to, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(cid, p.name_fr, p.name_en, p.category, p.description, p.code, p.active ? 1 : 0, p.is_promo ? 1 : 0, p.available_from, p.available_to, pos, Date.now()).first<{ id: number }>())!.id;
+  }
+  for (const [fi, f] of p.formats.entries()) {
+    const fid = (await db.prepare("INSERT INTO product_formats (product_id, name, price, position) VALUES (?, ?, ?, ?) RETURNING id").bind(id, f.name, f.price, fi).first<{ id: number }>())!.id;
+    if (f.ingredients.length) await db.batch(f.ingredients.map((i, ii) => db.prepare("INSERT INTO product_ingredients (format_id, ingredient, qty, unit, note, position) VALUES (?, ?, ?, ?, ?, ?)").bind(fid, i.ingredient, i.qty, i.unit, i.note, ii)));
+  }
+  return id;
+}
+app.get("/api/admin/products", requireAdmin, async (c) => {
+  const today = localNow(c.env.TIMEZONE).slice(0, 10);
+  return c.json((await productsOf(c.env.DB, c.get("me").client_id)).map((p) => ({ ...p, availability: availability(p, today) })));
+});
+app.get("/api/admin/ingredient-names", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT min(i.name) AS name, max(i.homemade) AS homemade FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id JOIN restaurants r ON r.id = g.restaurant_id WHERE r.client_id = ? GROUP BY lower(i.name) ORDER BY lower(i.name)").bind(c.get("me").client_id).all<{ name: string; homemade: number }>()).results.map((r) => ({ name: r.name, homemade: r.homemade === 1 }))));
+app.post("/api/admin/products", requireAdmin, async (c) => {
+  const r = cleanProduct(await c.req.json().catch(() => null));
+  if ("error" in r) return c.json({ error: r.error }, 400);
+  const cid = c.get("me").client_id;
+  if (await c.env.DB.prepare("SELECT 1 FROM products WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(cid, r.product.name_fr).first()) return c.json({ error: "name_taken" }, 409);
+  return c.json({ id: await saveProduct(c.env.DB, cid, null, r.product) }, 201);
+});
+app.put("/api/admin/products/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id")), cid = c.get("me").client_id;
+  const r = cleanProduct(await c.req.json().catch(() => null));
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  if ("error" in r) return c.json({ error: r.error }, 400);
+  if (await c.env.DB.prepare("SELECT 1 FROM products WHERE client_id = ? AND lower(name_fr) = lower(?) AND id != ?").bind(cid, r.product.name_fr, id).first()) return c.json({ error: "name_taken" }, 409);
+  await saveProduct(c.env.DB, cid, id, r.product);
+  return c.json({ ok: true });
+});
+app.delete("/api/admin/products/:id", requireAdmin, async (c) => {
+  const id = intParam(c.req.param("id")), cid = c.get("me").client_id;
+  if (!id) return c.json({ error: "bad_id" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM product_ingredients WHERE format_id IN (SELECT f.id FROM product_formats f JOIN products p ON p.id = f.product_id WHERE p.id = ? AND p.client_id = ?)").bind(id, cid),
+    c.env.DB.prepare("DELETE FROM product_formats WHERE product_id IN (SELECT id FROM products WHERE id = ? AND client_id = ?)").bind(id, cid),
+    c.env.DB.prepare("DELETE FROM products WHERE id = ? AND client_id = ?").bind(id, cid),
+  ]);
+  return c.json({ ok: true });
+});
+// Several products at once (e.g. read from a menu): a product with the same name is replaced, the others are added.
+app.post("/api/admin/products/import", requireAdmin, async (c) => {
+  const b = await c.req.json<{ products?: unknown[]; update?: boolean }>().catch(() => ({} as { products?: unknown[]; update?: boolean }));
+  if (!Array.isArray(b.products) || !b.products.length || b.products.length > 300) return c.json({ error: "invalid_products" }, 400);
+  const cid = c.get("me").client_id, cleaned: Product[] = [], errors: { index: number; error: string }[] = [];
+  b.products.forEach((raw, index) => { const r = cleanProduct(raw); if ("error" in r) errors.push({ index, error: r.error }); else cleaned.push(r.product); });
+  if (errors.length) return c.json({ error: "invalid_products", errors }, 400); // nothing is saved when one product is wrong
+  let created = 0, updated = 0, skipped = 0;
+  for (const p of cleaned) {
+    const ex = await c.env.DB.prepare("SELECT id FROM products WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(cid, p.name_fr).first<{ id: number }>();
+    if (ex && b.update === false) { skipped++; continue; }
+    await saveProduct(c.env.DB, cid, ex?.id ?? null, p);
+    if (ex) updated++; else created++;
+  }
+  return c.json({ created, updated, skipped });
+});
+
 const supplierView = (r: Record<string, unknown>) => ({ ...r, api_key_set: r.api_key_set === 1, order_methods: (() => { try { return cleanMethods(JSON.parse(String(r.order_methods ?? "[]"))); } catch { return []; } })(), order_settings: parseOrderSettings(r.order_settings as string | null) });
 app.get("/api/admin/suppliers", requireAdmin, async (c) => c.json((await c.env.DB.prepare("SELECT id, name, phone, email, notes, order_method, order_methods, portal_url, website_url, order_settings, customer_number, api_url, api_user, api_key IS NOT NULL AND api_key != '' AS api_key_set FROM suppliers WHERE client_id = ? ORDER BY position, id").bind(c.get("me").client_id).all<Record<string, unknown>>()).results.map(supplierView)));
 app.put("/api/admin/suppliers", requireAdmin, async (c) => {

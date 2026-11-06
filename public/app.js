@@ -3998,6 +3998,118 @@ function voiceContactsPanel() {
   return box;
 }
 
+// Administration -> Products: what the customers buy. Formats (sizes) with a price, and the ingredients (with quantities) of each format.
+function productsPanel() {
+  const box = h("section", { class: "panel products" });
+  const st = { list: [], names: [], q: "", filter: "all" };
+  const UNITS = ["g", "kg", "ml", "L", "oz", "lb", "unité", "tranche", "portion", "tasse", "c. à soupe", "c. à thé"];
+  const money = (n) => (n === null || n === undefined ? "" : `${Number(n).toFixed(2).replace(".", getLang() === "fr" ? "," : ".")} $`);
+  const period = (p) => (p.available_from || p.available_to ? `${p.available_from ? fmt(p.available_from, { day: "numeric", month: "short", year: "numeric" }) : "…"} → ${p.available_to ? fmt(p.available_to, { day: "numeric", month: "short", year: "numeric" }) : "…"}` : "");
+  async function load() {
+    [st.list, st.names] = await Promise.all([api("/admin/products"), api("/admin/ingredient-names")]);
+    draw();
+  }
+  function draw() {
+    const q = st.q.trim().toLowerCase();
+    const list = st.list.filter((p) => (st.filter === "all" || (st.filter === "promo" ? p.is_promo : st.filter === "inactive" ? !p.active : p.active))
+      && (!q || p.name_fr.toLowerCase().includes(q) || (p.name_en ?? "").toLowerCase().includes(q) || (p.category ?? "").toLowerCase().includes(q) || p.formats.some((f) => f.ingredients.some((i) => i.ingredient.toLowerCase().includes(q)))));
+    const cats = [...new Set(list.map((p) => p.category ?? ""))].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, getLang())));
+    const filters = [["all", t("prodAll")], ["promo", `🏷️ ${t("prodPromos")}`], ["active", t("prodActive")], ["inactive", t("prodInactive")]];
+    box.replaceChildren(h("h2", {}, `🛍️ ${t("adminProducts")}`), h("p", { class: "meta" }, t("prodHelp")),
+      h("div", { class: "ing-add" }, h("button", { class: "btn primary", type: "button", onClick: () => productDialog(null) }, `+ ${t("prodAdd")}`), h("button", { class: "btn", type: "button", onClick: importDialog }, `⬆ ${t("prodImport")}`),
+        h("input", { type: "search", value: st.q, placeholder: t("prodSearch"), "aria-label": t("prodSearch"), onInput: (e) => { st.q = e.target.value; clearTimeout(st.t); st.t = setTimeout(() => { draw(); box.querySelector("input[type=search]")?.focus(); }, 250); } })),
+      h("div", { class: "chip-row", role: "group" }, filters.map(([id, label]) => h("button", { type: "button", class: `chip-btn${st.filter === id ? " on" : ""}`, "aria-pressed": String(st.filter === id), onClick: () => { st.filter = id; draw(); } }, label))),
+      ...(list.length ? cats.flatMap((cat) => [h("h3", { class: "restock-title" }, `${cat || t("prodNoCategory")} · ${list.filter((p) => (p.category ?? "") === cat).length}`),
+        ...list.filter((p) => (p.category ?? "") === cat).map((p) => h("div", { class: `card prod-card${p.active ? "" : " inactive"}` },
+          h("div", { class: "prod-head" }, h("b", {}, p.name_fr), p.name_en ? h("small", { class: "meta" }, ` · ${p.name_en}`) : null,
+            p.is_promo ? h("span", { class: `prod-promo ${p.availability}` }, `🏷️ ${t("prodPromo")}`) : null,
+            p.availability !== "always" ? h("span", { class: `prod-period ${p.availability}` }, `${period(p)}${p.availability === "upcoming" ? ` · ${t("prodUpcoming")}` : p.availability === "expired" ? ` · ${t("prodExpired")}` : ""}`) : null,
+            !p.active ? h("span", { class: "ing-badge" }, t("prodInactive")) : null,
+            h("button", { class: "btn small", type: "button", onClick: () => productDialog(p) }, `✎ ${t("editWord")}`)),
+          p.description ? h("p", { class: "meta" }, p.description) : null,
+          h("div", { class: "prod-formats" }, p.formats.map((f) => h("details", { class: "prod-format" }, h("summary", {}, h("b", {}, f.name || t("prodStandard")), f.price ? ` · ${money(f.price)}` : "", h("small", { class: "meta" }, ` · ${f.ingredients.length} ${t("prodIngredientsWord")}`)),
+            f.ingredients.length ? h("ul", { class: "prod-ings" }, f.ingredients.map((i) => h("li", { class: st.names.some((n) => n.name.toLowerCase() === i.ingredient.toLowerCase()) ? "" : "unknown" }, i.ingredient, h("small", { class: "meta" }, `${i.qty ? ` — ${i.qty}${i.unit ? ` ${i.unit}` : ""}` : ""}${i.note ? ` (${i.note})` : ""}`)))) : h("p", { class: "meta" }, t("prodNoIngredients")))))))]) : [h("p", { class: "meta" }, t("prodNone"))]));
+  }
+  // ---- one product ----
+  function productDialog(p) {
+    let dlg = document.getElementById("product-modal");
+    if (!dlg) { dlg = h("dialog", { id: "product-modal", class: "wide" }); document.body.append(dlg); }
+    const cur = p ? JSON.parse(JSON.stringify(p)) : { name_fr: "", name_en: "", category: "", description: "", code: "", active: true, is_promo: false, available_from: null, available_to: null, formats: [{ name: "", price: null, ingredients: [] }] };
+    const f = (label, el) => h("label", { class: "field" }, h("span", {}, label), el);
+    const name = h("input", { value: cur.name_fr, maxLength: 80, "aria-label": t("prodNameFr") }), nameEn = h("input", { value: cur.name_en ?? "", maxLength: 80, "aria-label": t("prodNameEn") });
+    const cat = h("input", { value: cur.category ?? "", maxLength: 40, list: "prod-cats", "aria-label": t("prodCategory") });
+    const code = h("input", { value: cur.code ?? "", maxLength: 30, "aria-label": t("prodCode") }), desc = h("textarea", { rows: 2, maxLength: 300, "aria-label": t("prodDescription") }, cur.description ?? "");
+    const active = h("input", { type: "checkbox", checked: cur.active });
+    const promo = h("input", { type: "checkbox", checked: cur.is_promo });
+    const from = h("input", { type: "date", value: cur.available_from ?? "" }), to = h("input", { type: "date", value: cur.available_to ?? "" });
+    const err = h("p", { class: "form-error", role: "alert", hidden: true });
+    const fmtBox = h("div", { class: "prod-fmts" });
+    const drawFormats = () => fmtBox.replaceChildren(...cur.formats.map((fm, fi) => {
+      const lines = h("div", { class: "prod-lines" });
+      const drawLines = () => lines.replaceChildren(...fm.ingredients.map((l, li) => {
+        const unknown = l.ingredient && !st.names.some((n) => n.name.toLowerCase() === l.ingredient.toLowerCase());
+        const ing = h("input", { value: l.ingredient, list: "prod-ings", maxLength: 80, placeholder: t("prodIngredient"), "aria-label": t("prodIngredient"), onInput: (e) => { l.ingredient = e.target.value; ing.classList.toggle("unknown", !!l.ingredient && !st.names.some((n) => n.name.toLowerCase() === l.ingredient.toLowerCase())); } });
+        ing.classList.toggle("unknown", !!unknown);
+        return h("div", { class: "prod-line" }, ing,
+          h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", value: l.qty ?? "", placeholder: t("prodQty"), "aria-label": t("prodQty"), onInput: (e) => { l.qty = e.target.value === "" ? null : Number(e.target.value); } }),
+          h("input", { value: l.unit ?? "", list: "prod-units", maxLength: 20, placeholder: t("prodUnit"), "aria-label": t("prodUnit"), onInput: (e) => { l.unit = e.target.value; } }),
+          h("input", { value: l.note ?? "", maxLength: 80, placeholder: t("prodLineNote"), "aria-label": t("prodLineNote"), onInput: (e) => { l.note = e.target.value; } }),
+          h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { fm.ingredients.splice(li, 1); drawLines(); } }, "✕"));
+      }));
+      drawLines();
+      return h("div", { class: "card prod-fmt" },
+        h("div", { class: "prod-fmt-head" }, f(t("prodFormatName"), h("input", { value: fm.name, maxLength: 40, placeholder: t("prodFormatPh"), onInput: (e) => { fm.name = e.target.value; } })),
+          f(t("prodPrice"), h("input", { type: "number", min: "0", step: "0.01", inputmode: "decimal", value: fm.price ?? "", placeholder: "0.00", onInput: (e) => { fm.price = e.target.value === "" ? null : Number(e.target.value); } }))),
+        h("div", { class: "prod-line prod-line-head meta" }, h("span", {}, t("prodIngredient")), h("span", {}, t("prodQty")), h("span", {}, t("prodUnit")), h("span", {}, t("prodLineNote")), h("span", {})),
+        lines,
+        h("div", { class: "actions prod-fmt-actions" },
+          h("button", { type: "button", class: "btn small", onClick: () => { fm.ingredients.push({ ingredient: "", qty: null, unit: "", note: "" }); drawLines(); lines.querySelector(".prod-line:last-child input")?.focus(); } }, `+ ${t("prodAddIngredient")}`),
+          h("button", { type: "button", class: "btn small", onClick: () => { cur.formats.splice(fi + 1, 0, { name: "", price: null, ingredients: JSON.parse(JSON.stringify(fm.ingredients)) }); drawFormats(); } }, t("prodDuplicateFormat")),
+          cur.formats.length > 1 ? h("button", { type: "button", class: "btn small danger", onClick: () => { cur.formats.splice(fi, 1); drawFormats(); } }, t("prodRemoveFormat")) : null));
+    }));
+    drawFormats();
+    const body = () => ({ name_fr: name.value, name_en: nameEn.value, category: cat.value, description: desc.value, code: code.value, active: active.checked, is_promo: promo.checked, available_from: from.value || null, available_to: to.value || null, formats: cur.formats });
+    const close = () => dlg.close();
+    dlg.replaceChildren(h("form", { class: "modal-body prod-dialog", onSubmit: async (e) => {
+        e.preventDefault(); err.hidden = true;
+        try { await api(p ? `/admin/products/${p.id}` : "/admin/products", { method: p ? "PUT" : "POST", body: body() }); toast(t("saved")); close(); load(); }
+        catch (x) { const k = x.body?.error; err.textContent = `⚠ ${t(`prodErr_${k}`) !== `prodErr_${k}` ? t(`prodErr_${k}`) : errorText(x)}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); }
+      } },
+      h("h2", {}, p ? p.name_fr : t("prodAdd")), err,
+      h("datalist", { id: "prod-cats" }, [...new Set(st.list.map((x) => x.category).filter(Boolean))].map((c) => h("option", { value: c }))),
+      h("datalist", { id: "prod-ings" }, st.names.map((n) => h("option", { value: n.name }, n.homemade ? `🏠 ${t("mixIsMix")}` : ""))),
+      h("datalist", { id: "prod-units" }, UNITS.map((u) => h("option", { value: u }))),
+      h("div", { class: "ing-two" }, f(t("prodNameFr"), name), f(t("prodNameEn"), nameEn)),
+      h("div", { class: "ing-two" }, f(t("prodCategory"), cat), f(t("prodCode"), code)),
+      f(t("prodDescription"), desc),
+      h("label", { class: "check" }, active, h("span", {}, t("prodActiveLabel"))),
+      h("div", { class: "card prod-promo-box" }, h("label", { class: "check" }, promo, h("span", {}, `🏷️ ${t("prodIsPromo")}`)), h("p", { class: "meta" }, t("prodPeriodHelp")), h("div", { class: "ing-two" }, f(t("prodFrom"), from), f(t("prodTo"), to))),
+      h("h3", {}, t("prodFormats")), h("p", { class: "meta" }, t("prodFormatsHelp")), fmtBox,
+      h("button", { type: "button", class: "btn", onClick: () => { cur.formats.push({ name: "", price: null, ingredients: [] }); drawFormats(); } }, `+ ${t("prodAddFormat")}`),
+      h("div", { class: "actions" },
+        p ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("prodDeleteConfirm").replace("{n}", p.name_fr)))) return; try { await api(`/admin/products/${p.id}`, { method: "DELETE" }); toast(t("saved")); close(); load(); } catch (x) { toast(errorText(x)); } } }, t("delete")) : null,
+        h("button", { class: "btn", type: "button", onClick: close }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.showModal();
+  }
+  // ---- import (a JSON list of products, e.g. read from menu photos) ----
+  function importDialog() {
+    let dlg = document.getElementById("product-import-modal");
+    if (!dlg) { dlg = h("dialog", { id: "product-import-modal", class: "wide" }); document.body.append(dlg); }
+    const ta = h("textarea", { rows: 12, spellcheck: false, placeholder: '{ "products": [ { "name_fr": "Pizza pepperoni", "category": "Pizzas", "formats": [ { "name": "10 po", "price": 12.99, "ingredients": [ { "ingredient": "Fromage", "qty": 120, "unit": "g" } ] } ] } ] }' });
+    const upd = h("input", { type: "checkbox", checked: true }), out = h("p", { class: "meta" });
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (e) => {
+        e.preventDefault(); out.textContent = "";
+        let data; try { data = JSON.parse(ta.value); } catch { out.textContent = `⚠ ${t("prodImportBad")}`; return; }
+        try { const r = await api("/admin/products/import", { method: "POST", body: { products: Array.isArray(data) ? data : data.products, update: upd.checked } }); out.textContent = `✅ ${r.created} ${t("prodImportCreated")}, ${r.updated} ${t("prodImportUpdated")}${r.skipped ? `, ${r.skipped} ${t("prodImportSkipped")}` : ""}`; load(); }
+        catch (x) { out.textContent = `⚠ ${x.body?.errors?.length ? x.body.errors.map((z) => `#${z.index + 1}: ${z.error}`).join(", ") : errorText(x)}`; }
+      } }, h("h2", {}, `⬆ ${t("prodImport")}`), h("p", { class: "meta" }, t("prodImportHelp")), ta, h("label", { class: "check" }, upd, h("span", {}, t("prodImportUpdate"))), out,
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("close")), h("button", { class: "btn primary", type: "submit" }, t("prodImportGo")))));
+    dlg.showModal();
+  }
+  load().catch((e) => box.replaceChildren(h("p", { class: "meta" }, errorText(e))));
+  return box;
+}
+
 const ADMIN_SECTIONS_MARK = 0;
 const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["contacts", "adminContacts"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
 const ADMIN_ICONS = { contacts: "📞", vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
@@ -4054,7 +4166,7 @@ async function renderAdmin() {
     communities: () => [communitiesPanel(ov)],
     checklists: () => [checklistsPanel(), postPeriodsPanel()],
     ingredients: () => [ingredientsPanel()],
-    products: () => [h("section", { class: "panel" }, h("h2", {}, `🛍️ ${t("adminProducts")}`), h("p", { class: "meta" }, t("productsSoon")))],
+    products: () => [productsPanel()],
     usage: () => [usagePanel()],
     autoschedule: () => [autoSchedulePanel()],
     vehicles: () => [vehiclesAdminPanel()],
