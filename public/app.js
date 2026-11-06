@@ -2547,7 +2547,7 @@ async function renderInventory(box, restaurantIds) {
       const step = (dx) => { p.q = Math.max(0, Math.round(((Number(p.q) || 0) + dx) * 100) / 100); qty.value = String(p.q); commit(); };
       const kinds = [...(hasPack(it) ? [["pack", sp.pack_unit]] : []), ["unit", baseLabel(it)], ["other", t("invOther")]];
       const sel = h("select", { "aria-label": t("invUnit"), onChange: () => { p.u = sel.value; if (p.u !== "other") delete p.label; paintParts(); commit(); } }, kinds.map(([v, l]) => h("option", { value: v, selected: p.u === v }, l)));
-      const other = p.u === "other" ? h("input", { class: "inv-unit", maxLength: 20, value: p.label ?? "", placeholder: t("invOtherLabel"), "aria-label": t("invOtherLabel"), onInput: () => { p.label = other.value; commit(); } }) : null;
+      const other = p.u === "other" ? h("div", { class: "inv-unit" }, unitPicker(p.label ?? "", (v) => { p.label = v; commit(); }, { placeholder: t("invOtherLabel"), label: t("invOtherLabel") })) : null;
       return h("div", { class: "inv-part" }, h("button", { type: "button", class: "icon-btn", "aria-label": "−", onClick: () => step(-1) }, "−"), qty, h("button", { type: "button", class: "icon-btn", "aria-label": "+", onClick: () => step(1) }, "+"), sel,
         parts.length > 1 ? h("button", { type: "button", class: "icon-btn", "aria-label": t("invRemovePart"), title: t("invRemovePart"), onClick: () => { parts.splice(idx, 1); paintParts(); commit(); } }, "✕") : h("span", {}), other);
     }));
@@ -2583,6 +2583,71 @@ async function renderInventory(box, restaurantIds) {
 }
 
 // ---- ordering from a supplier: the ways it takes orders, and the buttons for them ----
+// ---- a real combo-box: a button that opens a searchable list (accents and case ignored; arrows, Enter and Escape work) ----
+// options: [{ value, label, hint }]. With allowCustom, text that is not in the list can be used as it is (shown as the last choice).
+let pickerOpen = null;
+function pickerBox({ options, value = "", placeholder = "", label = "", allowCustom = false, onChange }) {
+  const norm = (x) => String(x ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  let cur = value ?? "", active = 0, shownOpts = [];
+  const btn = h("button", { type: "button", class: "pk-btn", "aria-haspopup": "listbox", "aria-expanded": "false", "aria-label": label || placeholder });
+  const search = h("input", { type: "search", class: "pk-search", placeholder: t("pkSearch"), autocomplete: "off", "aria-label": t("pkSearch") });
+  const list = h("div", { class: "pk-list", role: "listbox" });
+  const panel = h("div", { class: "pk-panel", hidden: true }, search, list);
+  const root = h("div", { class: "pk" }, btn, panel);
+  const known = (v) => options.some((o) => norm(o.value) === norm(v));
+  const labelOf = (v) => options.find((o) => o.value === v)?.label ?? v;
+  const paint = () => {
+    btn.replaceChildren(h("span", { class: "pk-text" }, cur ? labelOf(cur) : placeholder), h("span", { "aria-hidden": "true" }, "▾"));
+    btn.classList.toggle("empty", !cur);
+    btn.classList.toggle("unknown", !!cur && !allowCustom && !known(cur)); // a value that is not in the list (kept from before) is shown in red
+  };
+  const pick = (v) => { cur = v; paint(); close(); onChange?.(v); btn.focus(); };
+  const drawList = () => {
+    const q = norm(search.value.trim());
+    shownOpts = options.filter((o) => !q || norm(`${o.label} ${o.hint ?? ""}`).includes(q)).slice(0, 300).map((o) => ({ ...o, kind: "opt" }));
+    if (allowCustom && search.value.trim() && !known(search.value.trim())) shownOpts.push({ value: search.value.trim(), label: `${t("pkUse")} « ${search.value.trim()} »`, kind: "custom" });
+    if (active >= shownOpts.length) active = Math.max(0, shownOpts.length - 1);
+    list.replaceChildren(...(shownOpts.length ? shownOpts.map((o, i) => h("button", { type: "button", role: "option", class: `pk-opt${i === active ? " active" : ""}${o.value === cur && o.kind === "opt" ? " on" : ""}`, "aria-selected": String(o.value === cur), onMousedown: (e) => e.preventDefault(), onClick: () => pick(o.value) },
+      h("span", {}, o.label), o.hint ? h("small", {}, o.hint) : null)) : [h("p", { class: "pk-none" }, t("pkNone"))]));
+    list.querySelector(".pk-opt.active")?.scrollIntoView({ block: "nearest" });
+  };
+  const place = () => {
+    const r = btn.getBoundingClientRect(), below = window.innerHeight - r.bottom, above = r.top, up = below < 260 && above > below;
+    panel.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - Math.max(r.width, 260) - 8))}px`;
+    panel.style.width = `${Math.max(r.width, 260)}px`;
+    panel.style.maxHeight = `${Math.max(160, Math.min(340, (up ? above : below) - 16))}px`;
+    if (up) { panel.style.top = "auto"; panel.style.bottom = `${window.innerHeight - r.top + 4}px`; } else { panel.style.bottom = "auto"; panel.style.top = `${r.bottom + 4}px`; }
+  };
+  const outside = (e) => { if (!root.contains(e.target)) close(); };
+  function open() {
+    if (pickerOpen && pickerOpen !== close) pickerOpen();
+    pickerOpen = close; panel.hidden = false; btn.setAttribute("aria-expanded", "true"); search.value = ""; active = Math.max(0, options.findIndex((o) => o.value === cur)); drawList(); place(); search.focus();
+    document.addEventListener("mousedown", outside, true); window.addEventListener("resize", place); document.addEventListener("scroll", place, true);
+  }
+  function close() {
+    panel.hidden = true; btn.setAttribute("aria-expanded", "false"); pickerOpen = pickerOpen === close ? null : pickerOpen;
+    document.removeEventListener("mousedown", outside, true); window.removeEventListener("resize", place); document.removeEventListener("scroll", place, true);
+  }
+  btn.addEventListener("click", () => (panel.hidden ? open() : close()));
+  btn.addEventListener("keydown", (e) => { if (panel.hidden && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(); } });
+  search.addEventListener("input", () => { active = 0; drawList(); });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); btn.focus(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(shownOpts.length - 1, active + 1); drawList(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(0, active - 1); drawList(); }
+    else if (e.key === "Enter") { e.preventDefault(); const o = shownOpts[active]; if (o) pick(o.value); }
+  });
+  Object.defineProperty(root, "value", { get: () => cur, set: (v) => { cur = v ?? ""; paint(); } });
+  paint();
+  return root;
+}
+// units (a measure, a count, a package): searchable list; a unit that is not in it can still be typed and used
+const UNIT_GROUPS = [["unitGroupMeasure", ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé"]], ["unitGroupCount", ["unité", "tranche", "portion", "morceau", "poignée", "pincée", "choix"]], ["unitGroupPack", ["caisse", "boîte", "sac", "paquet", "bouteille", "canette", "liasse", "palette", "seau", "baril", "pot", "rouleau"]]];
+function unitPicker(value, onChange, { placeholder = "", label = "" } = {}) {
+  const options = UNIT_GROUPS.flatMap(([g, list]) => list.map((u) => ({ value: u, label: u, hint: t(g) })));
+  return pickerBox({ options, value, placeholder: placeholder || t("prodUnit"), label: label || t("prodUnit"), allowCustom: true, onChange });
+}
+
 /** The fields of one supplier's product data for an ingredient, as typed (strings). */
 const codeInit = (c = {}) => ({ p: c.p ?? "", alt: (c.alt ?? []).join(", "), price: c.price ?? "", unit: c.unit ?? "", pack_qty: c.pack_qty ?? "", pack_weight: c.pack_weight ?? "", yield_pct: c.yield_pct ?? "", prep: c.prep ?? "", prep_min: c.prep_min ?? "" });
 /** The inputs of one supplier's product data for an ingredient: product numbers, price and the package it is sold in, and the preparation it needs here. `c` is edited in place. */
@@ -2593,7 +2658,7 @@ function productCodeFields(c, onChange = () => {}) {
   const f = (label, el) => h("label", { class: "field" }, h("span", {}, label), el);
   return h("div", { class: "ing-code-fields" },
     two(f(t("ingCodePreferred"), inp("p", { maxLength: 40 })), f(t("ingCodeAlternates"), inp("alt", { maxLength: 200, placeholder: t("ingCodeAltPh") }))),
-    two(f(t("ingPrice"), dec("price", "0.01")), f(t("ingPriceUnit"), inp("unit", { maxLength: 20, list: "ing-units", placeholder: t("ingPriceUnitPh") }))),
+    two(f(t("ingPrice"), dec("price", "0.01")), f(t("ingPriceUnit"), unitPicker(c.unit ?? "", (v) => { c.unit = v; onChange(); }, { placeholder: t("ingPriceUnitPh"), label: t("ingPriceUnit") }))),
     two(f(t("ingPackWeight"), dec("pack_weight")), f(t("ingPackQty"), dec("pack_qty"))),
     two(f(t("ingYield"), dec("yield_pct")), f(t("ingPrepMin"), dec("prep_min"))),
     f(t("ingPrepTask"), inp("prep", { maxLength: 60, placeholder: t("ingPrepPh") })));
@@ -4060,12 +4125,10 @@ function productsPanel() {
       const fm = cur.formats[sel], fi = sel;
       const lines = h("div", { class: "prod-lines" });
       const drawLines = () => lines.replaceChildren(...fm.ingredients.map((l, li) => {
-        const unknown = l.ingredient && !st.names.some((n) => n.name.toLowerCase() === l.ingredient.toLowerCase());
-        const ing = h("input", { value: l.ingredient, list: "prod-ings", maxLength: 80, placeholder: t("prodIngredient"), "aria-label": t("prodIngredient"), onInput: (e) => { l.ingredient = e.target.value; ing.classList.toggle("unknown", !!l.ingredient && !st.names.some((n) => n.name.toLowerCase() === l.ingredient.toLowerCase())); drawNavSoon(); } });
-        ing.classList.toggle("unknown", !!unknown);
+        const ing = pickerBox({ options: st.names.map((n) => ({ value: n.name, label: n.name, hint: n.homemade ? `🏠 ${t("mixIsMix")}` : "" })), value: l.ingredient, placeholder: t("prodPickIngredient"), label: t("prodIngredient"), onChange: (v) => { l.ingredient = v; drawNavSoon(); } });
         return h("div", { class: "prod-line" }, ing,
           h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", value: l.qty ?? "", placeholder: t("prodQty"), "aria-label": t("prodQty"), onInput: (e) => { l.qty = e.target.value === "" ? null : Number(e.target.value); } }),
-          h("input", { value: l.unit ?? "", list: "prod-units", maxLength: 20, placeholder: t("prodUnit"), "aria-label": t("prodUnit"), onInput: (e) => { l.unit = e.target.value; } }),
+          unitPicker(l.unit ?? "", (v) => { l.unit = v; }),
           h("input", { value: l.note ?? "", maxLength: 80, placeholder: t("prodLineNote"), "aria-label": t("prodLineNote"), onInput: (e) => { l.note = e.target.value; } }),
           h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { fm.ingredients.splice(li, 1); drawLines(); drawNav(); } }, "✕"));
       }));
@@ -4100,12 +4163,10 @@ function productsPanel() {
     dlg.replaceChildren(h("form", { class: "modal-body prod-dialog", onSubmit: async (e) => {
         e.preventDefault(); err.hidden = true;
         try { await api(p ? `/admin/products/${p.id}` : "/admin/products", { method: p ? "PUT" : "POST", body: body() }); toast(t("saved")); close(); load(); }
-        catch (x) { const k = x.body?.error; if (["name_required", "name_taken", "invalid_period"].includes(k)) showTab("details"); else showTab("formats"); err.textContent = `⚠ ${t(`prodErr_${k}`) !== `prodErr_${k}` ? t(`prodErr_${k}`) : errorText(x)}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); }
+        catch (x) { const k = x.body?.error; if (["name_required", "name_taken", "invalid_period"].includes(k)) showTab("details"); else showTab("formats"); err.textContent = `⚠ ${t(`prodErr_${k}`) !== `prodErr_${k}` ? t(`prodErr_${k}`) : errorText(x)}${x.body?.names?.length ? ` : ${x.body.names.join(", ")}` : ""}`; err.hidden = false; err.scrollIntoView({ block: "nearest" }); }
       } },
       h("h2", {}, p ? p.name_fr : t("prodAdd")), err,
       h("datalist", { id: "prod-cats" }, [...new Set(st.list.map((x) => x.category).filter(Boolean))].map((c) => h("option", { value: c }))),
-      h("datalist", { id: "prod-ings" }, st.names.map((n) => h("option", { value: n.name }, n.homemade ? `🏠 ${t("mixIsMix")}` : ""))),
-      h("datalist", { id: "prod-units" }, UNITS.map((u) => h("option", { value: u }))),
       tabsBar, detailsPane, formatsPane,
       h("div", { class: "actions" },
         p ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("prodDeleteConfirm").replace("{n}", p.name_fr)))) return; try { await api(`/admin/products/${p.id}`, { method: "DELETE" }); toast(t("saved")); close(); load(); } catch (x) { toast(errorText(x)); } } }, t("delete")) : null,
@@ -4840,7 +4901,7 @@ function ingredientsPanel() {
     const qtyBox = h("div", { class: "ing-qtys" });
     const drawQty = () => qtyBox.replaceChildren(...(comps.size ? [h("p", { class: "meta" }, t("compQtyTitle"))] : []), ...[...comps].map((n) => h("div", { class: "ing-qty-row" }, h("span", {}, n),
       h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", value: qtys[n]?.qty ?? "", "aria-label": `${n} · ${t("compQty")}`, onInput: (e) => { (qtys[n] ??= { qty: "", unit: "" }).qty = e.target.value; } }),
-      h("input", { list: "ing-qty-units", maxLength: 20, value: qtys[n]?.unit ?? "", placeholder: t("compUnit"), "aria-label": `${n} · ${t("compUnit")}`, onInput: (e) => { (qtys[n] ??= { qty: "", unit: "" }).unit = e.target.value; } }))));
+      unitPicker(qtys[n]?.unit ?? "", (v) => { (qtys[n] ??= { qty: "", unit: "" }).unit = v; }, { placeholder: t("compUnit"), label: `${n} · ${t("compUnit")}` }))));
     const search = h("input", { type: "search", placeholder: t("ingSearch"), "aria-label": t("ingSearch"), onInput: () => drawComps() });
     const compList = h("div", { class: "ing-comps" });
     const others = () => unique().map((e) => e.name).filter((n) => !same(n, cur.name) && !same(n, name.value)).sort((a, b) => a.localeCompare(b, lang));
@@ -4862,14 +4923,14 @@ function ingredientsPanel() {
     const portion = h("div", { class: "ing-portion" }, h("span", {}, `⚖ ${t("ingPortion")}`), grams, h("span", {}, "g"), h("span", {}, "="), ounces, h("span", {}, "oz"));
     // or a count of something: 2 slices, 3 pieces…
     const qty = h("input", { type: "number", min: "0", step: "0.5", inputmode: "decimal", value: cur.portion_qty ? String(cur.portion_qty) : "", "aria-label": t("ingPortionCount") });
-    const unit = h("input", { value: cur.portion_unit ?? "", maxLength: 30, list: "ing-units", placeholder: t("ingPortionUnitPh"), "aria-label": t("ingPortionUnitPh") });
+    const unit = unitPicker(cur.portion_unit ?? "", () => {}, { placeholder: t("ingPortionUnitPh"), label: t("ingPortionUnitPh") });
     const units = h("datalist", { id: "ing-units" }, ["tranches", "morceaux", "unités", "tasses", "poignées", "tasses à mesurer", "sacs", "paquets", "caisses", "boîtes", "bouteilles"].map((u) => h("option", { value: u })));
     const portionCount = h("div", { class: "ing-portion count" }, h("span", {}, `⚖ ${t("ingPortionCount")}`), qty, unit, units);
     const homeBox = h("div", { class: "ing-home" }, h("p", { class: "meta" }, t("ingHomemadeHelp")), search, compList, qtyBox, h("datalist", { id: "ing-qty-units" }, ["g", "kg", "oz", "lb", "ml", "L", "tasse", "c. à soupe", "c. à thé", "unité", "tranche", "sac", "paquet", "caisse", "boîte", "bouteille"].map((u) => h("option", { value: u }))), note, portion, portionCount);
     // how it is packaged and counted (used by the Inventory screen)
     const iv = cur.inv ?? {};
     const ivIn = (key, extra = {}) => h("input", { value: iv[key] ?? "", "aria-label": t(`invF_${key}`), autocomplete: "off", ...extra });
-    const ivf = { family: ivIn("family", { maxLength: 60, list: "ing-families" }), base_unit: ivIn("base_unit", { maxLength: 20, list: "ing-units" }), pack_unit: ivIn("pack_unit", { maxLength: 20, list: "ing-units" }),
+    const ivf = { family: ivIn("family", { maxLength: 60, list: "ing-families" }), base_unit: unitPicker(iv.base_unit ?? "", () => {}, { label: t("invF_base_unit"), placeholder: t("invF_base_unit") }), pack_unit: unitPicker(iv.pack_unit ?? "", () => {}, { label: t("invF_pack_unit"), placeholder: t("invF_pack_unit") }),
       pack_qty: ivIn("pack_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_weight: ivIn("pack_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }), unit_weight: ivIn("unit_weight", { type: "number", min: "0", step: "any", inputmode: "decimal" }),
       min_qty: ivIn("min_qty", { type: "number", min: "0", step: "any", inputmode: "decimal" }), pack_cost: ivIn("pack_cost", { type: "number", min: "0", step: "0.01", inputmode: "decimal" }) };
     const families = [...new Set(st.groups.flatMap((g) => g.items.map((i) => i.inv?.family)).filter(Boolean))];

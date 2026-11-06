@@ -3122,6 +3122,20 @@ async function saveProduct(db: D1Database, cid: number, id: number | null, p: Pr
   }
   return id;
 }
+/** Writes each ingredient of a product with the spelling of the ingredients list (so "fromage" becomes "Fromage"). */
+async function canonicalIngredients(db: D1Database, cid: number, product: Product): Promise<void> {
+  const rows = (await db.prepare("SELECT min(i.name) AS name FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id JOIN restaurants r ON r.id = g.restaurant_id WHERE r.client_id = ? GROUP BY lower(i.name)").bind(cid).all<{ name: string }>()).results;
+  const by = new Map(rows.map((r) => [r.name.toLowerCase(), r.name]));
+  for (const f of product.formats) for (const i of f.ingredients) i.ingredient = by.get(i.ingredient.toLowerCase()) ?? i.ingredient;
+}
+/** The ingredient names of a product that are not in the ingredients list (names the product already had are tolerated, so an older product can still be saved). */
+async function unknownIngredients(db: D1Database, cid: number, product: Product, productId: number | null): Promise<string[]> {
+  const names = [...new Set(product.formats.flatMap((f) => f.ingredients.map((i) => i.ingredient)))];
+  if (!names.length) return [];
+  const known = new Set((await db.prepare("SELECT lower(i.name) AS k FROM ingredients i JOIN ingredient_groups g ON g.id = i.group_id JOIN restaurants r ON r.id = g.restaurant_id WHERE r.client_id = ?").bind(cid).all<{ k: string }>()).results.map((r) => r.k));
+  if (productId) for (const r of (await db.prepare("SELECT lower(l.ingredient) AS k FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id WHERE f.product_id = ?").bind(productId).all<{ k: string }>()).results) known.add(r.k);
+  return names.filter((n) => !known.has(n.toLowerCase()) && !known.has(n.toLocaleLowerCase()));
+}
 app.get("/api/admin/products", requireAdmin, async (c) => {
   const today = localNow(c.env.TIMEZONE).slice(0, 10);
   return c.json((await productsOf(c.env.DB, c.get("me").client_id)).map((p) => ({ ...p, availability: availability(p, today) })));
@@ -3132,6 +3146,9 @@ app.post("/api/admin/products", requireAdmin, async (c) => {
   if ("error" in r) return c.json({ error: r.error }, 400);
   const cid = c.get("me").client_id;
   if (await c.env.DB.prepare("SELECT 1 FROM products WHERE client_id = ? AND lower(name_fr) = lower(?)").bind(cid, r.product.name_fr).first()) return c.json({ error: "name_taken" }, 409);
+  await canonicalIngredients(c.env.DB, cid, r.product);
+  const unknown = await unknownIngredients(c.env.DB, cid, r.product, null);
+  if (unknown.length) return c.json({ error: "unknown_ingredient", names: unknown }, 400);
   return c.json({ id: await saveProduct(c.env.DB, cid, null, r.product) }, 201);
 });
 app.put("/api/admin/products/:id", requireAdmin, async (c) => {
@@ -3140,6 +3157,9 @@ app.put("/api/admin/products/:id", requireAdmin, async (c) => {
   if (!id) return c.json({ error: "bad_id" }, 400);
   if ("error" in r) return c.json({ error: r.error }, 400);
   if (await c.env.DB.prepare("SELECT 1 FROM products WHERE client_id = ? AND lower(name_fr) = lower(?) AND id != ?").bind(cid, r.product.name_fr, id).first()) return c.json({ error: "name_taken" }, 409);
+  await canonicalIngredients(c.env.DB, cid, r.product);
+  const unknown = await unknownIngredients(c.env.DB, cid, r.product, id);
+  if (unknown.length) return c.json({ error: "unknown_ingredient", names: unknown }, 400);
   await saveProduct(c.env.DB, cid, id, r.product);
   return c.json({ ok: true });
 });
