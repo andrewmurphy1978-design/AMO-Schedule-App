@@ -4064,6 +4064,149 @@ function voiceContactsPanel() {
 }
 
 // Administration -> Products: what the customers buy. Formats (sizes) with a price, and the ingredients (with quantities) of each format.
+// ---- Accounting (platform owner only): entities, chart of accounts, journal, trial balance ----
+function accountingPanel() {
+  const box = h("section", { class: "panel accounting" });
+  const st = { books: { entities: [], accounts: [] }, sel: null, tab: "overview", journal: [] };
+  const KINDS = [["PERSONAL", "acctKindPersonal"], ["SOLE_PROPRIETORSHIP", "acctKindSole"], ["CORPORATION", "acctKindCorp"], ["LLC", "acctKindLlc"]];
+  const TYPES = [["ASSET", "acctTypeAsset"], ["LIABILITY", "acctTypeLiability"], ["EQUITY", "acctTypeEquity"], ["INCOME", "acctTypeIncome"], ["EXPENSE", "acctTypeExpense"]];
+  const f = (label, el) => h("label", { class: "field" }, h("span", {}, label), el);
+  const ent = () => st.books.entities.find((e) => e.id === st.sel) ?? null;
+  const accts = () => st.books.accounts.filter((a) => a.entity_id === st.sel && !a.archived);
+  const accName = (a) => (getLang() === "fr" && a.name_fr ? a.name_fr : a.name);
+  const money = (cents, cur = "CAD") => new Intl.NumberFormat(locale(), { style: "currency", currency: cur, currencyDisplay: "narrowSymbol" }).format((cents ?? 0) / 100);
+  const natural = (a) => (a.type === "ASSET" || a.type === "EXPENSE" ? a.debit_cents - a.credit_cents : a.credit_cents - a.debit_cents);
+  const errMsg = (x) => { const k = x.body?.error; return k && t(`acctErr_${k}`) !== `acctErr_${k}` ? t(`acctErr_${k}`) : errorText(x); };
+  const kindLabel = (k) => t(KINDS.find(([id]) => id === k)?.[1] ?? "acctKindPersonal");
+
+  async function load() {
+    st.books = await api("/accounting/books");
+    if (!ent()) st.sel = st.books.entities[0]?.id ?? null;
+    if (st.sel && st.tab === "journal") st.journal = await api(`/accounting/entities/${st.sel}/journal`);
+    draw();
+  }
+
+  function entityDialog(e) {
+    let dlg = document.getElementById("acct-entity-modal");
+    if (!dlg) { dlg = h("dialog", { id: "acct-entity-modal" }); document.body.append(dlg); }
+    const name = h("input", { value: e?.name ?? "", maxLength: 80, "aria-label": t("acctName") });
+    const kind = h("select", { "aria-label": t("acctKind") }, KINDS.map(([id, key]) => h("option", { value: id, selected: (e?.kind ?? "PERSONAL") === id }, t(key))));
+    const country = h("select", {}, [["CA", "Canada"], ["US", "United States"]].map(([id, l]) => h("option", { value: id, selected: (e?.country ?? "CA") === id }, l)));
+    const province = h("input", { value: e?.province ?? "QC", maxLength: 3, placeholder: "QC" });
+    const currency = h("input", { value: e?.currency ?? "CAD", maxLength: 3 });
+    const month = h("select", {}, Array.from({ length: 12 }, (_, i) => h("option", { value: i + 1, selected: (e?.fiscal_year_end_month ?? 12) === i + 1 }, new Date(2026, i, 1).toLocaleDateString(locale(), { month: "long" }))));
+    const basis = h("select", {}, [["CASH", "acctBasisCash"], ["ACCRUAL", "acctBasisAccrual"]].map(([id, key]) => h("option", { value: id, selected: (e?.basis ?? "CASH") === id }, t(key))));
+    const reg = h("input", { type: "checkbox", checked: !!e?.sales_tax_registered });
+    const taxNo = h("input", { value: e?.tax_number ?? "", maxLength: 40 });
+    const err = h("p", { class: "form-error", role: "alert", hidden: true });
+    kind.addEventListener("change", () => { if (kind.value === "LLC") { country.value = "US"; currency.value = "USD"; } else if (kind.value === "CORPORATION") basis.value = "ACCRUAL"; });
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (ev) => {
+      ev.preventDefault(); err.hidden = true;
+      const body = { name: name.value, kind: kind.value, country: country.value, province: province.value, currency: currency.value, fiscal_year_end_month: Number(month.value), basis: basis.value, sales_tax_registered: reg.checked, tax_number: taxNo.value };
+      try { const r = await api(e ? `/accounting/entities/${e.id}` : "/accounting/entities", { method: e ? "PUT" : "POST", body }); if (!e) st.sel = r.id; toast(t("saved")); dlg.close(); load(); }
+      catch (x) { err.textContent = `⚠ ${errMsg(x)}`; err.hidden = false; }
+    } },
+      h("h2", {}, e ? e.name : t("acctAddEntity")), err,
+      f(t("acctName"), name), f(t("acctKind"), kind),
+      h("div", { class: "ing-two" }, f(t("acctCountry"), country), f(t("acctProvince"), province)),
+      h("div", { class: "ing-two" }, f(t("acctCurrency"), currency), f(t("acctFiscalEnd"), month)),
+      f(t("acctBasis"), basis),
+      h("label", { class: "check" }, reg, h("span", {}, t("acctSalesTax"))), f(t("acctTaxNumber"), taxNo),
+      h("div", { class: "actions" },
+        e ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("acctArchiveEntity").replace("{n}", e.name)))) return; try { await api(`/accounting/entities/${e.id}`, { method: "DELETE" }); toast(t("saved")); dlg.close(); load(); } catch (x) { toast(errMsg(x)); } } }, t("acctArchive")) : null,
+        h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.showModal();
+  }
+
+  function accountDialog(a) {
+    let dlg = document.getElementById("acct-account-modal");
+    if (!dlg) { dlg = h("dialog", { id: "acct-account-modal" }); document.body.append(dlg); }
+    const code = h("input", { value: a?.code ?? "", maxLength: 12, "aria-label": t("acctCode") }), name = h("input", { value: a?.name ?? "", maxLength: 80, "aria-label": t("acctName") }), nameFr = h("input", { value: a?.name_fr ?? "", maxLength: 80, "aria-label": t("acctNameFr") });
+    const type = h("select", { disabled: !!a }, TYPES.map(([id, key]) => h("option", { value: id, selected: (a?.type ?? "EXPENSE") === id }, t(key))));
+    const bank = h("input", { type: "checkbox" }), bankRow = h("label", { class: "check", hidden: !!a }, bank, h("span", {}, t("acctIsBank")));
+    const showBank = () => { bankRow.hidden = !!a || !["ASSET", "LIABILITY"].includes(type.value); }; type.addEventListener("change", showBank); showBank();
+    const err = h("p", { class: "form-error", role: "alert", hidden: true });
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (ev) => {
+      ev.preventDefault(); err.hidden = true;
+      try { await api(a ? `/accounting/accounts/${a.id}` : `/accounting/entities/${st.sel}/accounts`, { method: a ? "PUT" : "POST", body: { code: code.value, name: name.value, name_fr: nameFr.value, type: type.value, bank: bank.checked } }); toast(t("saved")); dlg.close(); load(); }
+      catch (x) { err.textContent = `⚠ ${errMsg(x)}`; err.hidden = false; }
+    } },
+      h("h2", {}, a ? accName(a) : t("acctAddAccount")), err,
+      h("div", { class: "ing-two" }, f(t("acctCode"), code), f(t("acctType"), type)), f(t("acctName"), name), f(t("acctNameFr"), nameFr), bankRow,
+      h("div", { class: "actions" },
+        a && !a.is_system ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("acctArchiveAccount").replace("{n}", accName(a))))) return; try { await api(`/accounting/accounts/${a.id}`, { method: "PUT", body: { code: a.code, name: a.name, name_fr: a.name_fr, archived: true } }); toast(t("saved")); dlg.close(); load(); } catch (x) { toast(errMsg(x)); } } }, t("acctArchive")) : null,
+        h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.showModal();
+  }
+
+  function entryDialog(opening) {
+    let dlg = document.getElementById("acct-entry-modal");
+    if (!dlg) { dlg = h("dialog", { id: "acct-entry-modal", class: "wide" }); document.body.append(dlg); }
+    const e = ent(), list = accts().filter((a) => a.subtype !== "GROUP");
+    const today = new Date().toISOString().slice(0, 10);
+    const date = h("input", { type: "date", value: today, required: true }), memo = h("input", { maxLength: 200, value: opening ? t("acctOpeningMemo") : "", placeholder: t("acctMemo") });
+    const lines = [{ account_id: "", debit: "", credit: "" }, { account_id: "", debit: "", credit: "" }];
+    const opts = TYPES.flatMap(([ty]) => list.filter((a) => a.type === ty).map((a) => ({ value: String(a.id), label: `${a.code} · ${accName(a)}`, hint: t(TYPES.find(([id]) => id === ty)[1]) })));
+    const rows = h("div", { class: "acct-lines" }), totals = h("p", { class: "acct-totals" }), err = h("p", { class: "form-error", role: "alert", hidden: true });
+    const cents = (v) => Math.round(Number(String(v).replace(",", ".")) * 100) || 0;
+    const sum = () => { const d = lines.reduce((s, l) => s + cents(l.debit), 0), c = lines.reduce((s, l) => s + cents(l.credit), 0); totals.textContent = `${t("acctDebit")} ${money(d, e.currency)} · ${t("acctCredit")} ${money(c, e.currency)} · ${d === c ? `✅ ${t("acctBalanced")}` : `⚠ ${t("acctDifference")} ${money(Math.abs(d - c), e.currency)}`}`; totals.classList.toggle("bad", d !== c); };
+    const draw2 = () => { rows.replaceChildren(h("div", { class: "acct-line acct-line-head meta" }, h("span", {}, t("acctAccount")), h("span", {}, t("acctDebit")), h("span", {}, t("acctCredit")), h("span", {})),
+      ...lines.map((l, i) => h("div", { class: "acct-line" },
+        pickerBox({ options: opts, value: l.account_id, placeholder: t("acctChooseAccount"), label: t("acctAccount"), onChange: (v) => { l.account_id = v; } }),
+        h("input", { inputmode: "decimal", value: l.debit, placeholder: "0,00", "aria-label": t("acctDebit"), onInput: (ev) => { l.debit = ev.target.value; if (l.debit) { l.credit = ""; ev.target.closest(".acct-line").querySelectorAll("input")[1].value = ""; } sum(); } }),
+        h("input", { inputmode: "decimal", value: l.credit, placeholder: "0,00", "aria-label": t("acctCredit"), onInput: (ev) => { l.credit = ev.target.value; if (l.credit) { l.debit = ""; ev.target.closest(".acct-line").querySelectorAll("input")[0].value = ""; } sum(); } }),
+        lines.length > 2 ? h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: () => { lines.splice(i, 1); draw2(); sum(); } }, "✕") : h("span", {})))); };
+    draw2(); sum();
+    dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (ev) => {
+      ev.preventDefault(); err.hidden = true;
+      try { await api(`/accounting/entities/${st.sel}/journal`, { method: "POST", body: { date: date.value, memo: memo.value, source: opening ? "OPENING" : "MANUAL", lines: lines.map((l) => ({ account_id: Number(l.account_id) || 0, debit: l.debit, credit: l.credit })) } }); toast(t("saved")); dlg.close(); st.tab = "journal"; load(); }
+      catch (x) { err.textContent = `⚠ ${errMsg(x)}`; err.hidden = false; }
+    } },
+      h("h2", {}, opening ? t("acctOpening") : t("acctNewEntry")), err,
+      h("div", { class: "ing-two" }, f(t("acctDate"), date), f(t("acctMemo"), memo)),
+      rows, totals,
+      h("div", { class: "actions" }, h("button", { class: "btn small", type: "button", onClick: () => { lines.push({ account_id: "", debit: "", credit: "" }); draw2(); } }, `+ ${t("acctAddLine")}`),
+        h("button", { class: "btn", type: "button", onClick: () => dlg.close() }, t("cancel")), h("button", { class: "btn primary", type: "submit" }, t("save")))));
+    dlg.showModal();
+  }
+
+  const overview = (e) => {
+    const sum = (ty) => accts().filter((a) => a.type === ty).reduce((s, a) => s + natural(a), 0);
+    const net = sum("INCOME") - sum("EXPENSE");
+    const tile = (label, v, cls = "") => h("div", { class: `acct-tile ${cls}` }, h("small", {}, label), h("b", {}, money(v, e.currency)));
+    return [h("div", { class: "acct-tiles" }, tile(t("acctTypeAsset"), sum("ASSET")), tile(t("acctTypeLiability"), sum("LIABILITY")), tile(t("acctTypeEquity"), sum("EQUITY") + net, ""), tile(t("acctTypeIncome"), sum("INCOME")), tile(t("acctTypeExpense"), sum("EXPENSE")), tile(t("acctNetIncome"), net, net < 0 ? "bad" : "ok")),
+      h("p", { class: "meta" }, `${kindLabel(e.kind)} · ${e.country}${e.province ? ` ${e.province}` : ""} · ${e.currency} · ${t(e.basis === "CASH" ? "acctBasisCash" : "acctBasisAccrual")}${e.sales_tax_registered ? ` · ${t("acctSalesTax")}` : ""}`),
+      h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => entityDialog(e) }, t("edit")), h("button", { class: "btn", type: "button", onClick: () => entryDialog(true) }, t("acctOpening")), h("button", { class: "btn primary", type: "button", onClick: () => { entryDialog(false); } }, `+ ${t("acctNewEntry")}`))];
+  };
+  const chart = (e) => [h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => accountDialog(null) }, `+ ${t("acctAddAccount")}`)),
+    ...TYPES.map(([ty, key]) => { const rows = accts().filter((a) => a.type === ty).sort((x, y) => x.code.localeCompare(y.code, undefined, { numeric: true }));
+      return rows.length ? h("div", { class: "card" }, h("h3", {}, t(key)), h("table", { class: "acct-table" }, h("tbody", {}, rows.map((a) => h("tr", { class: a.parent_id ? "sub" : "" },
+        h("td", { class: "code" }, a.code), h("td", {}, h("button", { type: "button", class: "link-btn", onClick: () => accountDialog(a) }, accName(a)), a.tax_line ? h("small", { class: "meta" }, ` ${a.tax_line}`) : null), h("td", { class: "num" }, money(natural(a), e.currency)))))) ) : null; })];
+  const journal = (e) => [h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => entryDialog(false) }, `+ ${t("acctNewEntry")}`)),
+    st.journal.length ? h("div", {}, st.journal.map((j) => h("div", { class: "card acct-entry" },
+      h("div", { class: "acct-entry-head" }, h("b", {}, fmt(j.date, { day: "numeric", month: "short", year: "numeric" })), h("span", {}, j.memo || "—"), j.source === "OPENING" ? h("span", { class: "ing-badge" }, t("acctOpening")) : null,
+        h("button", { type: "button", class: "icon-btn", "aria-label": t("delete"), onClick: async () => { if (!(await ask(t("acctDeleteEntry")))) return; try { await api(`/accounting/journal/${j.id}`, { method: "DELETE" }); toast(t("saved")); load(); } catch (x) { toast(errMsg(x)); } } }, "🗑")),
+      h("table", { class: "acct-table" }, h("tbody", {}, j.lines.map((l) => { const a = st.books.accounts.find((x) => x.id === l.account_id); return h("tr", {}, h("td", { class: l.credit_cents ? "indent" : "" }, a ? `${a.code} · ${accName(a)}` : "?"), h("td", { class: "num" }, l.debit_cents ? money(l.debit_cents, e.currency) : ""), h("td", { class: "num" }, l.credit_cents ? money(l.credit_cents, e.currency) : "")); })))))) : h("p", { class: "meta" }, t("acctNoEntries"))];
+  const trial = (e) => {
+    const rows = accts().filter((a) => a.debit_cents || a.credit_cents).sort((x, y) => x.code.localeCompare(y.code, undefined, { numeric: true })).map((a) => { const net = a.debit_cents - a.credit_cents; return { a, d: net > 0 ? net : 0, c: net < 0 ? -net : 0 }; });
+    const d = rows.reduce((s, r) => s + r.d, 0), c = rows.reduce((s, r) => s + r.c, 0);
+    return [h("div", { class: "card" }, h("table", { class: "acct-table" }, h("thead", {}, h("tr", {}, h("th", {}, t("acctAccount")), h("th", { class: "num" }, t("acctDebit")), h("th", { class: "num" }, t("acctCredit")))),
+      h("tbody", {}, rows.map((r) => h("tr", {}, h("td", {}, `${r.a.code} · ${accName(r.a)}`), h("td", { class: "num" }, r.d ? money(r.d, e.currency) : ""), h("td", { class: "num" }, r.c ? money(r.c, e.currency) : "")))),
+      h("tfoot", {}, h("tr", {}, h("th", {}, `${t("acctTotal")} ${d === c ? "✅" : "⚠"}`), h("th", { class: "num" }, money(d, e.currency)), h("th", { class: "num" }, money(c, e.currency))))))];
+  };
+
+  function draw() {
+    const e = ent();
+    const entitiesRow = h("div", { class: "chip-row", role: "tablist", "aria-label": t("acctEntities") }, st.books.entities.map((x) => h("button", { type: "button", role: "tab", class: `chip-btn${x.id === st.sel ? " on" : ""}`, "aria-selected": String(x.id === st.sel), onClick: () => { st.sel = x.id; load(); } }, x.name)), h("button", { type: "button", class: "chip-btn", onClick: () => entityDialog(null) }, `+ ${t("acctAddEntity")}`));
+    const tabs = h("div", { class: "chip-row", role: "tablist" }, [["overview", "acctTabOverview"], ["chart", "acctTabChart"], ["journal", "acctTabJournal"], ["trial", "acctTabTrial"]].map(([id, key]) => h("button", { type: "button", role: "tab", class: `chip-btn${st.tab === id ? " on" : ""}`, "aria-selected": String(st.tab === id), onClick: () => { st.tab = id; load(); } }, t(key))));
+    box.replaceChildren(h("h2", {}, `🧮 ${t("adminAccounting")}`), h("p", { class: "meta" }, t("acctHelp")), entitiesRow,
+      ...(e ? [tabs, ...(st.tab === "overview" ? overview(e) : st.tab === "chart" ? chart(e) : st.tab === "journal" ? journal(e) : trial(e))] : [h("p", { class: "meta" }, t("acctNoEntity"))]));
+  }
+  box.append(h("p", { class: "meta" }, t("loading")));
+  load().catch((e) => box.replaceChildren(h("p", { class: "form-error" }, errorText(e))));
+  return box;
+}
+
 function productsPanel() {
   const box = h("section", { class: "panel products" });
   const st = { list: [], names: [], q: "", filter: "all", channel: "all", check: "all" };
@@ -4247,8 +4390,8 @@ function productsPanel() {
 }
 
 const ADMIN_SECTIONS_MARK = 0;
-const ADMIN_SECTIONS = [["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["contacts", "adminContacts"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
-const ADMIN_ICONS = { contacts: "📞", vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
+const ADMIN_SECTIONS = [["accounting", "adminAccounting"], ["restaurants", "adminRestaurants"], ["vehicles", "adminVehicles"], ["contacts", "adminContacts"], ["staff", "adminStaff"], ["timeoff", "adminTimeOff"], ["payslips", "adminPayslips"], ["incidents", "adminIncidents"], ["communities", "adminCommunities"], ["checklists", "adminChecklists"], ["ingredients", "adminIngredients"], ["products", "adminProducts"], ["targets", "adminTargets"], ["autoschedule", "adminAutoSchedule"], ["messaging", "adminMessaging"], ["usage", "adminUsage"], ["branding", "adminBranding"], ["api", "adminApi"]];
+const ADMIN_ICONS = { contacts: "📞", vehicles: "🚗", autoschedule: "🌙", restaurants: "🏪", staff: "👥", timeoff: "🌴", payslips: "💵", incidents: "⚠️", communities: "🏘️", checklists: "✅", ingredients: "🥬", products: "🛍️", accounting: "🧮", targets: "🎯", messaging: "✉️", usage: "💰", branding: "🎨", api: "🔌", clients: "🏢" };
 state.adminSection = "restaurants";
 // the old Webhooks tab now lives with the API access
 const adminSectionOf = () => (state.adminSection === "webhooks" ? "api" : state.adminSection);
@@ -4297,6 +4440,7 @@ async function renderAdmin() {
     branding: () => [brandingPanel()],
     api: () => [apiPanel(), webhooksPanel()],
     clients: () => [clientsPanel()],
+    accounting: () => [accountingPanel()],
     payslips: () => [payslipsAdminPanel(ov)],
     incidents: () => [incidentsPanel(ov)],
     communities: () => [communitiesPanel(ov)],
@@ -4311,7 +4455,7 @@ async function renderAdmin() {
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "contacts", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "contacts", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients", "accounting"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];

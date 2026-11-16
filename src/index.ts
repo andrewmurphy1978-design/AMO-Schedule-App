@@ -1,4 +1,5 @@
 import { cleanProduct, availability, CHANNELS, type Product } from "./products.ts";
+import { cleanEntity, cleanEntry, ensureChart, TYPES, type AccountLite } from "./accounting.ts";
 import { diffShifts, changesForAi, hasChanges, type SnapShift, type NowShift, type Diff, type MidWeekChange } from "./schedulehistory.ts";
 import { extractInvoice, compareInvoice, INVOICE_MIMES, MAX_INVOICE_BYTES, type PriceChange, type Comparison, type InvoiceLine } from "./invoices.ts";
 import { cleanMethods, cleanSettings, parseSettings as parseOrderSettings, nextWindow, deliveryFor, METHODS, type OrderSettings } from "./supplierorders.ts";
@@ -3139,6 +3140,109 @@ async function unknownIngredients(db: D1Database, cid: number, product: Product,
   if (productId) for (const r of (await db.prepare("SELECT lower(l.ingredient) AS k FROM product_ingredients l JOIN product_formats f ON f.id = l.format_id WHERE f.product_id = ?").bind(productId).all<{ k: string }>()).results) known.add(r.k);
   return names.filter((n) => !known.has(n.toLowerCase()) && !known.has(n.toLocaleLowerCase()));
 }
+// ---------- Accounting (platform owner only): the owner's own books, double-entry ----------
+const acctEntity = (db: D1Database, ownerId: number, id: number) => db.prepare("SELECT id, kind, country FROM acc_entities WHERE id = ? AND owner_id = ?").bind(id, ownerId).first<{ id: number; kind: string; country: string }>();
+const acctAccount = (db: D1Database, ownerId: number, id: number) => db.prepare("SELECT a.id, a.entity_id, a.type, a.is_system, a.subtype FROM acc_accounts a JOIN acc_entities e ON e.id = a.entity_id WHERE a.id = ? AND e.owner_id = ?").bind(id, ownerId).first<{ id: number; entity_id: number; type: string; is_system: number; subtype: string }>();
+const ACCT_ENTITY_COLS = "id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, sort, archived";
+
+app.get("/api/accounting/books", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB;
+  const to = c.req.query("to") && /^\d{4}-\d{2}-\d{2}$/.test(c.req.query("to")!) ? c.req.query("to")! : "9999-12-31";
+  const entities = (await db.prepare(`SELECT ${ACCT_ENTITY_COLS} FROM acc_entities WHERE owner_id = ? AND archived = 0 ORDER BY sort, id`).bind(me.id).all<{ id: number }>()).results;
+  const accounts = (await db.prepare("SELECT a.id, a.entity_id, a.code, a.name, a.name_fr, a.type, a.subtype, a.tax_line, a.gifi, a.parent_id, a.is_system, a.archived FROM acc_accounts a JOIN acc_entities e ON e.id = a.entity_id WHERE e.owner_id = ? AND e.archived = 0 ORDER BY a.code").bind(me.id).all<{ id: number }>()).results;
+  const sums = new Map((await db.prepare("SELECT l.account_id, sum(l.debit_cents) d, sum(l.credit_cents) c FROM acc_journal_lines l JOIN acc_journal_entries j ON j.id = l.entry_id JOIN acc_entities e ON e.id = j.entity_id WHERE e.owner_id = ? AND j.date <= ? GROUP BY l.account_id").bind(me.id, to).all<{ account_id: number; d: number; c: number }>()).results.map((r) => [r.account_id, r]));
+  return c.json({ entities, accounts: accounts.map((a: any) => ({ ...a, debit_cents: sums.get(a.id)?.d ?? 0, credit_cents: sums.get(a.id)?.c ?? 0 })) });
+});
+
+app.post("/api/accounting/entities", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB;
+  const r = cleanEntity(await c.req.json().catch(() => null)); if ("error" in r) return c.json({ error: r.error }, 400);
+  const e = r.entity;
+  if (await db.prepare("SELECT 1 FROM acc_entities WHERE owner_id = ? AND archived = 0 AND lower(name) = ?").bind(me.id, e.name.toLowerCase()).first()) return c.json({ error: "name_taken" }, 409);
+  const id = (await db.prepare("INSERT INTO acc_entities (owner_id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, sort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM acc_entities WHERE owner_id = ?), ?)").bind(me.id, e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, me.id, Date.now()).run()).meta.last_row_id;
+  await ensureChart(db, id);
+  return c.json({ id });
+});
+app.put("/api/accounting/entities/:id", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  if (!(await acctEntity(db, me.id, id))) return c.json({ error: "not_found" }, 404);
+  const r = cleanEntity(await c.req.json().catch(() => null)); if ("error" in r) return c.json({ error: r.error }, 400);
+  const e = r.entity;
+  if (await db.prepare("SELECT 1 FROM acc_entities WHERE owner_id = ? AND archived = 0 AND lower(name) = ? AND id <> ?").bind(me.id, e.name.toLowerCase(), id).first()) return c.json({ error: "name_taken" }, 409);
+  // the kind decides the chart: it cannot change once there are entries
+  const cur = await db.prepare("SELECT kind FROM acc_entities WHERE id = ?").bind(id).first<{ kind: string }>();
+  if (cur?.kind !== e.kind && await db.prepare("SELECT 1 FROM acc_journal_entries WHERE entity_id = ? LIMIT 1").bind(id).first()) return c.json({ error: "kind_locked" }, 409);
+  await db.prepare("UPDATE acc_entities SET name = ?, kind = ?, country = ?, province = ?, currency = ?, fiscal_year_end_month = ?, basis = ?, sales_tax_registered = ?, tax_number = ? WHERE id = ?").bind(e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, id).run();
+  await ensureChart(db, id);
+  return c.json({ ok: true });
+});
+// Entities are archived, never deleted (the entries stay).
+app.delete("/api/accounting/entities/:id", requireSuper, async (c) => {
+  const me = c.get("me") as Me, id = Number(c.req.param("id"));
+  if (!(await acctEntity(c.env.DB, me.id, id))) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("UPDATE acc_entities SET archived = 1 WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+app.post("/api/accounting/entities/:id/accounts", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  if (!(await acctEntity(db, me.id, id))) return c.json({ error: "not_found" }, 404);
+  const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const code = typeof b?.code === "string" ? b.code.trim().slice(0, 12) : "", name = typeof b?.name === "string" ? b.name.trim().slice(0, 80) : "";
+  if (!code || !name) return c.json({ error: "name_required" }, 400);
+  if (!TYPES.includes(b?.type as never)) return c.json({ error: "invalid_type" }, 400);
+  if (await db.prepare("SELECT 1 FROM acc_accounts WHERE entity_id = ? AND code = ?").bind(id, code).first()) return c.json({ error: "code_taken" }, 409);
+  let parent: number | null = null;
+  if (b?.parent_id) { const p = await acctAccount(db, me.id, Number(b.parent_id)); if (!p || p.entity_id !== id || p.type !== b.type) return c.json({ error: "invalid_parent" }, 400); parent = p.id; }
+  const nameFr = typeof b?.name_fr === "string" && b.name_fr.trim() ? b.name_fr.trim().slice(0, 80) : null;
+  const newId = (await db.prepare("INSERT INTO acc_accounts (entity_id, code, name, name_fr, type, subtype, parent_id, sort) VALUES (?, ?, ?, ?, ?, ?, ?, 999)").bind(id, code, name, nameFr, b!.type, b!.bank === true ? (b!.type === "ASSET" ? "BANK" : b!.type === "LIABILITY" ? "CREDIT_CARD" : "OTHER") : "OTHER", parent).run()).meta.last_row_id;
+  return c.json({ id: newId });
+});
+app.put("/api/accounting/accounts/:id", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  const a = await acctAccount(db, me.id, id); if (!a) return c.json({ error: "not_found" }, 404);
+  const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const name = typeof b?.name === "string" ? b.name.trim().slice(0, 80) : "", code = typeof b?.code === "string" ? b.code.trim().slice(0, 12) : "";
+  if (!name || !code) return c.json({ error: "name_required" }, 400);
+  if (await db.prepare("SELECT 1 FROM acc_accounts WHERE entity_id = ? AND code = ? AND id <> ?").bind(a.entity_id, code, id).first()) return c.json({ error: "code_taken" }, 409);
+  const archived = b?.archived === true ? 1 : 0;
+  if (archived && a.is_system) return c.json({ error: "system_account" }, 409);
+  if (archived) { // an account with entries is not archived (the balance would vanish from the books)
+    const used = await db.prepare("SELECT 1 FROM acc_journal_lines WHERE account_id = ? LIMIT 1").bind(id).first();
+    if (used) return c.json({ error: "account_in_use" }, 409);
+  }
+  const nameFr = typeof b?.name_fr === "string" && b.name_fr.trim() ? b.name_fr.trim().slice(0, 80) : null;
+  await db.prepare("UPDATE acc_accounts SET name = ?, name_fr = ?, code = ?, archived = ? WHERE id = ?").bind(name, nameFr, code, archived, id).run();
+  return c.json({ ok: true });
+});
+
+app.get("/api/accounting/entities/:id/journal", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  if (!(await acctEntity(db, me.id, id))) return c.json({ error: "not_found" }, 404);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query("from") ?? "") ? c.req.query("from")! : "0000-01-01", to = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query("to") ?? "") ? c.req.query("to")! : "9999-12-31";
+  const entries = (await db.prepare("SELECT id, date, memo, source, created_at FROM acc_journal_entries WHERE entity_id = ? AND date >= ? AND date <= ? ORDER BY date DESC, id DESC LIMIT 200").bind(id, from, to).all<{ id: number }>()).results;
+  const lines = (await db.prepare("SELECT l.entry_id, l.account_id, l.debit_cents, l.credit_cents, l.memo FROM acc_journal_lines l JOIN acc_journal_entries j ON j.id = l.entry_id WHERE j.entity_id = ? AND j.date >= ? AND j.date <= ? ORDER BY l.id").bind(id, from, to).all<{ entry_id: number }>()).results;
+  const by = new Map<number, unknown[]>(); for (const l of lines) by.set(l.entry_id, [...(by.get(l.entry_id) ?? []), l]);
+  return c.json(entries.map((e) => ({ ...e, lines: by.get(e.id) ?? [] })));
+});
+app.post("/api/accounting/entities/:id/journal", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  if (!(await acctEntity(db, me.id, id))) return c.json({ error: "not_found" }, 404);
+  const accs = new Map((await db.prepare("SELECT id, entity_id, type, subtype, archived FROM acc_accounts WHERE entity_id = ?").bind(id).all<AccountLite>()).results.map((a) => [a.id, a]));
+  const r = cleanEntry(await c.req.json().catch(() => null), id, accs); if ("error" in r) return c.json({ error: r.error }, 400);
+  const en = r.entry;
+  const entryId = (await db.prepare("INSERT INTO acc_journal_entries (entity_id, date, memo, source, created_at) VALUES (?, ?, ?, ?, ?)").bind(id, en.date, en.memo, en.source, Date.now()).run()).meta.last_row_id;
+  await db.batch(en.lines.map((l) => db.prepare("INSERT INTO acc_journal_lines (entry_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)").bind(entryId, l.account_id, l.debit, l.credit, l.memo)));
+  return c.json({ id: entryId });
+});
+app.delete("/api/accounting/journal/:id", requireSuper, async (c) => {
+  const me = c.get("me") as Me, db = c.env.DB, id = Number(c.req.param("id"));
+  const e = await db.prepare("SELECT j.id FROM acc_journal_entries j JOIN acc_entities e ON e.id = j.entity_id WHERE j.id = ? AND e.owner_id = ?").bind(id, me.id).first();
+  if (!e) return c.json({ error: "not_found" }, 404);
+  await db.batch([db.prepare("DELETE FROM acc_journal_lines WHERE entry_id = ?").bind(id), db.prepare("DELETE FROM acc_journal_entries WHERE id = ?").bind(id)]);
+  return c.json({ ok: true });
+});
+
 app.get("/api/admin/products", requireAdmin, async (c) => {
   const today = localNow(c.env.TIMEZONE).slice(0, 10);
   return c.json((await productsOf(c.env.DB, c.get("me").client_id)).map((p) => ({ ...p, availability: availability(p, today) })));
