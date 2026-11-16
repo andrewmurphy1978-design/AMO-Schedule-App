@@ -42,3 +42,18 @@ test("every kind of entity has a chart with unique codes and valid parents", () 
     for (const a of chart) if (a.parent) assert.ok(codes.includes(a.parent), `${kind}: ${a.code} parent`);
   }
 });
+test("the restaurant chart adds the card, online and cash accounts to a business chart", () => {
+  for (const [kind, country] of [["CORPORATION", "CA"], ["SOLE_PROPRIETORSHIP", "CA"]] as const) {
+    const chart = chartFor(kind, country, "RESTAURANT"), codes = chart.map((a) => a.code), byName = (n: string) => chart.find((a) => a.fr === n);
+    assert.equal(new Set(codes).size, codes.length, `${kind} duplicate codes`);
+    for (const n of ["Visa à recevoir", "MasterCard à recevoir", "Débit à recevoir", "En ligne à recevoir"]) assert.ok(byName(n) && byName(n)!.type === "ASSET" && byName(n)!.subtype === "RECEIVABLE", n);
+    assert.ok(byName("Comptant (caisse)") && byName("Comptant (caisse)")!.subtype === "BANK");
+    assert.ok(codes.includes("2300") && codes.includes("4000")); // the base chart is still there (sales taxes...)
+  }
+  assert.equal(chartFor("PERSONAL", "CA", "RESTAURANT").length, chartFor("PERSONAL", "CA").length); // a person is never a restaurant
+  assert.equal(chartFor("CORPORATION", "CA").length, chartFor("CORPORATION", "CA", null).length);
+});
+test("only a business can use the restaurant template", () => {
+  const ok = (raw: object) => { const r = cleanEntity(raw); return "entity" in r ? r.entity.template : "error"; };
+  assert.equal(ok({ name: "Mikes", kind: "CORPORATION", template: "RESTAURANT" }), "RESTAURANT"); assert.equal(ok({ name: "Moi", kind: "PERSONAL", template: "RESTAURANT" }), null); assert.equal(ok({ name: "X", kind: "CORPORATION" }), null);
+});

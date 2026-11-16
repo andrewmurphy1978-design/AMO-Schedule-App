@@ -3143,7 +3143,7 @@ async function unknownIngredients(db: D1Database, cid: number, product: Product,
 // ---------- Accounting (platform owner only): the owner's own books, double-entry ----------
 const acctEntity = (db: D1Database, ownerId: number, id: number) => db.prepare("SELECT id, kind, country FROM acc_entities WHERE id = ? AND owner_id = ?").bind(id, ownerId).first<{ id: number; kind: string; country: string }>();
 const acctAccount = (db: D1Database, ownerId: number, id: number) => db.prepare("SELECT a.id, a.entity_id, a.type, a.is_system, a.subtype FROM acc_accounts a JOIN acc_entities e ON e.id = a.entity_id WHERE a.id = ? AND e.owner_id = ?").bind(id, ownerId).first<{ id: number; entity_id: number; type: string; is_system: number; subtype: string }>();
-const ACCT_ENTITY_COLS = "id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, sort, archived";
+const ACCT_ENTITY_COLS = "id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, template, sort, archived";
 
 app.get("/api/accounting/books", requireSuper, async (c) => {
   const me = c.get("me") as Me, db = c.env.DB;
@@ -3159,7 +3159,7 @@ app.post("/api/accounting/entities", requireSuper, async (c) => {
   const r = cleanEntity(await c.req.json().catch(() => null)); if ("error" in r) return c.json({ error: r.error }, 400);
   const e = r.entity;
   if (await db.prepare("SELECT 1 FROM acc_entities WHERE owner_id = ? AND archived = 0 AND lower(name) = ?").bind(me.id, e.name.toLowerCase()).first()) return c.json({ error: "name_taken" }, 409);
-  const id = (await db.prepare("INSERT INTO acc_entities (owner_id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, sort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM acc_entities WHERE owner_id = ?), ?)").bind(me.id, e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, me.id, Date.now()).run()).meta.last_row_id;
+  const id = (await db.prepare("INSERT INTO acc_entities (owner_id, name, kind, country, province, currency, fiscal_year_end_month, basis, sales_tax_registered, tax_number, template, sort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM acc_entities WHERE owner_id = ?), ?)").bind(me.id, e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, e.template, me.id, Date.now()).run()).meta.last_row_id;
   await ensureChart(db, id);
   return c.json({ id });
 });
@@ -3172,7 +3172,7 @@ app.put("/api/accounting/entities/:id", requireSuper, async (c) => {
   // the kind decides the chart: it cannot change once there are entries
   const cur = await db.prepare("SELECT kind FROM acc_entities WHERE id = ?").bind(id).first<{ kind: string }>();
   if (cur?.kind !== e.kind && await db.prepare("SELECT 1 FROM acc_journal_entries WHERE entity_id = ? LIMIT 1").bind(id).first()) return c.json({ error: "kind_locked" }, 409);
-  await db.prepare("UPDATE acc_entities SET name = ?, kind = ?, country = ?, province = ?, currency = ?, fiscal_year_end_month = ?, basis = ?, sales_tax_registered = ?, tax_number = ? WHERE id = ?").bind(e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, id).run();
+  await db.prepare("UPDATE acc_entities SET name = ?, kind = ?, country = ?, province = ?, currency = ?, fiscal_year_end_month = ?, basis = ?, sales_tax_registered = ?, tax_number = ?, template = ? WHERE id = ?").bind(e.name, e.kind, e.country, e.province, e.currency, e.fiscal_year_end_month, e.basis, e.sales_tax_registered ? 1 : 0, e.tax_number, e.template, id).run();
   await ensureChart(db, id);
   return c.json({ ok: true });
 });

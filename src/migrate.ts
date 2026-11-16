@@ -101,6 +101,7 @@ import m0098 from "../migrations/0098_product_choices.sql";
 import m0099 from "../migrations/0099_product_channels.sql";
 import m0100 from "../migrations/0100_product_verified.sql";
 import m0101 from "../migrations/0101_accounting.sql";
+import m0102 from "../migrations/0102_accounting_template.sql";
 
 const MIGRATIONS: [string, string][] = [
   ["0001_init", m0001],
@@ -204,6 +205,7 @@ const MIGRATIONS: [string, string][] = [
   ["0099_product_channels", m0099],
   ["0100_product_verified", m0100],
   ["0101_accounting", m0101],
+  ["0102_accounting_template", m0102],
 ];
 
 const statements = (sql: string) =>

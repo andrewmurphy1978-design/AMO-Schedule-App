@@ -218,11 +218,49 @@ const LLC_US: ChartAccount[] = [
   a("6230", "Business use of home", "Utilisation de la maison à des fins d'affaires", "EXPENSE", "OPERATING", "Schedule C line 30"),
 ];
 
-export function chartFor(kind: EntityKind, country: string): ChartAccount[] {
+// A restaurant: what the customers pay with is money still to be received (the card companies and the online platforms pay a
+// few days later), sales are split by where they are made (the same three channels as the products), and the usual costs.
+export const RESTAURANT_ACCOUNTS: ChartAccount[] = [
+  a("1050", "Cash on hand (till)", "Comptant (caisse)", "ASSET", "BANK"),
+  a("1110", "Visa receivable", "Visa à recevoir", "ASSET", "RECEIVABLE"),
+  a("1111", "MasterCard receivable", "MasterCard à recevoir", "ASSET", "RECEIVABLE"),
+  a("1112", "Debit receivable", "Débit à recevoir", "ASSET", "RECEIVABLE"),
+  a("1113", "Online receivable", "En ligne à recevoir", "ASSET", "RECEIVABLE"),
+  a("1150", "Food & beverage inventory", "Inventaire de nourriture et de boissons", "ASSET", "OTHER"),
+  a("1155", "Packaging inventory", "Inventaire d'emballages", "ASSET", "OTHER"),
+  a("1530", "Kitchen & restaurant equipment (CCA class 8)", "Équipement de cuisine et de restaurant (DPA catégorie 8)", "ASSET", "FIXED_ASSET"),
+  a("1540", "Leasehold improvements", "Améliorations locatives", "ASSET", "FIXED_ASSET"),
+  a("2430", "Tips payable to employees", "Pourboires à payer aux employés", "LIABILITY", "PAYABLE"),
+  a("2440", "Gift cards payable", "Cartes-cadeaux à honorer", "LIABILITY", "PAYABLE"),
+  a("4100", "Sales — dining room", "Ventes — salle à manger", "INCOME", "REVENUE"),
+  a("4110", "Sales — delivery", "Ventes — livraison", "INCOME", "REVENUE"),
+  a("4120", "Sales — counter orders", "Ventes — commandes comptoir", "INCOME", "REVENUE"),
+  a("4130", "Delivery fees charged", "Frais de livraison facturés", "INCOME", "REVENUE"),
+  a("5100", "Food purchases", "Achats de nourriture", "EXPENSE", "COGS"),
+  a("5110", "Beverage purchases", "Achats de boissons", "EXPENSE", "COGS"),
+  a("5120", "Packaging & containers", "Emballages et contenants", "EXPENSE", "COGS"),
+  a("5130", "Inventory variance & waste", "Écarts d'inventaire et pertes", "EXPENSE", "COGS"),
+  a("6300", "Wages — kitchen", "Salaires — cuisine", "EXPENSE", "OPERATING"),
+  a("6310", "Wages — dining room", "Salaires — salle à manger", "EXPENSE", "OPERATING"),
+  a("6320", "Wages — delivery", "Salaires — livraison", "EXPENSE", "OPERATING"),
+  a("6330", "Franchise royalties", "Redevances de franchise", "EXPENSE", "OPERATING"),
+  a("6340", "Franchise advertising fund", "Fonds de publicité de la franchise", "EXPENSE", "OPERATING"),
+  a("6350", "Card & payment processing fees", "Frais de cartes de crédit et de débit", "EXPENSE", "OPERATING"),
+  a("6360", "Online ordering & delivery platform fees", "Frais des plateformes de commande et de livraison", "EXPENSE", "OPERATING"),
+  a("6370", "Cleaning, laundry & sanitation", "Nettoyage, buanderie et salubrité", "EXPENSE", "OPERATING"),
+  a("6380", "Smallwares & kitchen supplies", "Petits équipements et fournitures de cuisine", "EXPENSE", "OPERATING"),
+  a("6390", "Cash over / short", "Écarts de caisse", "EXPENSE", "OPERATING"),
+  a("6395", "Natural gas, electricity & water", "Gaz naturel, électricité et eau", "EXPENSE", "OPERATING"),
+];
+export const TEMPLATES = ["RESTAURANT"] as const;
+
+/** The chart of an entity: the one of its kind, plus the restaurant accounts when the entity is a restaurant (a business, not a person). */
+export function chartFor(kind: EntityKind, country: string, template?: string | null): ChartAccount[] {
   if (kind === "PERSONAL") return PERSONAL_CA;
-  if (kind === "SOLE_PROPRIETORSHIP") return SOLE_PROP_CA;
-  if (kind === "CORPORATION") return CORP_CA;
-  return country === "US" ? LLC_US : SOLE_PROP_CA;
+  const base = kind === "SOLE_PROPRIETORSHIP" ? SOLE_PROP_CA : kind === "CORPORATION" ? CORP_CA : country === "US" ? LLC_US : SOLE_PROP_CA;
+  if (template !== "RESTAURANT") return base;
+  const have = new Set(base.map((x) => x.code));
+  return [...base, ...RESTAURANT_ACCOUNTS.filter((x) => !have.has(x.code))];
 }
 
 // Defaults for a new entity of each kind.

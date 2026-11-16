@@ -16,7 +16,7 @@ export function toCents(v: unknown): number | null {
   return Math.abs(n * 100 - c) < 1e-6 ? c : null;
 }
 
-export interface EntityInput { name: string; kind: EntityKind; country: string; province: string | null; currency: string; fiscal_year_end_month: number; basis: "CASH" | "ACCRUAL"; sales_tax_registered: boolean; tax_number: string | null }
+export interface EntityInput { name: string; kind: EntityKind; country: string; province: string | null; currency: string; fiscal_year_end_month: number; basis: "CASH" | "ACCRUAL"; sales_tax_registered: boolean; tax_number: string | null; template: "RESTAURANT" | null }
 
 /** An entity as typed in the form, cleaned, with the defaults of its kind. */
 export function cleanEntity(raw: unknown): { entity: EntityInput } | { error: string } {
@@ -30,7 +30,7 @@ export function cleanEntity(raw: unknown): { entity: EntityInput } | { error: st
   const month = Number(r.fiscal_year_end_month ?? 12);
   if (!Number.isInteger(month) || month < 1 || month > 12) return { error: "invalid_month" };
   const basis = r.basis === "ACCRUAL" || r.basis === "CASH" ? r.basis : (d.basis as "CASH" | "ACCRUAL");
-  return { entity: { name, kind, country, province: text(r.province, 3)?.toUpperCase() ?? null, currency, fiscal_year_end_month: month, basis, sales_tax_registered: r.sales_tax_registered === true || r.sales_tax_registered === 1, tax_number: text(r.tax_number, 40) } };
+  return { entity: { name, kind, country, province: text(r.province, 3)?.toUpperCase() ?? null, currency, fiscal_year_end_month: month, basis, sales_tax_registered: r.sales_tax_registered === true || r.sales_tax_registered === 1, tax_number: text(r.tax_number, 40), template: r.template === "RESTAURANT" && kind !== "PERSONAL" ? "RESTAURANT" : null } };
 }
 
 export interface Line { account_id: number; debit: number; credit: number; memo: string | null } // cents
@@ -74,10 +74,10 @@ export function trialTotals(rows: { debit: number; credit: number }[]): { debit:
 
 /** Creates the chart of accounts of an entity from the template of its kind (accounts already there are kept). */
 export async function ensureChart(db: D1Database, entityId: number): Promise<void> {
-  const e = await db.prepare("SELECT kind, country FROM acc_entities WHERE id = ?").bind(entityId).first<{ kind: EntityKind; country: string }>();
+  const e = await db.prepare("SELECT kind, country, template FROM acc_entities WHERE id = ?").bind(entityId).first<{ kind: EntityKind; country: string; template: string | null }>();
   if (!e) return;
   const have = new Map((await db.prepare("SELECT id, code, template_code FROM acc_accounts WHERE entity_id = ?").bind(entityId).all<{ id: number; code: string; template_code: string | null }>()).results.map((a) => [a.template_code ?? a.code, a.id]));
-  const chart = chartFor(e.kind, e.country);
+  const chart = chartFor(e.kind, e.country, e.template);
   const missing = chart.filter((a) => !have.has(a.code));
   const stmts = missing.map((a, i) => db.prepare("INSERT INTO acc_accounts (entity_id, code, template_code, name, name_fr, type, subtype, tax_line, gifi, deductible_pct, is_system, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(entityId, a.code, a.code, a.en, a.fr, a.type, a.subtype, a.taxLine ?? null, usesGifi(e.kind, e.country) ? suggestGifi(e.kind, { code: a.code, name: a.en, type: a.type, subtype: a.subtype }) : null, a.deductiblePct ?? 100, a.system ? 1 : 0, i));

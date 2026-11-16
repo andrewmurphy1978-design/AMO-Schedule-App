@@ -4096,13 +4096,15 @@ function accountingPanel() {
     const currency = h("input", { value: e?.currency ?? "CAD", maxLength: 3 });
     const month = h("select", {}, Array.from({ length: 12 }, (_, i) => h("option", { value: i + 1, selected: (e?.fiscal_year_end_month ?? 12) === i + 1 }, new Date(2026, i, 1).toLocaleDateString(locale(), { month: "long" }))));
     const basis = h("select", {}, [["CASH", "acctBasisCash"], ["ACCRUAL", "acctBasisAccrual"]].map(([id, key]) => h("option", { value: id, selected: (e?.basis ?? "CASH") === id }, t(key))));
+    const template = h("select", { "aria-label": t("acctTemplate") }, [["", "acctTemplateGeneric"], ["RESTAURANT", "acctTemplateRestaurant"]].map(([id, key]) => h("option", { value: id, selected: (e ? e.template ?? "" : "RESTAURANT") === id }, t(key))));
+    const templateRow = f(t("acctTemplate"), template), showTemplate = () => { templateRow.hidden = kind.value === "PERSONAL"; }; showTemplate();
     const reg = h("input", { type: "checkbox", checked: !!e?.sales_tax_registered });
     const taxNo = h("input", { value: e?.tax_number ?? "", maxLength: 40 });
     const err = h("p", { class: "form-error", role: "alert", hidden: true });
-    kind.addEventListener("change", () => { if (kind.value === "LLC") { country.value = "US"; currency.value = "USD"; } else if (kind.value === "CORPORATION") basis.value = "ACCRUAL"; });
+    kind.addEventListener("change", () => { showTemplate(); if (kind.value === "LLC") { country.value = "US"; currency.value = "USD"; } else if (kind.value === "CORPORATION") basis.value = "ACCRUAL"; });
     dlg.replaceChildren(h("form", { class: "modal-body", onSubmit: async (ev) => {
       ev.preventDefault(); err.hidden = true;
-      const body = { name: name.value, kind: kind.value, country: country.value, province: province.value, currency: currency.value, fiscal_year_end_month: Number(month.value), basis: basis.value, sales_tax_registered: reg.checked, tax_number: taxNo.value };
+      const body = { name: name.value, kind: kind.value, country: country.value, province: province.value, currency: currency.value, fiscal_year_end_month: Number(month.value), basis: basis.value, sales_tax_registered: reg.checked, tax_number: taxNo.value, template: kind.value === "PERSONAL" ? null : template.value || null };
       try { const r = await api(e ? `/accounting/entities/${e.id}` : "/accounting/entities", { method: e ? "PUT" : "POST", body }); if (!e) st.sel = r.id; toast(t("saved")); dlg.close(); load(); }
       catch (x) { err.textContent = `⚠ ${errMsg(x)}`; err.hidden = false; }
     } },
@@ -4110,7 +4112,7 @@ function accountingPanel() {
       f(t("acctName"), name), f(t("acctKind"), kind),
       h("div", { class: "ing-two" }, f(t("acctCountry"), country), f(t("acctProvince"), province)),
       h("div", { class: "ing-two" }, f(t("acctCurrency"), currency), f(t("acctFiscalEnd"), month)),
-      f(t("acctBasis"), basis),
+      templateRow, f(t("acctBasis"), basis),
       h("label", { class: "check" }, reg, h("span", {}, t("acctSalesTax"))), f(t("acctTaxNumber"), taxNo),
       h("div", { class: "actions" },
         e ? h("button", { class: "btn danger", type: "button", onClick: async () => { if (!(await ask(t("acctArchiveEntity").replace("{n}", e.name)))) return; try { await api(`/accounting/entities/${e.id}`, { method: "DELETE" }); toast(t("saved")); dlg.close(); load(); } catch (x) { toast(errMsg(x)); } } }, t("acctArchive")) : null,
@@ -4175,7 +4177,7 @@ function accountingPanel() {
     const net = sum("INCOME") - sum("EXPENSE");
     const tile = (label, v, cls = "") => h("div", { class: `acct-tile ${cls}` }, h("small", {}, label), h("b", {}, money(v, e.currency)));
     return [h("div", { class: "acct-tiles" }, tile(t("acctTypeAsset"), sum("ASSET")), tile(t("acctTypeLiability"), sum("LIABILITY")), tile(t("acctTypeEquity"), sum("EQUITY") + net, ""), tile(t("acctTypeIncome"), sum("INCOME")), tile(t("acctTypeExpense"), sum("EXPENSE")), tile(t("acctNetIncome"), net, net < 0 ? "bad" : "ok")),
-      h("p", { class: "meta" }, `${kindLabel(e.kind)} · ${e.country}${e.province ? ` ${e.province}` : ""} · ${e.currency} · ${t(e.basis === "CASH" ? "acctBasisCash" : "acctBasisAccrual")}${e.sales_tax_registered ? ` · ${t("acctSalesTax")}` : ""}`),
+      h("p", { class: "meta" }, `${kindLabel(e.kind)}${e.template ? ` · ${t("acctTemplateRestaurant")}` : ""} · ${e.country}${e.province ? ` ${e.province}` : ""} · ${e.currency} · ${t(e.basis === "CASH" ? "acctBasisCash" : "acctBasisAccrual")}${e.sales_tax_registered ? ` · ${t("acctSalesTax")}` : ""}`),
       h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => entityDialog(e) }, t("edit")), h("button", { class: "btn", type: "button", onClick: () => entryDialog(true) }, t("acctOpening")), h("button", { class: "btn primary", type: "button", onClick: () => { entryDialog(false); } }, `+ ${t("acctNewEntry")}`))];
   };
   const chart = (e) => [h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onClick: () => accountDialog(null) }, `+ ${t("acctAddAccount")}`)),
@@ -4455,7 +4457,7 @@ async function renderAdmin() {
   };
   // the menu in groups, like an accordion: Personnel (people) and Restaurants (the places and what they use); opening one closes the other
   const labelOf = Object.fromEntries(ADMIN_SECTIONS);
-  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "contacts", "messaging", "ingredients", "products", "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients", "accounting"]]] : [])];
+  const groups = [["staffGroup", "adminGroupStaff", ["staff", "timeoff", "payslips", "incidents", "communities", "targets", "autoschedule", "checklists"]], ["restaurantsGroup", "adminGroupRestaurants", ["restaurants", "vehicles", "contacts", "messaging", "ingredients", "products", ...(state.me.me.is_super ? ["accounting"] : []), "usage", "branding", "api"]], ...(state.me.me.is_super ? [["platformGroup", "adminGroupPlatform", ["clients"]]] : [])];
   const current = adminSectionOf();
   // first time (or when the open group does not hold the section being shown): open the group of the current section
   if (state.adminGroup === undefined) state.adminGroup = groups.find(([, , ids]) => ids.includes(current))?.[0] ?? groups[0][0];
